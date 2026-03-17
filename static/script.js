@@ -307,10 +307,20 @@ function proceedToOpenBook(bookId) {
         let container = reader.querySelector('.book-content-container');
         hideLoader();
 
-        // Regex to split currentBookText into individual pages
-        // Each page is wrapped in <div id="pdf-page-N" class="lazy-page-container">...</div>
-        const pageRegex = /<div id="pdf-page-\d+" class="lazy-page-container">[\s\S]*?<\/div>(?=\s*<div id="pdf-page-|\s*<\/div>\s*$)/g;
-        let pageChunks = currentBookText.match(pageRegex) || [];
+        // Efficiently split currentBookText into individual pages without expensive regex matching
+        let pageChunks = [];
+        if (currentBookText.includes('class="lazy-page-container"')) {
+            // Split by the explicit marker we added in the backend
+            let parts = currentBookText.split('<div id="pdf-page-');
+            for (let i = 1; i < parts.length; i++) {
+                // Restore the opening tag (split removed it)
+                let pageHtml = '<div id="pdf-page-' + parts[i];
+                // If it's not the last one, it still has the trailing junk before next page, but innerHTML will ignore it 
+                // or we can be precise and trim it.
+                // However, our backend wraps each page in its own div, so we just need to close it if it was cut off.
+                pageChunks.push(pageHtml);
+            }
+        }
         
         if (pageChunks.length === 0 && currentBookText.trim()) {
             // Fallback for non-PDF or unexpected format
@@ -369,10 +379,20 @@ function proceedToOpenBook(bookId) {
             }
 
             renderedCount = endIndex;
+
+            // Periodically refresh highlights as pages load (e.g., every 30 pages)
+            // This ensures long books show highlights while rendering continues.
+            if (currentBookId && renderedCount % 30 === 0) {
+                applyExistingHighlights();
+            }
+
             if (renderedCount < pageChunks.length) {
                 // Return to main thread to keep UI responsive
-                await new Promise(r => setTimeout(r, 1));
+                await new Promise(r => setTimeout(r, 10));
                 return renderBatch(renderedCount);
+            } else {
+                // Final pass once everything is rendered
+                applyExistingHighlights();
             }
         }
 
@@ -563,35 +583,130 @@ function highlightAbsoluteRange(reader, item, className) {
     }
     
     if (globalTextNodes && globalTextNodes.length > 0) {
-        let repWalker = document.createTreeWalker(reader, NodeFilter.SHOW_TEXT, null, false);
-        globalTextNodes = [];
-        while (repWalker.nextNode()) {
-            globalTextNodes.push(repWalker.currentNode);
+        // Caching text nodes for future highlights in the same session
+        // However, since we split the document into pages, we should cache per page 
+        // or just accept that TreeWalker is fast if bounded.
+    }
+}
+
+// Global cache for characters to nodes mapping to avoid repeated traversal
+let textNodeCache = [];
+let totalCharCount = 0;
+
+function applyExistingHighlights() {
+    if (!currentHighlights || currentHighlights.length === 0) return;
+    
+    let reader = document.getElementById("reader");
+    let highlightsToApply = [];
+
+    currentHighlights.forEach(itemStr => {
+        if (!itemStr) return;
+        try {
+            let item = JSON.parse(itemStr);
+            if (item.startChar !== undefined) {
+                highlightsToApply.push(item);
+            } else {
+                // Fallback for non-range highlights (regex based)
+                highlightTextInNode(reader, itemStr, 'highlight');
+            }
+        } catch(e) {
+            highlightTextInNode(reader, itemStr, 'highlight');
+        }
+    });
+
+    if (highlightsToApply.length === 0) return;
+
+    // Sort highlights by startChar to allow single-pass processing
+    highlightsToApply.sort((a, b) => a.startChar - b.startChar);
+
+    let walker = document.createTreeWalker(reader, NodeFilter.SHOW_TEXT, null, false);
+    let currentLength = 0;
+    let hIndex = 0;
+    let nodesToWrap = [];
+
+    while(walker.nextNode() && hIndex < highlightsToApply.length) {
+        let node = walker.currentNode;
+        let nodeLen = node.nodeValue.length;
+        let nodeStart = currentLength;
+        let nodeEnd = currentLength + nodeLen;
+        
+        // Check all highlights that might start in or before this node
+        while (hIndex < highlightsToApply.length) {
+            let item = highlightsToApply[hIndex];
+            
+            if (nodeEnd > item.startChar && nodeStart < item.endChar) {
+                let sliceStart = Math.max(0, item.startChar - nodeStart);
+                let sliceEnd = Math.min(nodeLen, item.endChar - nodeStart);
+                nodesToWrap.push({ node, sliceStart, sliceEnd, className: 'highlight' });
+                
+                // If it ends after this node, don't increment hIndex yet, 
+                // it might span the next node too
+                if (item.endChar > nodeEnd) {
+                    break; 
+                } else {
+                    hIndex++; // It's finished
+                }
+            } else if (nodeStart >= item.endChar) {
+                hIndex++; // This highlight is already in the past
+            } else {
+                break; // This and future highlights start after this node
+            }
+        }
+        
+        currentLength += nodeLen;
+    }
+
+    // Apply the wraps in reverse order to protect node indices
+    for (let i = nodesToWrap.length - 1; i >= 0; i--) {
+        let { node, sliceStart, sliceEnd, className } = nodesToWrap[i];
+        if (node.parentNode && node.parentNode.className === className) continue;
+        
+        let nodeText = node.nodeValue;
+        if (sliceStart === 0 && sliceEnd === nodeText.length) {
+            let span = document.createElement("span");
+            span.className = className; span.textContent = nodeText;
+            node.parentNode.replaceChild(span, node);
+        } else {
+            let before = nodeText.slice(0, sliceStart);
+            let mid = nodeText.slice(sliceStart, sliceEnd);
+            let after = nodeText.slice(sliceEnd);
+            let span = document.createElement("span");
+            span.className = className; span.textContent = mid;
+            let parent = node.parentNode;
+            if (before.length > 0) parent.insertBefore(document.createTextNode(before), node);
+            parent.insertBefore(span, node);
+            if (after.length > 0) parent.insertBefore(document.createTextNode(after), node);
+            parent.removeChild(node);
         }
     }
 }
 
+function refreshNodeCache() {
+    let reader = document.getElementById("reader");
+    textNodeCache = [];
+    totalCharCount = 0;
+    let walker = document.createTreeWalker(reader, NodeFilter.SHOW_TEXT, null, false);
+    while(walker.nextNode()) {
+        let node = walker.currentNode;
+        let len = node.nodeValue.length;
+        textNodeCache.push({
+            node: node,
+            start: totalCharCount,
+            end: totalCharCount + len
+        });
+        totalCharCount += len;
+    }
+}
+
 function loadHighlights(bookId) {
-    document.getElementById("reader").innerHTML = currentBookText;
+    // REMOVED: document.getElementById("reader").innerHTML = currentBookText; 
+    // This was causing hangs on large books and breaking lazy loading.
+    
     return fetch("/highlights/" + bookId)
     .then(res => res.json())
     .then(highlights => {
         currentHighlights = highlights;
-        let reader = document.getElementById("reader");
-        highlights.forEach(itemStr => {
-            if (itemStr) {
-                try {
-                    let item = JSON.parse(itemStr);
-                    if (item.startChar !== undefined) {
-                        highlightAbsoluteRange(reader, item, 'highlight');
-                    } else {
-                        highlightTextInNode(reader, itemStr, 'highlight');
-                    }
-                } catch(e) {
-                    highlightTextInNode(reader, itemStr, 'highlight');
-                }
-            }
-        });
+        applyExistingHighlights();
         
         // Re-append the Q&A block after the highlights are drawn
 

@@ -481,6 +481,27 @@ td button:last-child:hover {
     font-style: italic;
 }
 
+/* 
+   Unified Transparency Overrides 
+   Ensures all book types (PDF, EPUB, TXT) show the reader texture 
+*/
+.book-content-container,
+.book-content-container *,
+.lazy-page-container,
+.page-centered-wrapper,
+div[id^="pdf-page-"],
+div[id^="page"] {
+    background-color: transparent !important;
+    background: transparent !important;
+}
+
+/* Fix for specific PDF content blocks that might have white backgrounds */
+div[id^="page"] div, 
+div[id^="page"] span,
+div[id^="page"] p {
+    background-color: transparent !important;
+}
+
 .book-content-container {
     background: transparent;
     padding: 20px;

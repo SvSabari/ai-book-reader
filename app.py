@@ -273,9 +273,9 @@ def extract_epub_html(file_path):
 def extract_pptx_html(file_path):
     import pptx
     prs = pptx.Presentation(file_path)
-    html = "<div style='background: #f0f0f0; padding: 20px; font-family: sans-serif;'>"
+    html = "<div class='pptx-content-wrapper'>"
     for i, slide in enumerate(prs.slides):
-        html += f"<div style='background: white; border: 1px solid #ccc; margin-bottom: 20px; padding: 40px; aspect-ratio: 16/9; position: relative;'><h3 style='color: #888; font-size: 14px;'>Slide {i+1}</h3>"
+        html += f"<div class='pptx-slide' style='border: 1px solid rgba(0,0,0,0.1); margin-bottom: 20px; padding: 40px; aspect-ratio: 16/9; position: relative;'><h3 style='color: #888; font-size: 14px;'>Slide {i+1}</h3>"
         for shape in slide.shapes:
             if hasattr(shape, "text") and shape.text.strip():
                 text = shape.text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
@@ -288,7 +288,7 @@ def extract_pptx_html(file_path):
 def extract_txt_html(file_path):
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
         text = f.read().replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
-        return f"<div style='background: white; padding: 40px; font-family: monospace; line-height: 1.5; color: black;'>{text}</div>"
+        return f"<div class='txt-content-wrapper' style='padding: 40px; font-family: monospace; line-height: 1.5;'>{text}</div>"
 
 
 def extract_book_html(file_path):
