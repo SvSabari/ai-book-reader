@@ -1,24 +1,24 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
 :root {
-    --bg-app: #fcf8e8;
-    --bg-sidebar: linear-gradient(180deg, #f7f1d5 0%, #ede3b4 100%);
-    --bg-panel: rgba(255, 255, 255, 0.6);
-    --text-main: #3e362e;
-    --text-light: #8c7e6d;
-    --text-white: #fdfdfd;
-    --primary: #8b5cf6;
-    --primary-hover: #7c3aed;
-    --accent: #d946ef;
-    --border: rgba(140, 126, 109, 0.2);
-    --shadow-sm: 0 2px 4px 0 rgba(140, 126, 109, 0.05);
-    --shadow: 0 4px 6px -1px rgba(140, 126, 109, 0.1), 0 2px 4px -2px rgba(140, 126, 109, 0.1);
-    --shadow-lg: 0 20px 25px -5px rgba(140, 126, 109, 0.1), 0 8px 10px -6px rgba(140, 126, 109, 0.05);
+    --bg-app: #1c110a;
+    --bg-sidebar: linear-gradient(180deg, #deccaf 0%, #c4aa82 100%);
+    --bg-panel: rgba(0, 0, 0, 0.08);
+    --text-main: #332115;
+    --text-light: #695240;
+    --text-white: #fbf5e9;
+    --primary: #944c20;
+    --primary-hover: #b5612c;
+    --accent: #5c3924;
+    --border: rgba(105, 82, 64, 0.2);
+    --shadow-sm: 0 2px 4px 0 rgba(70, 50, 30, 0.05);
+    --shadow: 0 4px 6px -1px rgba(70, 50, 30, 0.1), 0 2px 4px -2px rgba(70, 50, 30, 0.1);
+    --shadow-lg: 0 20px 25px -5px rgba(70, 50, 30, 0.2), 0 8px 10px -6px rgba(70, 50, 30, 0.1);
     --radius: 12px;
-    --highlight: rgba(251, 191, 36, 0.4);
+    --highlight: rgba(251, 191, 36, 0.5);
     --find-highlight: rgba(134, 239, 172, 0.6);
     --reading-mark: rgba(56, 189, 248, 0.4);
-    --modal-bg: rgba(62, 54, 46, 0.85);
+    --modal-bg: rgba(43, 27, 18, 0.85);
     --book-width: 500px;
     --book-height: 700px;
 }
@@ -267,9 +267,9 @@ td button:last-child:hover {
     height: 100vh;
     position: relative;
     /* Deep desk ambient background */
-    background: #3e2723;
-    background-image: radial-gradient(circle at center top, #5d4037 0%, #211a19 100%);
-    box-shadow: inset 10px 0 20px rgba(0,0,0,0.5);
+    background: #25160d;
+    background-image: radial-gradient(circle at center top, #4a2f1c 0%, #170d07 100%);
+    box-shadow: inset 10px 0 20px rgba(0,0,0,0.6);
 }
 
 .reader-header {
@@ -415,34 +415,17 @@ td button:last-child:hover {
     max-width: 100%;
     height: calc(100vh - 120px);
     
-    /* Dual Page Spread Simulation */
-    background: #fdfaf6;
+    /* Single Page Parchment Texture (Lighter) */
+    background-color: #e8dcc7;
     background-image: 
-        /* The spine shadow */
-        linear-gradient(to right, 
-            rgba(255,255,255,0) 48.5%, 
-            rgba(0,0,0,0.12) 49.5%, 
-            rgba(0,0,0,0.25) 50%, 
-            rgba(0,0,0,0.12) 50.5%, 
-            rgba(255,255,255,0) 51.5%),
-        /* Left page subtle curve lighting */
-        linear-gradient(to right, 
-            rgba(0,0,0,0.04) 0%, 
-            rgba(255,255,255,0.6) 15%, 
-            rgba(255,255,255,0) 40%),
-        /* Right page subtle curve lighting */
-        linear-gradient(to left, 
-            rgba(0,0,0,0.04) 0%, 
-            rgba(255,255,255,0.6) 15%, 
-            rgba(255,255,255,0) 40%),
-        /* Base page color */
-        linear-gradient(to right, #fcfaf0 0%, #f7f1e0 100%);
+        /* Lightening overlay */
+        linear-gradient(rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0.35)),
+        /* Parchement Texture */
+        url('/static/paper_bg.png');
+    background-size: cover, cover;
 
-    border-radius: 4px 12px 12px 4px;
-    box-shadow: 
-        inset 1px 0 0px #ab9a82,
-        0 20px 40px -10px rgba(0, 0, 0, 0.2), 
-        0 4px 15px rgba(0,0,0,0.1); 
+    border-radius: 12px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
 
     position: relative;
     /* Extra padding pushes text out of the spine and edges */
@@ -508,7 +491,7 @@ div[id^="page"] p:not(.highlight):not(.reading-mark) {
     font-family: inherit;
     line-height: 1.85;
     font-size: 1.1rem;
-    color: #2c2724;
+    color: #3b2a1a;
     width: 100%;
 }
 
@@ -520,44 +503,9 @@ div[id^="page"] p:not(.highlight):not(.reading-mark) {
     margin-bottom: 30px;
 }
 
-/* Simulate the stacked pages edge on the right */
-.reader-box::after {
-    content: '';
-    position: absolute;
-    top: 4px;
-    bottom: 4px;
-    right: -5px;
-    width: 5px;
-    background: repeating-linear-gradient(
-      to bottom,
-      #ecdacc,
-      #ecdacc 1px,
-      #e0cbb9 1px,
-      #e0cbb9 2px
-    );
-    border-radius: 0 4px 4px 0;
-    box-shadow: 2px 0 4px rgba(0,0,0,0.2);
-    z-index: -1;
-}
-
-/* Simulate the stacked pages edge on the bottom */
-.reader-box::before {
-    content: '';
-    position: absolute;
-    bottom: -5px;
-    left: 8px;
-    right: 8px;
-    height: 5px;
-    background: repeating-linear-gradient(
-      to right,
-      #ecdacc,
-      #ecdacc 1px,
-      #e0cbb9 1px,
-      #e0cbb9 2px
-    );
-    border-radius: 0 0 4px 4px;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-    z-index: -1;
+/* Stacked pages edges disabled for single page view */
+.reader-box::after, .reader-box::before {
+    display: none;
 }
 
 .reader-box p {
@@ -1332,4 +1280,42 @@ body { top: 0 !important; }
     color: #000 !important;
     font-weight: bold;
     border-radius: 2px;
+}
+
+/* ============================= Storyteller Animation ============================= */
+.storyteller-bot {
+    position: absolute;
+    bottom: 30px;
+    right: 40px;
+    display: flex;
+    align-items: center;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    padding: 0;
+    backdrop-filter: none;
+    z-index: 9999;
+    animation: slideUpIn 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+    pointer-events: none;
+}
+
+@keyframes slideUpIn {
+    from { transform: translateY(100px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+}
+
+.storyteller-image {
+    width: 150px;
+    height: auto;
+    object-fit: contain;
+    margin-bottom: 0;
+    border-radius: 0;
+    box-shadow: none;
+    filter: drop-shadow(0 4px 10px rgba(0,0,0,0.5));
+    transform: scaleX(-1);
+}
+
+@keyframes bounceBot {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-3px); }
 }

@@ -609,6 +609,33 @@ def delete_book(book_id):
     return jsonify({"message": "Book deleted successfully"})
 
 
+@app.route("/download/<int:book_id>")
+def download_book(book_id):
+    from urllib.parse import quote
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT path, name FROM books WHERE id = ?", (book_id,))
+    book = cur.fetchone()
+    conn.close()
+
+    if not book:
+        return "Book not found", 404
+
+    file_path, name = book
+    if not file_path or not os.path.exists(file_path):
+        return "File not found", 404
+
+    response = send_from_directory(
+        os.path.dirname(file_path),
+        os.path.basename(file_path),
+        as_attachment=True
+    )
+    # Ensure browsers don't fallback to UUIDs by explicitly encoding the filename
+    encoded_name = quote(name)
+    response.headers["Content-Disposition"] = f"attachment; filename=\"{name}\"; filename*=UTF-8''{encoded_name}"
+    return response
+
+
 @app.route("/original/<int:book_id>")
 def original_book(book_id):
     conn = get_conn()

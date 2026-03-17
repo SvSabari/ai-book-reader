@@ -136,13 +136,18 @@ function loadBooks() {
                 ? `<button onclick="openBook(${book[0]})">Open</button>`
                 : `<button disabled style="opacity:0.4;cursor:not-allowed;">Open</button>`;
 
+            let downloadBtn = status === "ready"
+                ? `<button onclick="downloadBook(${book[0]}, '${book[1].replace(/'/g, "\\'")}')">Download</button>`
+                : `<button disabled style="opacity:0.4;cursor:not-allowed;">Download</button>`;
+
             tr.innerHTML = `
                 <td style="width: 100%; max-width: 0; padding-right: 12px;">
                     <div style="font-weight: 600; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.95rem;">${book[1]}${badge}</div>
                     <div style="font-size: 0.75rem; color: var(--text-light);">${book[2]}</div>
                 </td>
-                <td style="text-align: right; width: 65px;">
+                <td style="text-align: right; width: 80px; vertical-align: middle;">
                     ${openBtn}
+                    ${downloadBtn}
                     <button onclick="deleteBook(${book[0]})">Delete</button>
                 </td>
             `;
@@ -440,6 +445,15 @@ function proceedToOpenBook(bookId) {
         hideLoader();
         alert("Could not open book");
     });
+}
+
+function downloadBook(bookId, bookName) {
+    const a = document.createElement("a");
+    a.href = "/download/" + bookId;
+    a.download = bookName; 
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
 }
 
 function deleteBook(bookId) {
@@ -811,6 +825,8 @@ function readAloud() {
     let playPauseBtn = document.getElementById("playPauseBtn");
     if(playPauseBtn) playPauseBtn.innerText = "Pause ⏸";
 
+    startStoryAnimation();
+
     // removeReadingMarks now moved to global scope
 
     let remainingText = text.substring(currentAbsoluteCharIndex);
@@ -903,6 +919,9 @@ function resumeReadingFromIndex(index, startPaused = false) {
     let playPauseBtn = document.getElementById("playPauseBtn");
     if(playPauseBtn) playPauseBtn.innerText = startPaused ? "Resume ▶" : "Pause ⏸";
     
+    if (startPaused) pauseStoryAnimation();
+    else startStoryAnimation();
+
     let reader = document.getElementById("reader");
     let walker = document.createTreeWalker(reader, NodeFilter.SHOW_TEXT, null, false);
     globalTextNodes = [];
@@ -1017,9 +1036,38 @@ function stopReading() {
     isPaused = false;
     lastHighlightPos = -1;
     removeReadingMarks();
+    hideStoryAnimation();
     
     let playPauseBtn = document.getElementById("playPauseBtn");
     if(playPauseBtn) playPauseBtn.innerText = "Read Full ▶";
+}
+
+function startStoryAnimation() {
+    let anim = document.getElementById("storytellerAnimation");
+    if (anim) {
+        anim.style.display = "flex";
+        let img = anim.querySelector('.storyteller-image');
+        if (img) {
+            img.src = '/static/storyteller_man_transparent.gif';
+        }
+    }
+}
+
+function pauseStoryAnimation() {
+    let anim = document.getElementById("storytellerAnimation");
+    if (anim) {
+        let img = anim.querySelector('.storyteller-image');
+        if (img) {
+            img.src = '/static/storyteller_man_transparent_static.png';
+        }
+    }
+}
+
+function hideStoryAnimation() {
+    let anim = document.getElementById("storytellerAnimation");
+    if (anim) {
+        anim.style.display = "none";
+    }
 }
 
 function togglePlayPause() {
@@ -1033,11 +1081,13 @@ function togglePlayPause() {
             else window.speechSynthesis.resume();
             isPaused = false;
             if(playPauseBtn) playPauseBtn.innerText = "Pause ⏸";
+            startStoryAnimation();
         } else {
             if (currentFallbackAudio) currentFallbackAudio.pause();
             else window.speechSynthesis.pause();
             isPaused = true;
             if(playPauseBtn) playPauseBtn.innerText = "Resume ▶";
+            pauseStoryAnimation();
         }
     }
 }
@@ -1157,6 +1207,8 @@ function readSelectedText() {
     let playPauseBtn = document.getElementById("playPauseBtn");
     if(playPauseBtn) playPauseBtn.innerText = "Pause ⏸";
     
+    startStoryAnimation();
+
     let lang = getSelectedLanguage();
     let shortLang = lang ? lang.split('-')[0].toLowerCase() : 'en';
     
