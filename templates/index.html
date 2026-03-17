@@ -41,13 +41,6 @@
             </table>
         </div>
 
-        <div class="dictionary-section">
-            <h2>Dictionary</h2>
-            <div class="input-group">
-                <input type="text" id="word" placeholder="Enter word to search..." onchange="searchMeaning()">
-            </div>
-            <p id="meaning"></p>
-        </div>
 
     </aside>
 
@@ -84,6 +77,12 @@
                     </select>
                 </div>
                 
+                <div class="zoom-controls">
+                    <button class="btn-zoom" onclick="changeZoom(-0.1)" title="Zoom Out">−</button>
+                    <span id="zoomLevel" class="zoom-level">100%</span>
+                    <button class="btn-zoom" onclick="changeZoom(0.1)" title="Zoom In">+</button>
+                </div>
+
                 <button class="btn-icon" onclick="document.getElementById('findBox').style.display='flex'; document.getElementById('findInput').focus();">
                     🔍 Find
                 </button>
@@ -129,7 +128,7 @@
                         <li></li>
                     </ul>
                 </div>
-                <p id="loaderText" style="margin-top: 24px; color: #94a3b8; font-weight: 500; letter-spacing: 1px;">Loading book...</p>
+                <p id="loaderText" style="margin-top: 24px; color: var(--text-light); font-weight: 500; letter-spacing: 1px;">Loading book...</p>
             </div>
 
             <!-- Translation Loader Animation Container -->
@@ -138,7 +137,7 @@
                     <div class="box box-en">A</div>
                     <div class="box box-tr">文</div>
                 </div>
-                <p id="translationLoaderText" style="margin-top: 36px; color: #94a3b8; font-weight: 500; letter-spacing: 1px;">Translating language...</p>
+                <p id="translationLoaderText" style="margin-top: 36px; color: var(--text-light); font-weight: 500; letter-spacing: 1px;">Translating language...</p>
             </div>
             
             <!-- Unique Closing Animation Container -->
@@ -148,12 +147,12 @@
                     <div class="closing-pages"></div>
                     <div class="closing-back"></div>
                 </div>
-                <p id="closingText" style="margin-top: 40px; color: #94a3b8; font-weight: 600; letter-spacing: 2px; text-transform: uppercase; font-size: 0.8rem;">Closing Book...</p>
+                <p id="closingText" style="margin-top: 40px; color: var(--text-light); font-weight: 600; letter-spacing: 2px; text-transform: uppercase; font-size: 0.8rem;">Closing Book...</p>
             </div>
 
             <div id="reader" class="reader-box">
                 <!-- Book content injected here -->
-                <div class="empty-state" style="text-align: center; color: #94a3b8; font-style: italic; margin-top: 50px;">
+                <div class="empty-state" style="text-align: center; color: var(--text-light); font-style: italic; margin-top: 50px;">
                     Select a book from the sidebar to start reading.
                 </div>
                 <div id="thankYouState" style="display: none; text-align: center; margin-top: 50px;">
@@ -165,6 +164,8 @@
             <!-- Floating Selection Toolbar -->
             <div id="selectionToolbar" style="display: none;">
                 <button onclick="saveHighlight()" title="Highlight" style="font-size: 18px;">🖍</button>
+                <div class="divider"></div>
+                <button onclick="lookupSelectedText()" title="Dictionary" style="font-size: 18px;">📖</button>
                 <div class="divider"></div>
                 <button onclick="readSelectedText()" title="Read Selected" style="font-size: 18px;">🔊</button>
                 <div class="divider"></div>

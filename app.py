@@ -11,6 +11,8 @@ import mammoth
 import base64
 import numpy as np
 import concurrent.futures
+from gtts import gTTS
+import io
 
 app = Flask(__name__)
 
@@ -38,9 +40,16 @@ def init_db():
         name TEXT,
         path TEXT,
         extracted_path TEXT,
+        status TEXT DEFAULT 'ready',
         uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """)
+
+    # Migrate existing databases that don't have the status column
+    try:
+        cur.execute("ALTER TABLE books ADD COLUMN status TEXT DEFAULT 'ready'")
+    except Exception:
+        pass  # Column already exists
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS highlights(
@@ -62,76 +71,169 @@ def extract_image_text(file_path):
     if image is None:
         return ""
 
+    # Upscale significantly to catch small labels in infographics
+    h, w = image.shape[:2]
+    image = cv2.resize(image, (w*2, h*2), interpolation=cv2.INTER_LANCZOS4)
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    gray = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)[1]
-    text = pytesseract.image_to_string(gray, config='--oem 3 --psm 6')
-    return text.strip()
+    
+    passes = []
+    
+    # Pass 1: Standard PSM 3 (Auto segmentation)
+    passes.append(pytesseract.image_to_string(gray, config='--oem 3 --psm 3'))
+    
+    # Pass 2: Adaptive Thresholding (Handles shadows/gradients)
+    adaptive = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+    passes.append(pytesseract.image_to_string(adaptive, config='--oem 3 --psm 6'))
+    
+    # Pass 3: Inverted Adaptive (Light text on dark backgrounds)
+    inverted = cv2.bitwise_not(adaptive)
+    passes.append(pytesseract.image_to_string(inverted, config='--oem 3 --psm 6'))
+    
+    # Pass 4: PSM 11 (Sparse text, good for labels)
+    passes.append(pytesseract.image_to_string(gray, config='--oem 3 --psm 11'))
+    
+    all_text = "\n".join(passes)
+    lines = [L.strip() for L in all_text.split('\n') if len(L.strip()) > 2]
+    
+    unique_lines = []
+    seen = set()
+    for L in lines:
+        clean_L = "".join(filter(str.isalnum, L.lower()))
+        if clean_L and clean_L not in seen:
+            unique_lines.append(L)
+            seen.add(clean_L)
+            
+    return " ".join(unique_lines)
+
+
+def build_ocr_overlay_html(img_tag_str, img_cv):
+    """Given an OpenCV image, run OCR and return an HTML snippet with
+    the <img> inside a relative wrapper plus transparent, selectable word spans."""
+    h, w = img_cv.shape[:2]
+    if h < 20 or w < 20:
+        return None
+
+    # Up-scale for better OCR accuracy
+    scale = 2.0
+    img_scaled = cv2.resize(img_cv, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LANCZOS4)
+    gray = cv2.cvtColor(img_scaled, cv2.COLOR_BGR2GRAY)
+
+    # Use image_to_data for bounding boxes (Output.DICT does not require pandas)
+    try:
+        data = pytesseract.image_to_data(gray, config='--oem 3 --psm 3', output_type=pytesseract.Output.DICT)
+    except Exception:
+        return None
+
+    spans_html = []
+    for i in range(len(data['text'])):
+        word = str(data['text'][i]).strip()
+        conf = int(data['conf'][i])
+        if not word or conf < 30:
+            continue
+
+        # Scale bounding box back to original image dimensions
+        bx = data['left'][i] / scale
+        by = data['top'][i] / scale
+        bw = data['width'][i] / scale
+        bh = data['height'][i] / scale
+
+        # Express as percentages of original image size
+        left_pct   = round(bx / w * 100, 4)
+        top_pct    = round(by / h * 100, 4)
+        width_pct  = round(bw / w * 100, 4)
+        height_pct = round(bh / h * 100, 4)
+
+        # Font size roughly matches the rendered word bbox height
+        font_size_pct = round(bh / h * 100, 4)
+
+        spans_html.append(
+            f'<span class="ocr-word" style="'
+            f'left:{left_pct}%;top:{top_pct}%;'
+            f'width:{width_pct}%;height:{height_pct}%;'
+            f'font-size:{font_size_pct}cqh;'
+            f'" title="{word}">{word}</span>'
+        )
+
+    if not spans_html:
+        return None
+
+    ocr_layer = '<div class="ocr-layer">' + ''.join(spans_html) + '</div>'
+    wrapper = f'<div class="img-ocr-wrapper">{img_tag_str}{ocr_layer}</div>'
+    return wrapper
 
 
 def ocr_embedded_images(html):
-    soup = BeautifulSoup(html, "html.parser")
-    imgs = soup.find_all("img")
+    """
+    Fast pass: extract raw text from embedded images for TTS/search purposes only.
+    Uses regex and multithreading for high performance without BeautifulSoup overhead.
+    """
+    import re
+    img_pattern = re.compile(r'(<img[^>]*src=[\'"](data:image/[^\'"]+)[\'"][^>]*>)', re.IGNORECASE)
+    matches = list(img_pattern.finditer(html))
     
-    def process_img(img):
-        src = img.get("src")
-        text = ""
-        if src and src.startswith("data:image/"):
-            try:
-                header, encoded = src.split(",", 1)
-                data = base64.b64decode(encoded)
-                nparr = np.frombuffer(data, np.uint8)
-                img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                if img_cv is not None:
-                     h, w = img_cv.shape[:2]
-                     if h < 20 or w < 20:
-                         return img, ""
-                     gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-                     gray = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)[1]
-                     text = pytesseract.image_to_string(gray, config='--oem 3 --psm 6').strip()
-            except Exception as e:
-                pass
-        return img, text
+    if not matches:
+        return html
+        
+    def process_match_data(match_tuple):
+        start, end, img_tag, src_data = match_tuple
+        try:
+            _, encoded = src_data.split(",", 1)
+            data = base64.b64decode(encoded)
+            nparr = np.frombuffer(data, np.uint8)
+            img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if img_cv is not None:
+                h, w = img_cv.shape[:2]
+                if h >= 20 and w >= 20:
+                    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+                    text = pytesseract.image_to_string(gray, config='--oem 3 --psm 3')
+                    text = " ".join(t.strip() for t in text.split("\n") if len(t.strip()) > 2)
+                    if text:
+                        return start, end, f'{img_tag}<span class="ocr-text-hidden" aria-hidden="true">{text}</span>'
+        except Exception:
+            pass
+        return start, end, img_tag
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-        results = list(executor.map(process_img, imgs))
-
-    for img, text in results:
-        if text:
-            ocr_span = soup.new_tag("span")
-            ocr_span["style"] = "font-size: 1px; color: rgba(0,0,0,0.01); display: inline-block; width: 1px; height: 1px; overflow: hidden;"
-            ocr_span.string = text
-            img.insert_after(ocr_span)
-
-    return str(soup)
+    tasks = [(m.start(), m.end(), m.group(1), m.group(2)) for m in matches]
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(process_match_data, tasks))
+        
+    parts = []
+    last_end = 0
+    # Process results in sequential order of occurrence in the HTML
+    results.sort(key=lambda x: x[0])
+    for start, end, replacement in results:
+        parts.append(html[last_end:start])
+        parts.append(replacement)
+        last_end = end
+    parts.append(html[last_end:])
+    
+    return "".join(parts)
 
 
 def extract_pdf_html(file_path):
-    html = "<div style='background: white; padding: 40px; font-family: sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; color: black;'>"
+    html_parts = ["<div class='book-content-container'>"]
     pdf = fitz.open(file_path)
-    import re
+    # We no longer scrub styles here because PyMuPDF's HTML output 
+    # relies on absolute positioning for layout fidelity. 
+    # We handle scaling and centering globally in script.js.
     for page_num in range(len(pdf)):
         page = pdf[page_num]
         raw_html = page.get_text("html")
-        soup = BeautifulSoup(raw_html, "html.parser")
+        # Ensure each page has a consistent wrapper ID for lazy rendering on frontend
+        wrapped_html = f'<div id="pdf-page-{page_num}" class="lazy-page-container">{raw_html}</div>'
+        html_parts.append(wrapped_html)
         
-        for tag in soup.find_all(True):
-            if tag.has_attr("style"):
-                style_str = tag["style"]
-                # Safely scrub absolute positioning rules without destroying the HTML tag itself
-                style_str = re.sub(r'(?i)(position|top|left|right|bottom|width|height):\s*[^;]+;?', '', style_str)
-                tag["style"] = style_str
-        
-        html += str(soup)
     pdf.close()
-    html += "</div>"
-    return html
+    html_parts.append("</div>")
+    return "".join(html_parts)
 
 
 def extract_docx_html(file_path):
     with open(file_path, "rb") as docx_file:
         result = mammoth.convert_to_html(docx_file)
         html = result.value
-    return f"<div style='background: white; padding: 40px; font-family: Calibri, sans-serif; line-height: 1.5; color: black; max-width: 800px; margin: 0 auto;'>{html}</div>"
+    return f"<div class='book-content-container'>{html}</div>"
 
 
 def extract_epub_html(file_path):
@@ -142,7 +244,7 @@ def extract_epub_html(file_path):
         if item.get_type() == ITEM_IMAGE:
             images[item.get_name().split('/')[-1]] = item.get_content()
 
-    html_content = "<div style='background: white; padding: 40px; font-family: sans-serif; line-height: 1.6; max-width: 800px; margin: 0 auto; color: black;'>"
+    html_content = "<div class='book-content-container'>"
     for item in book.get_items():
         if item.get_type() == ITEM_DOCUMENT:
             soup = BeautifulSoup(item.get_content(), "html.parser")
@@ -213,6 +315,61 @@ def extract_book_html(file_path):
         return "<div style='background: white; padding: 40px; color: red;'>Unsupported file format</div>"
 
 
+@app.route("/ocr_image", methods=["POST"])
+def ocr_image_endpoint():
+    """
+    Accept a base64-encoded image, run OCR, and return word bounding boxes
+    as JSON so the browser can render transparent selectable text spans over it.
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({"words": []})
+
+    b64 = data.get("image", "")
+    if not b64:
+        return jsonify({"words": []})
+
+    try:
+        # Strip data URI header if present
+        if "," in b64:
+            b64 = b64.split(",", 1)[1]
+        raw = base64.b64decode(b64)
+        nparr = np.frombuffer(raw, np.uint8)
+        img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img_cv is None:
+            return jsonify({"words": []})
+
+        h, w = img_cv.shape[:2]
+        if h < 20 or w < 20:
+            return jsonify({"words": []})
+
+        # Upscale for accuracy
+        scale = 2.0
+        img_scaled = cv2.resize(img_cv, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LANCZOS4)
+        gray = cv2.cvtColor(img_scaled, cv2.COLOR_BGR2GRAY)
+
+        ocr_data = pytesseract.image_to_data(gray, config='--oem 3 --psm 3', output_type=pytesseract.Output.DICT)
+
+        words = []
+        for i in range(len(ocr_data['text'])):
+            word = str(ocr_data['text'][i]).strip()
+            conf = int(ocr_data['conf'][i])
+            if not word or conf < 30:
+                continue
+            # Scale back to original coordinates
+            words.append({
+                "text": word,
+                "left":   round(ocr_data['left'][i]   / scale / w * 100, 4),
+                "top":    round(ocr_data['top'][i]    / scale / h * 100, 4),
+                "width":  round(ocr_data['width'][i]  / scale / w * 100, 4),
+                "height": round(ocr_data['height'][i] / scale / h * 100, 4),
+            })
+
+        return jsonify({"words": words})
+    except Exception as e:
+        return jsonify({"words": [], "error": str(e)})
+
+
 @app.route("/")
 def home():
     return render_template("index.html")
@@ -221,7 +378,6 @@ def home():
 @app.route("/uploads/<path:filename>")
 def serve_upload(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
-
 
 @app.route("/upload", methods=["POST"])
 def upload():
@@ -233,39 +389,85 @@ def upload():
     if file.filename == "":
         return "No file selected", 400
 
+    # --- Duplicate Detection ---
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM books WHERE name = ?", (file.filename,))
+    existing = cur.fetchone()
+    conn.close()
+
+    if existing:
+        return jsonify({
+            "status": "duplicate",
+            "message": f"'{file.filename}' is already in your library!"
+        }), 409
+
+    # Save the file right away
     filepath = os.path.join(UPLOAD_FOLDER, file.filename)
     file.save(filepath)
 
-    extracted_html = extract_book_html(filepath)
+    extracted_path = os.path.join(EXTRACTED_FOLDER, file.filename + ".html")
 
-    extracted_filename = file.filename + ".html"
-    extracted_path = os.path.join(EXTRACTED_FOLDER, extracted_filename)
-
-    with open(extracted_path, "w", encoding="utf-8") as f:
-        f.write(extracted_html)
-
+    # Insert DB record immediately with status = 'processing'
     conn = get_conn()
     cur = conn.cursor()
-
     cur.execute(
-        "INSERT INTO books(name, path, extracted_path) VALUES (?, ?, ?)",
-        (file.filename, filepath, extracted_path)
+        "INSERT INTO books(name, path, extracted_path, status) VALUES (?, ?, ?, ?)",
+        (file.filename, filepath, extracted_path, "processing")
     )
-
+    book_id = cur.lastrowid
     conn.commit()
     conn.close()
 
-    return "Uploaded successfully"
+    # Run heavy extraction in a background thread — don't block the HTTP response
+    def do_extract(fpath, epath, bid):
+        try:
+            html = extract_book_html(fpath)
+            with open(epath, "w", encoding="utf-8") as f:
+                f.write(html)
+            conn2 = get_conn()
+            conn2.execute("UPDATE books SET status='ready' WHERE id=?", (bid,))
+            conn2.commit()
+            conn2.close()
+        except Exception as e:
+            conn2 = get_conn()
+            conn2.execute("UPDATE books SET status='error' WHERE id=?", (bid,))
+            conn2.commit()
+            conn2.close()
+
+    import threading
+    t = threading.Thread(target=do_extract, args=(filepath, extracted_path, book_id), daemon=True)
+    t.start()
+
+    return jsonify({"status": "processing", "message": "Book received! Processing in background..."})
 
 
 @app.route("/books")
 def books():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, name, uploaded_at FROM books ORDER BY id DESC")
+    cur.execute("SELECT id, name, uploaded_at, status FROM books ORDER BY id DESC")
     data = cur.fetchall()
     conn.close()
     return jsonify(data)
+
+
+@app.route("/tts")
+def tts():
+    text = request.args.get("text", "")
+    lang = request.args.get("lang", "en")
+    if not text:
+        return "No text", 400
+    
+    try:
+        tts_obj = gTTS(text=text, lang=lang)
+        fp = io.BytesIO()
+        tts_obj.write_to_fp(fp)
+        fp.seek(0)
+        return send_file(fp, mimetype="audio/mpeg")
+    except Exception as e:
+        print(f"TTS Error: {e}")
+        return str(e), 500
 
 
 @app.route("/book/<int:book_id>")
@@ -623,23 +825,61 @@ def ask_question():
         traceback.print_exc()
         return jsonify({"error": "Failed to search the book. It might be too large."}), 500
 
-@app.route("/tts")
-def stream_tts():
-    text = request.args.get("text", "")
-    lang = request.args.get("lang", "en")
-    if not text:
-        return "No text provided", 400
+@app.route("/define", methods=["POST"])
+def define_word():
+    import traceback
     try:
-        from gtts import gTTS
-        import io
-        tts_obj = gTTS(text=text, lang=lang)
-        fp = io.BytesIO()
-        tts_obj.write_to_fp(fp)
-        fp.seek(0)
-        return send_file(fp, mimetype="audio/mpeg")
+        data = request.get_json()
+        word = data.get("word", "").lower()
+        html_content = data.get("text", "")
+        
+        if not word or not html_content:
+            return jsonify({"answer": "Word or text missing."})
+            
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html_content, "html.parser")
+        text = soup.get_text(separator=" ")
+        
+        import re
+        # 1. Tokenize into sentences
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        sentences = [re.sub(r'\s+', ' ', s).strip() for s in sentences if len(s.strip()) > 5]
+        
+        # 2. Search for definition patterns: "Word is...", "Word means...", "Word refers to..."
+        patterns = [
+            rf"\b{word}\s+is\b",
+            rf"\b{word}\s+means\b",
+            rf"\b{word}\s+refers\s+to\b",
+            rf"\b{word}\s+defined\s+as\b",
+            rf"\bdefinition\s+of\s+{word}\b"
+        ]
+        
+        definition_sentences = []
+        for s in sentences:
+            s_lower = s.lower()
+            if any(re.search(p, s_lower) for p in patterns):
+                definition_sentences.append(s)
+        
+        if definition_sentences:
+            return jsonify({"answer": " ".join(definition_sentences[:2])})
+            
+        # 3. Fallback: Search for sentences containing the word in context
+        matches = []
+        for s in sentences:
+            if re.search(rf"\b{word}\b", s.lower()):
+                matches.append(s)
+        
+        if matches:
+            # Sort by descriptive power (longer sentences that aren't overly long)
+            matches.sort(key=lambda x: abs(60 - len(x)))
+            return jsonify({"answer": f"💡 AI Context: {matches[0]}"})
+            
+        return jsonify({"answer": "I couldn't find a specific meaning for this word in the current book contents."})
+        
     except Exception as e:
-        print(f"TTS Error: {e}")
-        return str(e), 500
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     app.run(debug=True)

@@ -40,34 +40,74 @@ function upload() {
     let file = document.getElementById("file").files[0];
 
     if (!file) {
-        alert("Please choose a file");
+        showUploadToast("Please choose a file first.", "warn");
         return;
     }
 
     let form = new FormData();
     form.append("file", file);
 
+    // Show uploading indicator
+    showUploadToast("⏳ Uploading " + file.name + "...", "info");
+
     fetch("/upload", {
         method: "POST",
         body: form
     })
-    .then(res => {
-        if (!res.ok) {
-            throw new Error("Upload failed");
+    .then(async res => {
+        let data = await res.json().catch(() => ({ message: "Unknown error" }));
+        if (res.status === 409) {
+            // Duplicate book
+            showUploadToast("📚 " + data.message, "warn");
+            return;
         }
-        return res.text();
-    })
-    .then(data => {
-        document.getElementById("file").value = ""; // Clear input
+        if (!res.ok) {
+            showUploadToast("❌ Upload failed: " + data.message, "error");
+            return;
+        }
+        // Success
+        document.getElementById("file").value = "";
         let label = document.querySelector('.btn-upload-label');
-        if (label) label.innerText = "Choose File"; // Clear visual label
-        return loadBooks();
+        if (label) label.innerText = "Choose File";
+        showUploadToast("✅ Book uploaded successfully!", "success");
+        loadBooks();
     })
     .catch(err => {
         console.error(err);
-        alert("Upload failed");
+        showUploadToast("❌ Upload failed. Check your connection.", "error");
     });
 }
+
+function showUploadToast(msg, type) {
+    let existing = document.getElementById("uploadToast");
+    if (existing) existing.remove();
+
+    let colors = {
+        success: "#2d6a4f",
+        warn:    "#b5451b",
+        error:   "#7f1d1d",
+        info:    "#1e3a5f"
+    };
+    let bg = colors[type] || colors.info;
+
+    let toast = document.createElement("div");
+    toast.id = "uploadToast";
+    toast.style.cssText = `
+        position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+        background: ${bg}; color: #fff; padding: 12px 24px; border-radius: 12px;
+        font-size: 0.9rem; font-weight: 600; box-shadow: 0 4px 20px rgba(0,0,0,0.35);
+        z-index: 9999; animation: toastIn 0.3s ease; max-width: 380px; text-align: center;
+    `;
+    toast.textContent = msg;
+    document.body.appendChild(toast);
+
+    // Auto-dismiss after 4 seconds (info-type stays until replaced)
+    if (type !== "info") {
+        setTimeout(() => toast.remove(), 4000);
+    }
+}
+
+let _processingPollTimer = null;
 
 function loadBooks() {
     return fetch("/books")
@@ -76,23 +116,60 @@ function loadBooks() {
         let list = document.getElementById("booklist");
         list.innerHTML = "";
 
+        let hasProcessing = false;
+
         data.forEach(book => {
+            // book = [id, name, uploaded_at, status]
+            let status = book[3] || "ready";
+            if (status === "processing") hasProcessing = true;
+
             let tr = document.createElement("tr");
+
+            let badge = "";
+            if (status === "processing") {
+                badge = `<span style="font-size:0.7rem;background:#1e3a5f;color:#7ec8f8;padding:2px 7px;border-radius:20px;margin-left:6px;">⏳ Processing…</span>`;
+            } else if (status === "error") {
+                badge = `<span style="font-size:0.7rem;background:#7f1d1d;color:#fca5a5;padding:2px 7px;border-radius:20px;margin-left:6px;">❌ Failed</span>`;
+            }
+
+            let openBtn = status === "ready"
+                ? `<button onclick="openBook(${book[0]})">Open</button>`
+                : `<button disabled style="opacity:0.4;cursor:not-allowed;">Open</button>`;
 
             tr.innerHTML = `
                 <td style="width: 100%; max-width: 0; padding-right: 12px;">
-                    <div style="font-weight: 600; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.95rem;">${book[1]}</div>
+                    <div style="font-weight: 600; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.95rem;">${book[1]}${badge}</div>
                     <div style="font-size: 0.75rem; color: var(--text-light);">${book[2]}</div>
                 </td>
                 <td style="text-align: right; width: 65px;">
-                    <button onclick="openBook(${book[0]})">Open</button>
+                    ${openBtn}
                     <button onclick="deleteBook(${book[0]})">Delete</button>
                 </td>
             `;
 
             list.appendChild(tr);
         });
-        return data; // pass data down the chain
+
+        // Auto-refresh every 3s while any book is still processing
+        if (hasProcessing) {
+            if (!_processingPollTimer) {
+                _processingPollTimer = setInterval(() => {
+                    loadBooks().then(d => {
+                        let stillProcessing = (d || []).some(b => (b[3] || "ready") === "processing");
+                        if (!stillProcessing) {
+                            clearInterval(_processingPollTimer);
+                            _processingPollTimer = null;
+                            showUploadToast("✅ Book is ready to read!", "success");
+                        }
+                    });
+                }, 3000);
+            }
+        } else if (_processingPollTimer) {
+            clearInterval(_processingPollTimer);
+            _processingPollTimer = null;
+        }
+
+        return data;
     })
     .catch(err => {
         console.error("Books load error:", err);
@@ -208,9 +285,9 @@ function proceedToOpenBook(bookId) {
     showLoader();
     fetch("/book/" + bookId)
     .then(res => res.json())
-    .then(data => {
-        hideLoader();
+    .then(async data => {
         if (data.error) {
+            hideLoader();
             alert(data.error);
             return;
         }
@@ -219,9 +296,87 @@ function proceedToOpenBook(bookId) {
         currentBookText = data.text || "";
 
         document.getElementById("booktitle").innerText = data.name;
-        document.getElementById("reader").innerHTML = currentBookText;
         
-        // Check for existing bookmark
+        let reader = document.getElementById("reader");
+        
+        // Use a slight timeout to let the loader render
+        await new Promise(r => setTimeout(r, 50));
+        
+        // Clear reader and prepare container
+        reader.innerHTML = '<div class="book-content-container"></div>';
+        let container = reader.querySelector('.book-content-container');
+        hideLoader();
+
+        // Regex to split currentBookText into individual pages
+        // Each page is wrapped in <div id="pdf-page-N" class="lazy-page-container">...</div>
+        const pageRegex = /<div id="pdf-page-\d+" class="lazy-page-container">[\s\S]*?<\/div>(?=\s*<div id="pdf-page-|\s*<\/div>\s*$)/g;
+        let pageChunks = currentBookText.match(pageRegex) || [];
+        
+        if (pageChunks.length === 0 && currentBookText.trim()) {
+            // Fallback for non-PDF or unexpected format
+            container.innerHTML = currentBookText;
+        }
+
+        let containerW = reader.clientWidth - 20;
+        let renderedCount = 0;
+
+        async function renderBatch(startIndex) {
+            const batchSize = startIndex === 0 ? 5 : 15; // Small first batch for instant view
+            const endIndex = Math.min(startIndex + batchSize, pageChunks.length);
+            
+            for (let i = startIndex; i < endIndex; i++) {
+                // Create a temporary element to hold the page chunk
+                let temp = document.createElement('div');
+                temp.innerHTML = pageChunks[i];
+                let pageWrapper = temp.firstChild;
+                container.appendChild(pageWrapper);
+
+                // Apply scaling immediately to the new page
+                let pdfPage = pageWrapper.querySelector('div[id^="page"]');
+                if (pdfPage) {
+                    // Optimized scaling logic
+                    let w = parseFloat(pdfPage.style.width) || 800;
+                    let h = parseFloat(pdfPage.style.height);
+                    
+                    pdfPage.setAttribute('data-original-width', w);
+                    if (h) pdfPage.setAttribute('data-original-height', h);
+
+                    let baseScale = Math.min(1.0, containerW / w);
+                    let finalScale = baseScale * currentZoom;
+                    
+                    pdfPage.style.width = w + "px";
+                    if (h) pdfPage.style.height = h + "px";
+                    pdfPage.style.transform = `scale(${finalScale})`;
+                    pdfPage.style.transformOrigin = "top left";
+                    pdfPage.style.display = "block";
+                    pdfPage.style.margin = "0";
+
+                    // The wrapper (.lazy-page-container) needs to hold the scaled dimensions
+                    let sW = w * finalScale;
+                    let sH = h * finalScale;
+                    pageWrapper.style.width = sW + "px";
+                    pageWrapper.style.height = sH + "px";
+                    pageWrapper.style.marginBottom = "30px";
+
+                    if (sW < containerW) {
+                        pageWrapper.style.marginLeft = "auto";
+                        pageWrapper.style.marginRight = "auto";
+                    } else {
+                        pageWrapper.style.marginLeft = "0";
+                        pageWrapper.style.marginRight = "0";
+                    }
+                }
+            }
+
+            renderedCount = endIndex;
+            if (renderedCount < pageChunks.length) {
+                // Return to main thread to keep UI responsive
+                await new Promise(r => setTimeout(r, 1));
+                return renderBatch(renderedCount);
+            }
+        }
+
+        // Check for existing bookmark before starting batches
         const savedIndex = localStorage.getItem(`bookmark_${bookId}`);
         if (savedIndex) {
             showBookmarkModal(
@@ -232,46 +387,32 @@ function proceedToOpenBook(bookId) {
                 "Cancel",
                 () => {
                     currentAbsoluteCharIndex = parseInt(savedIndex);
-                    setTimeout(() => scrollToIndex(currentAbsoluteCharIndex), 500);
+                    // Start rendering and scroll once ready
+                    renderBatch(0).then(() => {
+                        scrollToIndex(currentAbsoluteCharIndex);
+                    });
                 },
                 () => {
                     currentAbsoluteCharIndex = 0;
                     localStorage.removeItem(`bookmark_${bookId}`);
+                    renderBatch(0);
                 },
                 () => {
-                    // Cancel opening the book entirely
-                    document.getElementById("reader").innerHTML = `<div class="empty-state" style="text-align: center; color: #94a3b8; font-style: italic; margin-top: 50px;">Select a book from the sidebar to start reading.</div>`;
+                    reader.innerHTML = `<div class="empty-state" style="text-align: center; color: var(--text-light); font-style: italic; margin-top: 50px;">Select a book from the sidebar to start reading.</div>`;
                     document.getElementById("booktitle").innerText = "Select a book from your library";
                     currentBookId = null;
                 }
             );
         } else {
             currentAbsoluteCharIndex = 0;
+            renderBatch(0);
         }
-
-        
-        // Append Q&A block to the end of the book content
-
-        
-        // Scale down PyMuPDF rigid absolute positioning dimensions to fit viewport bounds
-        document.querySelectorAll('#reader div[id^="page"]').forEach(page => {
-            let w = parseFloat(page.style.width) || 800;
-            let containerW = document.getElementById('reader').clientWidth - 30; // Account for padding
-            if (w > containerW) {
-                let scale = containerW / w;
-                page.style.transform = `scale(${scale})`;
-                page.style.transformOrigin = "top left";
-                let h = parseFloat(page.style.height);
-                if (h) {
-                    page.style.height = (h * scale) + "px";
-                }
-            }
-        });
 
         loadHighlights(bookId);
     })
     .catch(err => {
         console.error(err);
+        hideLoader();
         alert("Could not open book");
     });
 }
@@ -454,6 +595,9 @@ function loadHighlights(bookId) {
         
         // Re-append the Q&A block after the highlights are drawn
 
+    }).then(() => {
+        // Apply OCR overlays on images (runs after highlights, non-blocking)
+        setTimeout(applyImageOcrOverlays, 200);
     });
 }
 
@@ -589,7 +733,9 @@ function readAloud() {
         utterance.onboundary = function(event) {
             if (event.name !== 'word' && event.name !== 'sentence') return;
             
-            let charLength = event.charLength || event.currentTarget.text.substring(event.charIndex).split(/\s+/)[0].length;
+            let wordText = event.currentTarget.text.substring(event.charIndex);
+            let wordMatch = wordText.match(/^[\w\u0080-\uFFFF]+/);
+            let charLength = event.charLength || (wordMatch ? wordMatch[0].length : 1);
             
             // Calculate absolute position in the global text string
             let absoluteWordPosition = thisChunkStartOffset + event.charIndex;
@@ -775,40 +921,6 @@ function togglePlayPause() {
             isPaused = true;
             if(playPauseBtn) playPauseBtn.innerText = "Resume ▶";
         }
-    }
-}
-
-async function searchMeaning() {
-    let wordInput = document.getElementById("word");
-    let meaningObj = document.getElementById("meaning");
-    let word = wordInput.value.trim();
-    
-    if (!word) {
-        meaningObj.innerText = "";
-        return;
-    }
-    
-    meaningObj.innerText = "Searching...";
-    
-    try {
-        let res = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`);
-        
-        if (!res.ok) {
-            meaningObj.innerText = "Meaning not found";
-            return;
-        }
-        
-        let data = await res.json();
-        if (data && data.length > 0 && data[0].meanings && data[0].meanings.length > 0) {
-            let definition = data[0].meanings[0].definitions[0].definition;
-            definition = definition.charAt(0).toUpperCase() + definition.slice(1);
-            meaningObj.innerText = definition;
-        } else {
-            meaningObj.innerText = "Meaning not found";
-        }
-    } catch(err) {
-        console.error("Dictionary error:", err);
-        meaningObj.innerText = "Network Error";
     }
 }
 
@@ -1074,6 +1186,108 @@ async function summarizeSelectedText() {
         console.error("Summary error:", e);
     }
 }
+async function lookupSelectedText() {
+    let selection = window.getSelection();
+    let selectedText = selection.toString().trim();
+    if (!selectedText) return;
+    
+    // Limit to single word for better dictionary results
+    let word = selectedText.split(/\s+/)[0].replace(/[^\w]/g, '');
+    if (!word) return;
+
+    let toolbar = document.getElementById("selectionToolbar");
+    if(toolbar) toolbar.style.display = "none";
+
+    let range = selection.getRangeAt(0);
+    let rect = range.getBoundingClientRect();
+
+    // Create Tooltip
+    let tooltip = document.createElement("div");
+    tooltip.className = "definition-tooltip";
+    tooltip.style.left = rect.left + "px";
+    tooltip.style.top = (rect.bottom + window.scrollY + 10) + "px";
+    
+    tooltip.innerHTML = `
+        <div class="tooltip-header">
+            <strong>${word}</strong>
+            <span class="tooltip-close" onclick="this.parentElement.parentElement.remove()">✕</span>
+        </div>
+        <div class="tooltip-body">Searching meaning...</div>
+    `;
+    
+    document.body.appendChild(tooltip);
+
+    try {
+        let res = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`);
+        let body = tooltip.querySelector(".tooltip-body");
+        
+        if (!res.ok) {
+            // Automated Fallback: Don't show button, just do it.
+            body.innerHTML = `<div style="display: flex; align-items: center; gap: 8px; color: var(--primary);">
+                <div class="loader-spinner" style="width:14px; height:14px; border:2px solid rgba(139,92,246,0.2); border-top-color:var(--primary); border-radius:50%; animation:spin 1s linear infinite;"></div>
+                ✨ AI searching book...
+            </div>`;
+            askAIDefinition(word, body);
+            return;
+        }
+        
+        let data = await res.json();
+        if (data && data.length > 0 && data[0].meanings && data[0].meanings.length > 0) {
+            let definition = data[0].meanings[0].definitions[0].definition;
+            body.innerText = definition.charAt(0).toUpperCase() + definition.slice(1);
+        } else {
+            body.innerHTML = `<div style="display: flex; align-items: center; gap: 8px; color: var(--primary);">
+                <div class="loader-spinner" style="width:14px; height:14px; border:2px solid rgba(139,92,246,0.2); border-top-color:var(--primary); border-radius:50%; animation:spin 1s linear infinite;"></div>
+                ✨ AI searching book...
+            </div>`;
+            askAIDefinition(word, body);
+        }
+    } catch(e) {
+        let body = tooltip.querySelector(".tooltip-body");
+        if(body) {
+            body.innerHTML = `<div style="display: flex; align-items: center; gap: 8px; color: var(--primary);">
+                <div class="loader-spinner" style="width:14px; height:14px; border:2px solid rgba(139,92,246,0.2); border-top-color:var(--primary); border-radius:50%; animation:spin 1s linear infinite;"></div>
+                ✨ AI searching book...
+            </div>`;
+            askAIDefinition(word, body);
+        }
+    }
+
+    // Auto-dismiss on click elsewhere
+    setTimeout(() => {
+        const dismissHandler = (e) => {
+            if (!tooltip.contains(e.target)) {
+                tooltip.remove();
+                document.removeEventListener("mousedown", dismissHandler);
+            }
+        };
+        document.addEventListener("mousedown", dismissHandler);
+    }, 10);
+}
+
+async function askAIDefinition(word, targetElement) {
+    // If targetElement is a button, handle as before (unlikely now but safe fallback)
+    let body = targetElement.tagName === "BUTTON" ? targetElement.parentElement : targetElement;
+    
+    try {
+        let res = await fetch("/define", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ word: word, text: currentBookText })
+        });
+        
+        let data = await res.json();
+        if (data.error) {
+            body.innerText = "Error: " + data.error;
+        } else {
+            body.innerText = data.answer;
+        }
+    } catch(e) {
+        body.innerText = "Connection failed.";
+        console.error("AI Lookup error:", e);
+    }
+}
+
 function findText(event) {
     let word = document.getElementById("findInput").value.trim();
     let reader = document.getElementById("reader");
@@ -1145,7 +1359,19 @@ function scrollToSearchMatch() {
             el.style.backgroundColor = 'yellow';
         });
         currentMatch.style.backgroundColor = 'orange';
-        currentMatch.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        
+        // Vertical-only scroll for search matches
+        let reader = document.getElementById('reader');
+        let matchRect = currentMatch.getBoundingClientRect();
+        let readerRect = reader.getBoundingClientRect();
+        
+        let matchRelativeTop = matchRect.top - readerRect.top + reader.scrollTop;
+        let targetScrollTop = matchRelativeTop - (readerRect.height / 2) + (matchRect.height / 2);
+        
+        reader.scrollTo({
+            top: targetScrollTop,
+            behavior: 'smooth'
+        });
     }
 }
 
@@ -1473,7 +1699,7 @@ function highlightReadingWord(absoluteWordPosition, charLength) {
         
         let nodeText = globalTextNodes[targetNodeIndex].nodeValue;
         let actualWordLen = Math.min(charLength, nodeText.length - offsetInNode);
-        let exactWord = nodeText.substr(offsetInNode, actualWordLen);
+        let exactWord = nodeText.slice(offsetInNode, offsetInNode + actualWordLen);
         
         if (!exactWord.replace(/[^\w\u0080-\uFFFF]/g, '')) return;
         
@@ -1494,7 +1720,21 @@ function highlightReadingWord(absoluteWordPosition, charLength) {
         parent.removeChild(globalTextNodes[targetNodeIndex]);
         
         globalTextNodes.splice(targetNodeIndex, 1, beforeNode, span.firstChild, afterNode);
-        span.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        // Vertical-only scroll: preserve horizontal position so zoomed content doesn't shift sideways
+        let reader = document.getElementById('reader');
+        let spanRect = span.getBoundingClientRect();
+        let readerRect = reader.getBoundingClientRect();
+        
+        // Only scroll vertically - never change horizontal position
+        let spanRelativeTop = spanRect.top - readerRect.top + reader.scrollTop;
+        let targetScrollTop = spanRelativeTop - (readerRect.height / 2) + (spanRect.height / 2);
+        
+        reader.scrollTo({
+            top: targetScrollTop,
+            behavior: 'smooth'
+            // No 'left' property - horizontal position is preserved
+        });
+
     }
 }
 
@@ -1525,15 +1765,27 @@ function playNextFallback(startPaused = false) {
 
     currentFallbackAudio.addEventListener('timeupdate', () => {
         if (!currentFallbackAudio.duration || words.length === 0) return;
-        let progress = currentFallbackAudio.currentTime / currentFallbackAudio.duration;
+        
+        // Use cumulative character progress for better timing than simple floor division
+        let currentTime = currentFallbackAudio.currentTime;
+        let totalTime = currentFallbackAudio.duration;
+        let progress = currentTime / totalTime;
+        
         let wordIndex = Math.floor(progress * words.length);
         if (wordIndex >= words.length) wordIndex = words.length - 1;
         
         if (wordIndex !== lastWordIndex) {
             lastWordIndex = wordIndex;
             let currentWord = words[wordIndex];
+            
+            // Safety: Ensure we don't skip the last letter by slightly over-calculating if at end of word list
+            let displayLength = currentWord.length;
+            if (wordIndex === words.length - 1 && progress > 0.95) {
+                // If it's the last word and we're nearly done, ensure full highlight
+            }
+
             currentAbsoluteCharIndex = currentWord.startOffset;
-            highlightReadingWord(currentWord.startOffset, currentWord.length);
+            highlightReadingWord(currentWord.startOffset, displayLength);
         }
     });
     
@@ -1629,4 +1881,275 @@ function scrollToIndex(index) {
     }
 }
 
-window.onload = loadBooks;
+async function applyImageOcrOverlays() {
+    let reader = document.getElementById("reader");
+    if (!reader) return;
+
+    let imgs = Array.from(reader.querySelectorAll("img:not(.ocr-processed)"));
+    if (imgs.length === 0) return;
+
+    // Process images in small batches to keep UI responsive
+    for (let i = 0; i < imgs.length; i++) {
+        let img = imgs[i];
+        
+        // Yield every 5 images to keep the UI fluid
+        if (i > 0 && i % 5 === 0) {
+            await new Promise(r => setTimeout(r, 50));
+        }
+
+        // Mark it so we don't re-process on re-render
+        img.classList.add("ocr-processed");
+
+        // Convert img to base64 using a canvas
+        if (!img.complete || img.naturalWidth === 0) {
+            await new Promise(res => { img.onload = res; img.onerror = res; });
+        }
+
+        let b64 = null;
+        try {
+            let canvas = document.createElement("canvas");
+            canvas.width  = img.naturalWidth  || img.width;
+            canvas.height = img.naturalHeight || img.height;
+            let ctx = canvas.getContext("2d");
+            ctx.drawImage(img, 0, 0);
+            b64 = canvas.toDataURL("image/png");
+        } catch(e) { continue; }
+
+        if (!b64) continue;
+
+        try {
+            let res = await fetch("/ocr_image", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ image: b64 })
+            });
+            let data = await res.json();
+            if (!data.words || data.words.length === 0) continue;
+
+            let wrapper = document.createElement("div");
+            wrapper.className = "img-ocr-wrapper";
+            img.parentNode.insertBefore(wrapper, img);
+            wrapper.appendChild(img);
+
+            let renderedW = img.offsetWidth  || img.naturalWidth;
+            let renderedH = img.offsetHeight || img.naturalHeight;
+
+            let layer = document.createElement("div");
+            layer.className = "ocr-layer";
+
+            data.words.forEach(w => {
+                let span = document.createElement("span");
+                span.className = "ocr-word";
+                span.textContent = w.text;
+                span.style.left   = Math.round(w.left   / 100 * renderedW) + "px";
+                span.style.top    = Math.round(w.top    / 100 * renderedH) + "px";
+                span.style.width  = Math.round(w.width  / 100 * renderedW) + "px";
+                span.style.height = Math.round(w.height / 100 * renderedH) + "px";
+                span.title = w.text;
+                layer.appendChild(span);
+            });
+
+            wrapper.appendChild(layer);
+
+            if (window.ResizeObserver) {
+                let ro = new ResizeObserver(() => {
+                    let newW = img.offsetWidth  || img.naturalWidth;
+                    let newH = img.offsetHeight || img.naturalHeight;
+                    if (newW === renderedW && newH === renderedH) return;
+                    renderedW = newW;
+                    renderedH = newH;
+                    layer.querySelectorAll(".ocr-word").forEach((span, idx) => {
+                        let w2 = data.words[idx];
+                        if (!w2) return;
+                        span.style.left   = Math.round(w2.left   / 100 * newW) + "px";
+                        span.style.top    = Math.round(w2.top    / 100 * newH) + "px";
+                        span.style.width  = Math.round(w2.width  / 100 * newW) + "px";
+                        span.style.height = Math.round(w2.height / 100 * newH) + "px";
+                    });
+                });
+                ro.observe(wrapper);
+            }
+        } catch(e) {
+            console.warn("OCR overlay failed for image:", e);
+        }
+    }
+}
+
+// --- OCR Word Visual Selection Highlight ---
+// Browser ::selection CSS is unreliable over transparent text.
+// Track selectionchange and apply .ocr-selected class to hovered spans instead.
+document.addEventListener("selectionchange", () => {
+    // Clear all previous highlights
+    document.querySelectorAll(".ocr-word.ocr-selected").forEach(el => {
+        el.classList.remove("ocr-selected");
+    });
+
+    let sel = window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+
+    let range = sel.getRangeAt(0);
+
+    // Highlight every .ocr-word span that intersects the selection
+    document.querySelectorAll(".ocr-word").forEach(span => {
+        let spanRange = document.createRange();
+        spanRange.selectNode(span);
+        // compareBoundaryPoints returns negative if range is before spanRange
+        try {
+            if (range.compareBoundaryPoints(Range.END_TO_START, spanRange) <= 0 &&
+                range.compareBoundaryPoints(Range.START_TO_END, spanRange) >= 0) {
+                span.classList.add("ocr-selected");
+            }
+        } catch(e) {}
+    });
+});
+
+
+let currentZoom = 1.0;
+
+function changeZoom(delta) {
+    currentZoom = Math.min(Math.max(0.5, currentZoom + delta), 2.0);
+    applyZoom();
+}
+
+function applyZoom() {
+    let reader = document.getElementById("reader");
+    let zoomDisplay = document.getElementById("zoomLevel");
+    
+    if (zoomDisplay) {
+        zoomDisplay.innerText = Math.round(currentZoom * 100) + "%";
+    }
+
+    // Apply to standard text/html content
+    reader.style.fontSize = (1.1 * currentZoom) + "rem";
+
+    // Apply to rigid PDF pages (PyMuPDF output)
+    document.querySelectorAll('#reader div[id^="page"]').forEach(page => {
+        // Find or create wrapper for this page
+        let wrapper = page.parentElement;
+        if (!wrapper.classList.contains('page-centered-wrapper')) {
+            wrapper = document.createElement('div');
+            wrapper.className = 'page-centered-wrapper';
+            page.parentNode.insertBefore(wrapper, page);
+            wrapper.appendChild(page);
+        }
+
+        let originalW = parseFloat(page.getAttribute('data-original-width')) || parseFloat(page.style.width) || 800;
+        let originalH = parseFloat(page.getAttribute('data-original-height')) || parseFloat(page.style.height);
+        
+        if (!page.getAttribute('data-original-width')) {
+            page.setAttribute('data-original-width', originalW);
+            if (originalH) page.setAttribute('data-original-height', originalH);
+        }
+
+        let containerW = reader.clientWidth - 20; 
+        let baseScale = Math.min(1.0, containerW / originalW);
+        let finalScale = baseScale * currentZoom;
+
+        // Inner page: fixed layout size, simple scale
+        page.style.width = originalW + "px";
+        if (originalH) page.style.height = originalH + "px";
+        page.style.transform = `scale(${finalScale})`;
+        page.style.transformOrigin = "top left";
+        page.style.display = "block";
+        page.style.margin = "0";
+
+        // Outer wrapper: actual layout footprint for centering & scrollbars
+        let scaledW = originalW * finalScale;
+        let scaledH = originalH * finalScale;
+        
+        wrapper.style.width = scaledW + "px";
+        wrapper.style.height = scaledH + "px";
+        wrapper.style.marginBottom = "30px";
+        
+        // Horizontal centering
+        if (scaledW < containerW) {
+            wrapper.style.marginLeft = "auto";
+            wrapper.style.marginRight = "auto";
+        } else {
+            wrapper.style.marginLeft = "0";
+            wrapper.style.marginRight = "0";
+        }
+    });
+
+    // Update pannable cursor state after zoom changes
+    if (window.updateReaderPannableState) {
+        setTimeout(window.updateReaderPannableState, 100);
+    }
+}
+
+window.onload = () => {
+    loadBooks();
+    initDragging();
+};
+
+function initDragging() {
+    let reader = document.getElementById("reader");
+    let isDown = false;
+    let startX;
+    let startY;
+    let scrollLeft;
+    let scrollTop;
+    let moved = false; // Track if mouse actually moved (to distinguish from clicks)
+
+    function updatePannableState() {
+        // We no longer add a grab cursor by default to preserve text selection.
+        // We only use the grabbing state during active movement.
+    }
+
+    // Check pan state on resize
+    window.addEventListener('resize', updatePannableState);
+    // Expose for zoom changes to call
+    window.updateReaderPannableState = updatePannableState;
+
+    reader.addEventListener('mousedown', (e) => {
+        // Only drag if content overflows
+        if (reader.scrollWidth <= reader.clientWidth && reader.scrollHeight <= reader.clientHeight) return;
+
+        // Don't drag if clicking buttons or links
+        if (e.target.closest('button') || e.target.closest('a')) return;
+
+        isDown = true;
+        moved = false;
+        startX = e.pageX - reader.offsetLeft;
+        startY = e.pageY - reader.offsetTop;
+        scrollLeft = reader.scrollLeft;
+        scrollTop = reader.scrollTop;
+    });
+
+    reader.addEventListener('mouseleave', () => {
+        isDown = false;
+        moved = false;
+        reader.classList.remove('grabbing');
+    });
+
+    reader.addEventListener('mouseup', () => {
+        isDown = false;
+        moved = false;
+        reader.classList.remove('grabbing');
+    });
+
+    reader.addEventListener('mousemove', (e) => {
+        if (!isDown) return;
+
+        const x = e.pageX - reader.offsetLeft;
+        const y = e.pageY - reader.offsetTop;
+        const dx = x - startX;
+        const dy = y - startY;
+
+        // Only start dragging after moving at least 4px (to preserve click/selection)
+        if (!moved && Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
+
+        e.preventDefault();
+        moved = true;
+        reader.classList.add('dragging');
+
+        const walkX = dx * 2.5;
+        const walkY = dy * 2.5;
+        reader.scrollLeft = scrollLeft - walkX;
+        reader.scrollTop = scrollTop - walkY;
+    });
+
+    // Initial check after a short delay to let content load
+    setTimeout(updatePannableState, 500);
+}
+
