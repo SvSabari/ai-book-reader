@@ -1291,3 +1291,27 @@ body { top: 0 !important; }
     color: #1e293b;
     border-color: #cbd5e1;
 }
+
+/* ============================= Highlighting & TTS marks ============================= */
+
+.highlight {
+    background-color: #fef08a; /* Soft yellow for permanent highlights */
+    border-radius: 2px;
+}
+
+.reading-mark {
+    background-color: #fde047; /* Brighter yellow for active reading */
+    border-bottom: 2px solid #eab308;
+    border-radius: 2px;
+    padding: 0 1px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    transition: background-color 0.1s;
+    color: #000 !important;
+}
+
+.find-highlight {
+    background-color: #fca5a5;
+    color: #000 !important;
+    font-weight: bold;
+    border-radius: 2px;
+}

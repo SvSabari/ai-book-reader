@@ -384,6 +384,7 @@ function proceedToOpenBook(bookId) {
             // This ensures long books show highlights while rendering continues.
             if (currentBookId && renderedCount % 30 === 0) {
                 applyExistingHighlights();
+                rebuildReadingNodeMap(); 
             }
 
             if (renderedCount < pageChunks.length) {
@@ -1755,8 +1756,12 @@ function playFallbackAudioQueue(chunks, startOffset, shortLang, startPaused) {
     playNextFallback(startPaused);
 }
 
+// Global state to track the LAST touched node for fast hit-testing
+let lastMarkedNodeIndex = 0;
+
 function removeReadingMarks() {
-    document.querySelectorAll('.reading-mark').forEach(el => {
+    let marks = document.querySelectorAll('.reading-mark');
+    marks.forEach(el => {
         let parent = el.parentNode;
         if (parent) {
             while (el.firstChild) {
@@ -1766,45 +1771,69 @@ function removeReadingMarks() {
             parent.normalize();
         }
     });
-    
-    // Re-sync globalTextNodes
+    // After normalization, we MUST rebuild the node map to keep offsets accurate
+    rebuildReadingNodeMap();
+}
+
+function rebuildReadingNodeMap() {
     let reader = document.getElementById("reader");
-    if (reader) {
-        let walker = document.createTreeWalker(reader, NodeFilter.SHOW_TEXT, null, false);
-        globalTextNodes = [];
-        while (walker.nextNode()) {
-            globalTextNodes.push(walker.currentNode);
-        }
+    if (!reader) return;
+    let walker = document.createTreeWalker(reader, NodeFilter.SHOW_TEXT, null, false);
+    globalTextNodes = [];
+    while (walker.nextNode()) {
+        globalTextNodes.push(walker.currentNode);
     }
 }
 
 function highlightReadingWord(absoluteWordPosition, charLength) {
+    // Optimization: Start searching from the last known good node to avoid O(N) scan
     let runningLength = 0;
     let targetNodeIndex = -1;
-    let offsetInNode = 0;
     
-    for (let i = 0; i < globalTextNodes.length; i++) {
+    // Quick estimation of start position
+    let searchStart = lastMarkedNodeIndex;
+    
+    // We need the cumulative length up to searchStart
+    for(let i=0; i < searchStart; i++) {
+        runningLength += globalTextNodes[i].nodeValue.length;
+    }
+
+    // Search forward (99% of cases during playback)
+    for (let i = searchStart; i < globalTextNodes.length; i++) {
         let nodeLen = globalTextNodes[i].nodeValue.length;
         if (runningLength + nodeLen > absoluteWordPosition) {
             targetNodeIndex = i;
-            offsetInNode = absoluteWordPosition - runningLength;
             break;
         }
         runningLength += nodeLen;
     }
-
-    if (targetNodeIndex !== -1) {
-        removeReadingMarks();
-        
-        // Re-find targetNodeIndex because removeReadingMarks might have re-normalized the nodes
+    
+    // Search backward if needed (e.g. user jumped back)
+    if (targetNodeIndex === -1 && searchStart > 0) {
         runningLength = 0;
-        targetNodeIndex = -1;
-        offsetInNode = 0;
         for (let i = 0; i < globalTextNodes.length; i++) {
             let nodeLen = globalTextNodes[i].nodeValue.length;
             if (runningLength + nodeLen > absoluteWordPosition) {
                 targetNodeIndex = i;
-                offsetInNode = absoluteWordPosition - runningLength;
+                break;
+            }
+            runningLength += nodeLen;
+        }
+    }
+
+    if (targetNodeIndex !== -1) {
+        lastMarkedNodeIndex = targetNodeIndex;
+        removeReadingMarks();
+        
+        // After removeReadingMarks, the node map is rebuilt
+        // and lastMarkedNodeIndex might have changed due to normalization
+        // Re-find target node
+        runningLength = 0;
+        targetNodeIndex = -1;
+        for (let i = 0; i < globalTextNodes.length; i++) {
+            let nodeLen = globalTextNodes[i].nodeValue.length;
+            if (runningLength + nodeLen > absoluteWordPosition) {
+                targetNodeIndex = i;
                 break;
             }
             runningLength += nodeLen;
