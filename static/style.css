@@ -486,7 +486,7 @@ td button:last-child:hover {
    Ensures all book types (PDF, EPUB, TXT) show the reader texture 
 */
 .book-content-container,
-.book-content-container *,
+.book-content-container *:not(.highlight):not(.reading-mark),
 .lazy-page-container,
 .page-centered-wrapper,
 div[id^="pdf-page-"],
@@ -496,9 +496,9 @@ div[id^="page"] {
 }
 
 /* Fix for specific PDF content blocks that might have white backgrounds */
-div[id^="page"] div, 
-div[id^="page"] span,
-div[id^="page"] p {
+div[id^="page"] div:not(.highlight):not(.reading-mark), 
+div[id^="page"] span:not(.highlight):not(.reading-mark),
+div[id^="page"] p:not(.highlight):not(.reading-mark) {
     background-color: transparent !important;
 }
 
@@ -600,9 +600,24 @@ div[id^="page"] p {
 
 /* Highlights */
 .highlight {
-    background-color: var(--highlight);
-    border-radius: 3px;
-    padding: 0 2px;
+    background-color: rgba(254, 240, 138, 0.85) !important; /* Brighter semi-transparent yellow */
+    border-radius: 2px;
+    padding: 1px 0;
+    position: relative;
+    z-index: 10; /* High z-index to stay above PDF text layers */
+    box-shadow: 0 0 2px rgba(234, 179, 8, 0.4);
+    display: inline-block !important; /* Changed from inline to inline-block for better box-model in PDFs */
+}
+
+/* Specific fix for highlights inside OCR words (which have color:transparent and tiny font-size) */
+.ocr-word .highlight {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: block !important;
+    border-radius: 0;
 }
 
 .find-highlight {
@@ -615,6 +630,9 @@ div[id^="page"] p {
     background-color: var(--reading-mark);
     border-radius: 3px;
     transition: background-color 0.15s ease-out;
+    position: relative; /* Ensure it stays above PDF text blocks */
+    z-index: 5;
+    mix-blend-mode: multiply; /* Better look for highlights over text */
 }
 
 /* Hidden OCR text for TTS/search — visual overlays are handled by JS */

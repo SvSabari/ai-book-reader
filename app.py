@@ -23,6 +23,48 @@ DB = "database.db"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(EXTRACTED_FOLDER, exist_ok=True)
 
+# Global cache to store pre-tokenized sentences for the currently active book
+# Structure: { book_id: (timestamp, [sentences]) }
+SENTENCE_CACHE = {}
+
+def get_book_sentences(book_id):
+    """Retrieve or generate tokenized sentences for a book to avoid repeated parsing."""
+    import time
+    if book_id in SENTENCE_CACHE:
+        return SENTENCE_CACHE[book_id][1]
+    
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT extracted_path FROM books WHERE id = ?", (book_id,))
+    row = cur.fetchone()
+    conn.close()
+    
+    if not row or not os.path.exists(row[0]):
+        return []
+        
+    try:
+        with open(row[0], "r", encoding="utf-8", errors="ignore") as f:
+            html_content = f.read()
+            
+        from bs4 import BeautifulSoup
+        import re
+        soup = BeautifulSoup(html_content, "html.parser")
+        text = soup.get_text(separator=" ")
+        
+        # Tokenize into sentences
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        sentences = [re.sub(r'\s+', ' ', s).strip() for s in sentences if len(s.strip()) > 5]
+        
+        # Keep only the last 3 books in cache to manage memory
+        if len(SENTENCE_CACHE) > 3:
+            oldest = min(SENTENCE_CACHE.keys(), key=lambda k: SENTENCE_CACHE[k][0])
+            del SENTENCE_CACHE[oldest]
+            
+        SENTENCE_CACHE[book_id] = (time.time(), sentences)
+        return sentences
+    except Exception:
+        return []
+
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 
@@ -692,6 +734,14 @@ def summarize_text():
     try:
         data = request.get_json()
         text = data.get("text", "")
+        book_id = data.get("book_id")
+        
+        # If book_id provided, we use the cached full-book sentences or read from disk
+        # (Allows summarization of specific highlights OR full context search)
+        if book_id and not text:
+            sentences = get_book_sentences(book_id)
+            text = " ".join(sentences)
+            
         if not text or len(text.strip()) < 50:
             return jsonify({"summary": "Text is too short to summarize. Please highlight a larger section."})
 
@@ -755,19 +805,23 @@ def ask_question():
     try:
         data = request.get_json()
         question = data.get("question", "")
+        book_id = data.get("book_id")
         text = data.get("text", "")
         
-        if not question or not text:
-            return jsonify({"answer": "Please provide a question and ensure a book is open."})
+        if not question:
+            return jsonify({"answer": "Please provide a question."})
             
-        import re
-        import math
-        from collections import defaultdict
-        
-        # 1. Tokenize book into sentences
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-        if len(sentences) == 0:
-            return jsonify({"answer": "Could not read book text."})
+        # Optimization: Fetch pre-cached sentences from the server instead of receiving them via network
+        if book_id:
+            sentences = get_book_sentences(book_id)
+        elif text:
+            import re
+            sentences = re.split(r'(?<=[.!?])\s+', text)
+        else:
+            return jsonify({"answer": "Ensure a book is open."})
+
+        if not sentences:
+            return jsonify({"answer": "Could not read book text or book is empty."})
             
         # 2. Extract question keywords (ignoring stop words)
         stop_words = set(['what', 'who', 'is', 'a', 'at', 'is', 'he', 'the', 'in', 'and', 'to', 'of', 'for', 'it', 'on', 'with', 'as', 'by', 'that', 'this', 'an', 'are', 'was', 'be', 'or', 'from', 'where', 'when', 'why', 'how', 'does', 'do', 'did'])
@@ -831,19 +885,23 @@ def define_word():
     try:
         data = request.get_json()
         word = data.get("word", "").lower()
-        html_content = data.get("text", "")
+        book_id = data.get("book_id")
+        text_from_client = data.get("text", "")
         
-        if not word or not html_content:
-            return jsonify({"answer": "Word or text missing."})
+        if not word:
+            return jsonify({"answer": "Word missing."})
             
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(html_content, "html.parser")
-        text = soup.get_text(separator=" ")
-        
-        import re
-        # 1. Tokenize into sentences
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-        sentences = [re.sub(r'\s+', ' ', s).strip() for s in sentences if len(s.strip()) > 5]
+        if book_id:
+            sentences = get_book_sentences(book_id)
+        elif text_from_client:
+            from bs4 import BeautifulSoup
+            import re
+            soup = BeautifulSoup(text_from_client, "html.parser")
+            raw_text = soup.get_text(separator=" ")
+            sentences = re.split(r'(?<=[.!?])\s+', raw_text)
+            sentences = [re.sub(r'\s+', ' ', s).strip() for s in sentences if len(s.strip()) > 5]
+        else:
+            return jsonify({"answer": "Book context missing."})
         
         # 2. Search for definition patterns: "Word is...", "Word means...", "Word refers to..."
         patterns = [

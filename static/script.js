@@ -429,6 +429,10 @@ function proceedToOpenBook(bookId) {
             renderBatch(0);
         }
 
+        // Apply a one-time normalization pass to clear soft-hyphens and messy characters
+        // that cause offset drift between speech engine and DOM.
+        setTimeout(() => normalizeBookDOM(reader), 1000);
+        
         loadHighlights(bookId);
     })
     .catch(err => {
@@ -462,37 +466,53 @@ function deleteBook(bookId) {
 }
 
 function saveHighlight() {
+    console.log("Save Highlight Initiated");
     let selection = window.getSelection();
-    let selectedText = selection.toString().trim();
+    let text = selection.toString().trim();
     let toolbar = document.getElementById("selectionToolbar");
 
-    if (!selectedText || !currentBookId) {
-        if(toolbar) toolbar.style.display = "none";
+    if (!text || !currentBookId) {
+        console.warn("SaveHighlight aborted: text or bookId missing", { text, currentBookId });
+        if (toolbar) toolbar.style.display = "none";
         return;
     }
+
+    // Identify the range before any DOM modifications
     let rangeData = getAbsoluteSelectionRange();
-    if (!rangeData) return;
+    if (!rangeData) {
+        console.error("Failed to calculate absolute range for selection");
+        return;
+    }
+
+    console.log("Applying highlight to range:", rangeData);
     
+    // Apply visual highlight immediately
+    let reader = document.getElementById("reader");
+    highlightAbsoluteRange(reader, rangeData, 'highlight');
+
+    // Persist locally so it stays across lazy-loads
+    if (!currentHighlights.some(h => {
+        let jh = typeof h === 'string' ? JSON.parse(h) : h;
+        return jh.startChar === rangeData.startChar && jh.endChar === rangeData.endChar;
+    })) {
+        currentHighlights.push(JSON.stringify(rangeData));
+    }
+
+    // Save to server
     fetch("/save_highlight", {
         method: "POST",
-        headers: {
-            "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
             book_id: currentBookId,
             highlighted_text: JSON.stringify(rangeData)
         })
-    })
-    .then(res => res.json())
-    .then(() => {
-        if(toolbar) toolbar.style.display = "none";
-        window.getSelection().removeAllRanges();
-        
-        // Inject highlight into current DOM without destroying innerHTML, 
-        // protecting active text-to-speech instances from losing track.
-        let reader = document.getElementById("reader");
-        highlightAbsoluteRange(reader, rangeData, 'highlight');
-    });
+    }).then(res => {
+        if (res.ok) console.log("Highlight saved to server");
+    }).catch(err => console.error("Error saving highlight:", err));
+
+    // Cleanup
+    if (toolbar) toolbar.style.display = "none";
+    selection.removeAllRanges();
 }
 
 function getAbsoluteSelectionRange() {
@@ -500,44 +520,89 @@ function getAbsoluteSelectionRange() {
     if (selection.rangeCount === 0) return null;
     let range = selection.getRangeAt(0);
     let reader = document.getElementById("reader");
-    let walker = document.createTreeWalker(reader, NodeFilter.SHOW_TEXT, null, false);
     
-    let startChar = 0; let endChar = 0;
-    let foundStart = false; let foundEnd = false;
-    let currentLength = 0;
+    let { nodes, offsets } = getNodesAndText(reader);
     
-    let startNode = range.startContainer.nodeType === 3 ? range.startContainer : range.startContainer.childNodes[range.startOffset] || range.startContainer;
-    let endNode = range.endContainer.nodeType === 3 ? range.endContainer : range.endContainer.childNodes[range.endOffset - 1] || range.endContainer;
-    
-    while(walker.nextNode()) {
-        let node = walker.currentNode;
-        
-        if (!foundStart && (node === startNode || (startNode.contains && startNode.contains(node)))) {
-            let offset = range.startContainer.nodeType === 3 ? range.startOffset : 0;
-            startChar = currentLength + offset;
-            foundStart = true;
+    let startNode = range.startContainer;
+    let startOffset = range.startOffset;
+    let endNode = range.endContainer;
+    let endOffset = range.endOffset;
+
+    // Helper to find the first/last text node inside an element
+    function firstText(el) {
+        if (el.nodeType === 3) return el;
+        let walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null, false);
+        return walker.nextNode();
+    }
+    function lastText(el) {
+        if (el.nodeType === 3) return el;
+        let walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null, false);
+        let last = null; let node;
+        while(node = walker.nextNode()) last = node;
+        return last;
+    }
+
+    // Resolve element containers to text nodes
+    if (startNode.nodeType === 1) {
+        let child = startNode.childNodes[startOffset];
+        if (child) {
+            startNode = firstText(child) || startNode;
+            startOffset = 0;
+        } else {
+            // End of element
+            startNode = lastText(startNode) || startNode;
+            startOffset = (startNode.nodeType === 3) ? startNode.nodeValue.length : 0;
         }
-        if (!foundEnd && (node === endNode || (endNode.contains && endNode.contains(node)))) {
-            let offset = range.endContainer.nodeType === 3 ? range.endOffset : node.nodeValue.length;
-            endChar = currentLength + offset;
-            foundEnd = true;
+    }
+    if (endNode.nodeType === 1) {
+        let child = endNode.childNodes[endOffset - 1] || endNode.childNodes[endOffset];
+        if (child) {
+            endNode = lastText(child) || endNode;
+            endOffset = (endNode.nodeType === 3) ? endNode.nodeValue.length : 0;
+        } else {
+            endNode = lastText(endNode) || endNode;
+            endOffset = (endNode.nodeType === 3) ? endNode.nodeValue.length : 0;
         }
-        
-        currentLength += node.nodeValue.length;
-        if (foundStart && foundEnd) break;
+    }
+
+    let startIndex = -1;
+    let endIndex = -1;
+    
+    for (let i = 0; i < nodes.length; i++) {
+        if (nodes[i] === startNode) startIndex = offsets[i] + startOffset;
+        if (nodes[i] === endNode) endIndex = offsets[i] + endOffset;
+        if (startIndex !== -1 && endIndex !== -1) break;
     }
     
-    if(!foundStart || !foundEnd) return null;
-    return { startChar, endChar, text: selection.toString().trim() };
+    // Fallback: If exact nodes not found, use character-based reconstruction (costly but accurate)
+    if (startIndex === -1 || endIndex === -1) {
+        console.warn("Exact nodes not found in map, using fallback calculation...");
+        let preRange = range.cloneRange();
+        preRange.selectNodeContents(reader);
+        preRange.setEnd(range.startContainer, range.startOffset);
+        startIndex = preRange.toString().length;
+        endIndex = startIndex + range.toString().length;
+    }
+    
+    return { 
+        startChar: Math.min(startIndex, endIndex), 
+        endChar: Math.max(startIndex, endIndex), 
+        text: selection.toString().trim() 
+    };
 }
 
 function highlightAbsoluteRange(reader, item, className) {
+    if (!item || item.startChar === undefined || item.endChar === undefined) return;
+    
     let walker = document.createTreeWalker(reader, NodeFilter.SHOW_TEXT, null, false);
     let currentLength = 0;
     let nodesToWrap = [];
     
     while(walker.nextNode()) {
         let node = walker.currentNode;
+        // Skip hidden/system nodes
+        if (node.parentNode.classList.contains('empty-state') || node.parentNode.id === 'thankYouState' || node.parentNode.classList.contains('selection-toolbar')) continue;
+
         let nodeLen = node.nodeValue.length;
         let nodeStart = currentLength;
         let nodeEnd = currentLength + nodeLen;
@@ -552,41 +617,40 @@ function highlightAbsoluteRange(reader, item, className) {
         if (currentLength >= item.endChar) break;
     }
     
+    // Apply highlights from bottom-up to keep tree offsets valid during mutation
     for (let i = nodesToWrap.length - 1; i >= 0; i--) {
         let { node, sliceStart, sliceEnd } = nodesToWrap[i];
-        if (node.parentNode && node.parentNode.className === className) continue;
+        let parent = node.parentNode;
+        if (!parent) continue;
         
+        // Prevent recursive wrapping of already highlighted elements
+        if (parent.classList.contains(className)) continue;
+
         let nodeText = node.nodeValue;
         if (sliceStart === 0 && sliceEnd === nodeText.length) {
             let span = document.createElement("span");
-            span.className = className; span.textContent = nodeText;
-            node.parentNode.replaceChild(span, node);
+            span.className = className;
+            span.textContent = nodeText;
+            try { parent.replaceChild(span, node); } catch(e) {}
         } else {
-            let before = nodeText.slice(0, sliceStart);
-            let mid = nodeText.slice(sliceStart, sliceEnd);
-            let after = nodeText.slice(sliceEnd);
+            let beforeText = nodeText.slice(0, sliceStart);
+            let midText = nodeText.slice(sliceStart, sliceEnd);
+            let afterText = nodeText.slice(sliceEnd);
             
             let span = document.createElement("span");
-            span.className = className; span.textContent = mid;
-            let parent = node.parentNode;
+            span.className = className;
+            span.textContent = midText;
             
-            if (before.length > 0) {
-               let bNode = document.createTextNode(before);
-               parent.insertBefore(bNode, node);
+            if (afterText) {
+                try { parent.insertBefore(document.createTextNode(afterText), node.nextSibling); } catch(e) {}
             }
-            parent.insertBefore(span, node);
-            if (after.length > 0) {
-               let aNode = document.createTextNode(after);
-               parent.insertBefore(aNode, node);
+            try { parent.insertBefore(span, node.nextSibling); } catch(e) {}
+            if (beforeText) {
+                node.nodeValue = beforeText;
+            } else {
+                try { parent.removeChild(node); } catch(e) {}
             }
-            parent.removeChild(node);
         }
-    }
-    
-    if (globalTextNodes && globalTextNodes.length > 0) {
-        // Caching text nodes for future highlights in the same session
-        // However, since we split the document into pages, we should cache per page 
-        // or just accept that TreeWalker is fast if bounded.
     }
 }
 
@@ -598,88 +662,24 @@ function applyExistingHighlights() {
     if (!currentHighlights || currentHighlights.length === 0) return;
     
     let reader = document.getElementById("reader");
-    let highlightsToApply = [];
+    let batch = [];
 
     currentHighlights.forEach(itemStr => {
         if (!itemStr) return;
         try {
-            let item = JSON.parse(itemStr);
-            if (item.startChar !== undefined) {
-                highlightsToApply.push(item);
-            } else {
-                // Fallback for non-range highlights (regex based)
-                highlightTextInNode(reader, itemStr, 'highlight');
+            let item = typeof itemStr === 'string' ? JSON.parse(itemStr) : itemStr;
+            if (item && item.startChar !== undefined) {
+                batch.push(item);
             }
-        } catch(e) {
-            highlightTextInNode(reader, itemStr, 'highlight');
-        }
+        } catch(e) {}
     });
 
-    if (highlightsToApply.length === 0) return;
+    if (batch.length === 0) return;
 
-    // Sort highlights by startChar to allow single-pass processing
-    highlightsToApply.sort((a, b) => a.startChar - b.startChar);
-
-    let walker = document.createTreeWalker(reader, NodeFilter.SHOW_TEXT, null, false);
-    let currentLength = 0;
-    let hIndex = 0;
-    let nodesToWrap = [];
-
-    while(walker.nextNode() && hIndex < highlightsToApply.length) {
-        let node = walker.currentNode;
-        let nodeLen = node.nodeValue.length;
-        let nodeStart = currentLength;
-        let nodeEnd = currentLength + nodeLen;
-        
-        // Check all highlights that might start in or before this node
-        while (hIndex < highlightsToApply.length) {
-            let item = highlightsToApply[hIndex];
-            
-            if (nodeEnd > item.startChar && nodeStart < item.endChar) {
-                let sliceStart = Math.max(0, item.startChar - nodeStart);
-                let sliceEnd = Math.min(nodeLen, item.endChar - nodeStart);
-                nodesToWrap.push({ node, sliceStart, sliceEnd, className: 'highlight' });
-                
-                // If it ends after this node, don't increment hIndex yet, 
-                // it might span the next node too
-                if (item.endChar > nodeEnd) {
-                    break; 
-                } else {
-                    hIndex++; // It's finished
-                }
-            } else if (nodeStart >= item.endChar) {
-                hIndex++; // This highlight is already in the past
-            } else {
-                break; // This and future highlights start after this node
-            }
-        }
-        
-        currentLength += nodeLen;
-    }
-
-    // Apply the wraps in reverse order to protect node indices
-    for (let i = nodesToWrap.length - 1; i >= 0; i--) {
-        let { node, sliceStart, sliceEnd, className } = nodesToWrap[i];
-        if (node.parentNode && node.parentNode.className === className) continue;
-        
-        let nodeText = node.nodeValue;
-        if (sliceStart === 0 && sliceEnd === nodeText.length) {
-            let span = document.createElement("span");
-            span.className = className; span.textContent = nodeText;
-            node.parentNode.replaceChild(span, node);
-        } else {
-            let before = nodeText.slice(0, sliceStart);
-            let mid = nodeText.slice(sliceStart, sliceEnd);
-            let after = nodeText.slice(sliceEnd);
-            let span = document.createElement("span");
-            span.className = className; span.textContent = mid;
-            let parent = node.parentNode;
-            if (before.length > 0) parent.insertBefore(document.createTextNode(before), node);
-            parent.insertBefore(span, node);
-            if (after.length > 0) parent.insertBefore(document.createTextNode(after), node);
-            parent.removeChild(node);
-        }
-    }
+    // Apply each highlight using the absolute offsets
+    batch.forEach(item => {
+        highlightAbsoluteRange(reader, item, 'highlight');
+    });
 }
 
 function refreshNodeCache() {
@@ -726,6 +726,46 @@ let isReadingAloud = false;
 let isPaused = false;
 let globalReadingText = "";
 let globalTextNodes = [];
+let globalNodeOffsets = []; // Cached start offsets for each node in globalTextNodes
+let activeReadingMarks = []; // Track current highlighted spans
+let lastHighlightPos = -1; // Prevent backward jumping
+
+function normalizeBookDOM(root) {
+    let walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+    while (walker.nextNode()) {
+        let node = walker.currentNode;
+        // Clean soft hyphens, zero-width spaces, and other "invisible" PDF artifacts
+        // that break character-offset mapping during speech and highlighting.
+        let val = node.nodeValue
+            .replace(/\u00AD/g, '')     // soft hyphen
+            .replace(/\u00A0/g, ' ')    // nbsp
+            .replace(/\u200B/g, '')     // zero-width space
+            .replace(/\r/g, '');        // CR
+            
+        if (val !== node.nodeValue) {
+            node.nodeValue = val;
+        }
+    }
+}
+
+function getNodesAndText(root) {
+    let nodes = [];
+    let offsets = [];
+    let text = "";
+    let walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
+    while (walker.nextNode()) {
+        let node = walker.currentNode;
+        if (node.parentNode.classList.contains('empty-state') || node.parentNode.id === 'thankYouState') continue;
+        
+        // READ ONLY: We no longer mutate nodeValue here to prevent selection collapse
+        let val = node.nodeValue;
+
+        nodes.push(node);
+        offsets.push(text.length);
+        text += val;
+    }
+    return { nodes, offsets, text };
+}
 
 function highlightTextInNode(element, textToHighlight, className) {
     if (!textToHighlight) return;
@@ -753,30 +793,20 @@ function highlightTextInNode(element, textToHighlight, className) {
 
 function readAloud() {
     let reader = document.getElementById("reader");
-    let walker = document.createTreeWalker(reader, NodeFilter.SHOW_TEXT, null, false);
-    globalTextNodes = [];
-    while (walker.nextNode()) {
-        globalTextNodes.push(walker.currentNode);
-    }
+    let { nodes, offsets, text } = getNodesAndText(reader);
+    globalTextNodes = nodes;
+    globalNodeOffsets = offsets;
+    globalReadingText = text;
 
-    let text = "";
-    // Preserve index if set by bookmark/resume
-    if (typeof currentAbsoluteCharIndex === 'undefined') currentAbsoluteCharIndex = 0;
-
-    let textParts = [];
-    for (let i = 0; i < globalTextNodes.length; i++) {
-        textParts.push(globalTextNodes[i].nodeValue);
-    }
-    text = textParts.join("");
 
     if (!text.trim()) {
         alert("No book text to read");
         return;
     }
 
-    globalReadingText = text;
     stopReading();
     isReadingAloud = true;
+    lastHighlightPos = -1; // Reset high-water mark for new run
     
     let playPauseBtn = document.getElementById("playPauseBtn");
     if(playPauseBtn) playPauseBtn.innerText = "Pause ⏸";
@@ -800,37 +830,33 @@ function readAloud() {
     if (lastSplit < remainingText.length) {
         chunks.push(remainingText.substring(lastSplit));
     }
-    let chunkOffset = currentAbsoluteCharIndex;
+    let currentChunkAbsStart = currentAbsoluteCharIndex;
 
     let testLang = getSelectedLanguage();
     let testShort = testLang ? testLang.split('-')[0].toLowerCase() : 'en';
-    
-    // Force backend gTTS for ALL non-English languages to bypass unreliable browser voice banks
     if (testShort !== 'en') {
-        playFallbackAudioQueue(chunks, chunkOffset, testShort, false);
+        playFallbackAudioQueue(chunks, currentChunkAbsStart, testShort, false);
         return;
     }
 
-    let testVoice = null;
-    if (testLang) {
-        let voices = window.speechSynthesis.getVoices();
-        let langSelect = document.getElementById('langSelect');
-        let langText = langSelect && langSelect.selectedIndex >= 0 ? langSelect.options[langSelect.selectedIndex].text.toLowerCase().split(' ')[0] : 'english';
-        testVoice = voices.find(v => v.lang.toLowerCase().replace('_','-') === testLang.toLowerCase()) || 
-                    voices.find(v => v.lang.toLowerCase().startsWith(testShort)) ||
-                    voices.find(v => v.name.toLowerCase().includes(langText));
-    }
-
     chunks.forEach(chunk => {
-        if(chunk.trim() === "") return;
+        let trimmed = chunk.trimStart();
+        if(!trimmed) {
+            currentChunkAbsStart += chunk.length;
+            return;
+        }
+        let leadingSpaces = chunk.length - trimmed.length;
+        let actualStartOffset = currentChunkAbsStart + leadingSpaces;
 
-        let utterance = new SpeechSynthesisUtterance(chunk);
+        let utterance = new SpeechSynthesisUtterance(trimmed);
         let lang = getSelectedLanguage();
         if (lang) {
             utterance.lang = lang;
             let voices = window.speechSynthesis.getVoices();
             let shortLang = lang.split('-')[0].toLowerCase();
-            let langText = document.getElementById('langSelect').options[document.getElementById('langSelect').selectedIndex].text.toLowerCase().split(' ')[0];
+            let selector = document.getElementById('langSelect');
+            let langText = selector && selector.selectedIndex >= 0 ? selector.options[selector.selectedIndex].text.toLowerCase().split(' ')[0] : 'english';
+            
             let voice = voices.find(v => v.lang.toLowerCase().replace('_','-') === lang.toLowerCase()) || 
                         voices.find(v => v.lang.toLowerCase().startsWith(shortLang)) ||
                         voices.find(v => v.name.toLowerCase().includes(langText));
@@ -839,8 +865,8 @@ function readAloud() {
             }
         }
         utterance.rate = 0.9;
-        let thisChunkStartOffset = chunkOffset;
-        chunkOffset += chunk.length;
+        
+        currentChunkAbsStart += chunk.length;
 
         utterance.onstart = function() {
             removeReadingMarks();
@@ -853,28 +879,12 @@ function readAloud() {
             let wordMatch = wordText.match(/^[\w\u0080-\uFFFF]+/);
             let charLength = event.charLength || (wordMatch ? wordMatch[0].length : 1);
             
-            // Calculate absolute position in the global text string
-            let absoluteWordPosition = thisChunkStartOffset + event.charIndex;
+            let absoluteWordPosition = actualStartOffset + event.charIndex;
             currentAbsoluteCharIndex = absoluteWordPosition;
 
-            // Iterate through DOM nodes accumulating character lengths until we hit our absolute position
-            let runningLength = 0;
-            let targetNodeIndex = -1;
-            let offsetInNode = 0;
-            
-            for (let i = 0; i < globalTextNodes.length; i++) {
-                let nodeLen = globalTextNodes[i].nodeValue.length;
-                if (runningLength + nodeLen > absoluteWordPosition) {
-                    targetNodeIndex = i;
-                    offsetInNode = absoluteWordPosition - runningLength;
-                    break;
-                }
-                runningLength += nodeLen;
-            }
-
-            if (targetNodeIndex !== -1) {
+            requestAnimationFrame(() => {
                 highlightReadingWord(absoluteWordPosition, charLength);
-            }
+            });
         };
         
         window.speechSynthesis.speak(utterance);
@@ -896,8 +906,13 @@ function resumeReadingFromIndex(index, startPaused = false) {
     let reader = document.getElementById("reader");
     let walker = document.createTreeWalker(reader, NodeFilter.SHOW_TEXT, null, false);
     globalTextNodes = [];
+    globalNodeOffsets = [];
+    let currentPos = 0;
     while (walker.nextNode()) {
-        globalTextNodes.push(walker.currentNode);
+        let node = walker.currentNode;
+        globalTextNodes.push(node);
+        globalNodeOffsets.push(currentPos);
+        currentPos += node.nodeValue.length;
     }
     
     let text = globalReadingText;
@@ -978,23 +993,9 @@ function resumeReadingFromIndex(index, startPaused = false) {
             let absoluteWordPosition = thisChunkStartOffset + event.charIndex;
             currentAbsoluteCharIndex = absoluteWordPosition;
 
-            let runningLength = 0;
-            let targetNodeIndex = -1;
-            let offsetInNode = 0;
-            
-            for (let i = 0; i < globalTextNodes.length; i++) {
-                let nodeLen = globalTextNodes[i].nodeValue.length;
-                if (runningLength + nodeLen > absoluteWordPosition) {
-                    targetNodeIndex = i;
-                    offsetInNode = absoluteWordPosition - runningLength;
-                    break;
-                }
-                runningLength += nodeLen;
-            }
-
-            if (targetNodeIndex !== -1) {
+            requestAnimationFrame(() => {
                 highlightReadingWord(absoluteWordPosition, charLength);
-            }
+            });
         };
         
         window.speechSynthesis.speak(utterance);
@@ -1014,6 +1015,7 @@ function stopReading() {
     }
     isReadingAloud = false;
     isPaused = false;
+    lastHighlightPos = -1;
     removeReadingMarks();
     
     let playPauseBtn = document.getElementById("playPauseBtn");
@@ -1057,11 +1059,6 @@ async function askBookQuestion() {
     
     answerObj.innerHTML = `<span style="color: var(--primary);">🤔 Thinking...</span>`;
     
-    // Extract plain text from the HTML book view
-    let tempDiv = document.createElement("div");
-    tempDiv.innerHTML = currentBookText;
-    let plainText = tempDiv.textContent || tempDiv.innerText || "";
-    
     try {
         let res = await fetch("/ask", {
             method: "POST",
@@ -1070,7 +1067,7 @@ async function askBookQuestion() {
             },
             body: JSON.stringify({ 
                 question: question,
-                text: plainText
+                book_id: currentBookId
             })
         });
         
@@ -1086,35 +1083,6 @@ async function askBookQuestion() {
     }
 }
 
-document.addEventListener("selectionchange", function () {
-    let selection = window.getSelection();
-    let selectedText = selection.toString().trim();
-    let toolbar = document.getElementById("selectionToolbar");
-    let reader = document.getElementById("reader");
-
-    if (!selectedText || selection.rangeCount === 0) {
-        if(toolbar) toolbar.style.display = "none";
-        return;
-    }
-
-    let range = selection.getRangeAt(0);
-    let rect = range.getBoundingClientRect();
-
-    let node = range.commonAncestorContainer.nodeType === 3
-        ? range.commonAncestorContainer.parentNode
-        : range.commonAncestorContainer;
-
-    if (!reader.contains(node)) {
-        if(toolbar) toolbar.style.display = "none";
-        return;
-    }
-
-    if(toolbar) {
-        toolbar.style.display = "flex";
-        toolbar.style.left = (rect.right + 8) + "px";
-        toolbar.style.top = (rect.top - 5) + "px";
-    }
-});
 
 document.addEventListener("click", function(e) {
     let toolbar = document.getElementById("selectionToolbar");
@@ -1275,7 +1243,10 @@ async function summarizeSelectedText() {
             headers: {
                 "Content-Type": "application/json"
             },
-            body: JSON.stringify({ text: selectedText })
+            body: JSON.stringify({ 
+                text: selectedText,
+                book_id: currentBookId
+            })
         });
         
         let data = await res.json();
@@ -1307,8 +1278,11 @@ async function lookupSelectedText() {
     let selectedText = selection.toString().trim();
     if (!selectedText) return;
     
-    // Limit to single word for better dictionary results
-    let word = selectedText.split(/\s+/)[0].replace(/[^\w]/g, '');
+    // Check if it's a single word or a phrase
+    let words = selectedText.trim().split(/\s+/);
+    let isPhrase = words.length > 1;
+    let word = isPhrase ? selectedText.trim() : words[0].replace(/[^\w]/g, '');
+    
     if (!word) return;
 
     let toolbar = document.getElementById("selectionToolbar");
@@ -1334,8 +1308,19 @@ async function lookupSelectedText() {
     document.body.appendChild(tooltip);
 
     try {
-        let res = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`);
         let body = tooltip.querySelector(".tooltip-body");
+        
+        // If it's a phrase, skip the external dictionary and go straight to AI
+        if (isPhrase) {
+            body.innerHTML = `<div style="display: flex; align-items: center; gap: 8px; color: var(--primary);">
+                <div class="loader-spinner" style="width:14px; height:14px; border:2px solid rgba(139,92,246,0.2); border-top-color:var(--primary); border-radius:50%; animation:spin 1s linear infinite;"></div>
+                ✨ AI searching book...
+            </div>`;
+            askAIDefinition(word, body);
+            return;
+        }
+
+        let res = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(word)}`);
         
         if (!res.ok) {
             // Automated Fallback: Don't show button, just do it.
@@ -1389,7 +1374,7 @@ async function askAIDefinition(word, targetElement) {
         let res = await fetch("/define", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ word: word, text: currentBookText })
+            body: JSON.stringify({ word: word, book_id: currentBookId })
         });
         
         let data = await res.json();
@@ -1458,7 +1443,6 @@ function executeSearch(word) {
     
     searchMatchesFound = 0;
     highlightTextInNode(currentReader, word, 'find-highlight');
-    appendQABlock();
     
     if (searchMatchesFound > 0) {
         currentSearchIndex = 0;
@@ -1723,30 +1707,32 @@ let fallbackQueue = [];
 
 function playFallbackAudioQueue(chunks, startOffset, shortLang, startPaused) {
     fallbackQueue = [];
-    let currentOffset = startOffset;
+    let currentAbsOffset = startOffset;
     
     chunks.forEach(chunk => {
-        if(chunk.trim() === "") return;
-        
-        // Slice chunks tightly for Google TTS max 200 char limits
-        let subChunks = [];
-        let words = chunk.split(' ');
-        let temp = "";
-        for(let w of words) {
-            if((temp + " " + w).length > 180) {
-                if(temp) subChunks.push(temp);
-                temp = w;
-            } else {
-                temp = temp ? temp + " " + w : w;
-            }
+        if (!chunk.trim()) {
+            currentAbsOffset += chunk.length;
+            return;
         }
-        if(temp) subChunks.push(temp);
         
-        subChunks.forEach(sc => {
-            let url = `/tts?lang=${shortLang}&text=${encodeURIComponent(sc)}`;
-            fallbackQueue.push({ url, text: sc, offset: currentOffset });
-            currentOffset += sc.length + 1;
-        });
+        // Surgical slicing to stay under 200 chars for gTTS
+        let start = 0;
+        while (start < chunk.length) {
+            let end = start + 180;
+            if (end < chunk.length) {
+                // Try to find a space or period to split cleanly
+                let lastSpace = chunk.lastIndexOf(' ', end);
+                if (lastSpace > start) end = lastSpace;
+            } else {
+                end = chunk.length;
+            }
+            
+            let sc = chunk.substring(start, end);
+            let url = `/tts?lang=${shortLang}&text=${encodeURIComponent(sc.trim())}`;
+            fallbackQueue.push({ url, text: sc, offset: currentAbsOffset + start });
+            start = end;
+        }
+        currentAbsOffset += chunk.length;
     });
 
     if (startPaused) {
@@ -1759,126 +1745,118 @@ function playFallbackAudioQueue(chunks, startOffset, shortLang, startPaused) {
 // Global state to track the LAST touched node for fast hit-testing
 let lastMarkedNodeIndex = 0;
 
+
 function removeReadingMarks() {
+    activeReadingMarks.forEach(span => {
+        const parent = span.parentNode;
+        if (parent) {
+            const text = span.textContent;
+            const textNode = document.createTextNode(text);
+            parent.replaceChild(textNode, span);
+            parent.normalize();
+        }
+    });
+    activeReadingMarks = [];
+
+    // Safety fallback for any missed marks
     let marks = document.querySelectorAll('.reading-mark');
     marks.forEach(el => {
         let parent = el.parentNode;
         if (parent) {
-            while (el.firstChild) {
-                parent.insertBefore(el.firstChild, el);
-            }
+            while (el.firstChild) parent.insertBefore(el.firstChild, el);
             parent.removeChild(el);
             parent.normalize();
         }
     });
-    // After normalization, we MUST rebuild the node map to keep offsets accurate
-    rebuildReadingNodeMap();
 }
 
 function rebuildReadingNodeMap() {
     let reader = document.getElementById("reader");
     if (!reader) return;
-    let walker = document.createTreeWalker(reader, NodeFilter.SHOW_TEXT, null, false);
-    globalTextNodes = [];
-    while (walker.nextNode()) {
-        globalTextNodes.push(walker.currentNode);
-    }
+    let { nodes, offsets, text } = getNodesAndText(reader);
+    globalTextNodes = nodes;
+    globalNodeOffsets = offsets;
+    globalReadingText = text;
 }
 
 function highlightReadingWord(absoluteWordPosition, charLength) {
-    // Optimization: Start searching from the last known good node to avoid O(N) scan
-    let runningLength = 0;
-    let targetNodeIndex = -1;
-    
-    // Quick estimation of start position
-    let searchStart = lastMarkedNodeIndex;
-    
-    // We need the cumulative length up to searchStart
-    for(let i=0; i < searchStart; i++) {
-        runningLength += globalTextNodes[i].nodeValue.length;
-    }
+    if (absoluteWordPosition < lastHighlightPos) return;
+    lastHighlightPos = absoluteWordPosition;
 
-    // Search forward (99% of cases during playback)
-    for (let i = searchStart; i < globalTextNodes.length; i++) {
+    // 1. Remove previous marks and rebuild map to ensure fresh offsets
+    removeReadingMarks();
+    rebuildReadingNodeMap();
+
+    // 2. Identify all nodes that intersect with the word range [pos, pos + len]
+    let startChar = absoluteWordPosition;
+    let endChar = absoluteWordPosition + charLength;
+    
+    let nodesToWrap = [];
+    for (let i = 0; i < globalTextNodes.length; i++) {
+        let nodeStart = globalNodeOffsets[i];
         let nodeLen = globalTextNodes[i].nodeValue.length;
-        if (runningLength + nodeLen > absoluteWordPosition) {
-            targetNodeIndex = i;
-            break;
+        let nodeEnd = nodeStart + nodeLen;
+
+        if (nodeEnd > startChar && nodeStart < endChar) {
+            let sliceStart = Math.max(0, startChar - nodeStart);
+            let sliceEnd = Math.min(nodeLen, endChar - nodeStart);
+            nodesToWrap.push({
+                node: globalTextNodes[i],
+                sliceStart: sliceStart,
+                sliceEnd: sliceEnd
+            });
         }
-        runningLength += nodeLen;
-    }
-    
-    // Search backward if needed (e.g. user jumped back)
-    if (targetNodeIndex === -1 && searchStart > 0) {
-        runningLength = 0;
-        for (let i = 0; i < globalTextNodes.length; i++) {
-            let nodeLen = globalTextNodes[i].nodeValue.length;
-            if (runningLength + nodeLen > absoluteWordPosition) {
-                targetNodeIndex = i;
-                break;
-            }
-            runningLength += nodeLen;
-        }
+        if (nodeStart >= endChar) break;
     }
 
-    if (targetNodeIndex !== -1) {
-        lastMarkedNodeIndex = targetNodeIndex;
-        removeReadingMarks();
-        
-        // After removeReadingMarks, the node map is rebuilt
-        // and lastMarkedNodeIndex might have changed due to normalization
-        // Re-find target node
-        runningLength = 0;
-        targetNodeIndex = -1;
-        for (let i = 0; i < globalTextNodes.length; i++) {
-            let nodeLen = globalTextNodes[i].nodeValue.length;
-            if (runningLength + nodeLen > absoluteWordPosition) {
-                targetNodeIndex = i;
-                break;
-            }
-            runningLength += nodeLen;
-        }
+    if (nodesToWrap.length === 0) return;
 
-        if (targetNodeIndex === -1) return;
-        
-        let nodeText = globalTextNodes[targetNodeIndex].nodeValue;
-        let actualWordLen = Math.min(charLength, nodeText.length - offsetInNode);
-        let exactWord = nodeText.slice(offsetInNode, offsetInNode + actualWordLen);
-        
-        if (!exactWord.replace(/[^\w\u0080-\uFFFF]/g, '')) return;
-        
-        let before = nodeText.slice(0, offsetInNode);
-        let after = nodeText.slice(offsetInNode + actualWordLen);
-        
+    // 3. Apply the new marks
+    nodesToWrap.forEach(item => {
+        let { node, sliceStart, sliceEnd } = item;
+        let nodeText = node.nodeValue;
+        let parent = node.parentNode;
+        if (!parent) return;
+
         let span = document.createElement("span");
         span.className = "reading-mark";
-        span.textContent = exactWord;
         
-        let beforeNode = document.createTextNode(before);
-        let afterNode = document.createTextNode(after);
-        
-        let parent = globalTextNodes[targetNodeIndex].parentNode;
-        parent.insertBefore(beforeNode, globalTextNodes[targetNodeIndex]);
-        parent.insertBefore(span, globalTextNodes[targetNodeIndex]);
-        parent.insertBefore(afterNode, globalTextNodes[targetNodeIndex]);
-        parent.removeChild(globalTextNodes[targetNodeIndex]);
-        
-        globalTextNodes.splice(targetNodeIndex, 1, beforeNode, span.firstChild, afterNode);
-        // Vertical-only scroll: preserve horizontal position so zoomed content doesn't shift sideways
-        let reader = document.getElementById('reader');
-        let spanRect = span.getBoundingClientRect();
-        let readerRect = reader.getBoundingClientRect();
-        
-        // Only scroll vertically - never change horizontal position
-        let spanRelativeTop = spanRect.top - readerRect.top + reader.scrollTop;
-        let targetScrollTop = spanRelativeTop - (readerRect.height / 2) + (spanRect.height / 2);
-        
-        reader.scrollTo({
-            top: targetScrollTop,
-            behavior: 'smooth'
-            // No 'left' property - horizontal position is preserved
-        });
+        if (sliceStart === 0 && sliceEnd === nodeText.length) {
+            span.textContent = nodeText;
+            parent.replaceChild(span, node);
+        } else {
+            let before = nodeText.slice(0, sliceStart);
+            let mid = nodeText.slice(sliceStart, sliceEnd);
+            let after = nodeText.slice(sliceEnd);
+            
+            span.textContent = mid;
+            
+            if (after) {
+                parent.insertBefore(document.createTextNode(after), node.nextSibling);
+            }
+            parent.insertBefore(span, node.nextSibling);
+            if (before) {
+                node.nodeValue = before;
+            } else {
+                parent.removeChild(node);
+            }
+        }
+        activeReadingMarks.push(span);
+    });
 
+    // 4. Smooth scroll to the first new mark
+    let firstMark = activeReadingMarks[0];
+    if (firstMark) {
+        let reader = document.getElementById('reader');
+        let spanRect = firstMark.getBoundingClientRect();
+        let readerRect = reader.getBoundingClientRect();
+        let threshold = 100;
+
+        if (spanRect.top < readerRect.top + threshold || spanRect.bottom > readerRect.bottom - threshold) {
+            let spanRelativeTop = spanRect.top - readerRect.top + reader.scrollTop;
+            let targetScrollTop = spanRelativeTop - (readerRect.height / 2);
+            reader.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
+        }
     }
 }
 
@@ -2123,21 +2101,24 @@ async function applyImageOcrOverlays() {
 // Browser ::selection CSS is unreliable over transparent text.
 // Track selectionchange and apply .ocr-selected class to hovered spans instead.
 document.addEventListener("selectionchange", () => {
-    // Clear all previous highlights
+    // 1. Clear OCR highlights
     document.querySelectorAll(".ocr-word.ocr-selected").forEach(el => {
         el.classList.remove("ocr-selected");
     });
 
     let sel = window.getSelection();
-    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+    let toolbar = document.getElementById("selectionToolbar");
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+        if (toolbar) toolbar.style.display = "none";
+        return;
+    }
 
     let range = sel.getRangeAt(0);
-
-    // Highlight every .ocr-word span that intersects the selection
+    
+    // 2. Highlight intersections in OCR layers (PDF/Images)
     document.querySelectorAll(".ocr-word").forEach(span => {
         let spanRange = document.createRange();
         spanRange.selectNode(span);
-        // compareBoundaryPoints returns negative if range is before spanRange
         try {
             if (range.compareBoundaryPoints(Range.END_TO_START, spanRange) <= 0 &&
                 range.compareBoundaryPoints(Range.START_TO_END, spanRange) >= 0) {
@@ -2145,6 +2126,25 @@ document.addEventListener("selectionchange", () => {
             }
         } catch(e) {}
     });
+
+    // 3. Position and Show Floating Toolbar
+    if (toolbar) {
+        let rects = range.getClientRects();
+        if (rects.length > 0) {
+            let rect = rects[0];
+            // Center toolbar above selection
+            toolbar.style.display = "flex";
+            toolbar.style.top = (rect.top - 55) + "px";
+            toolbar.style.left = (rect.left + rect.width/2 - toolbar.offsetWidth/2) + "px";
+            
+            // Adjust if it goes off screen
+            if (parseFloat(toolbar.style.top) < 10) {
+                toolbar.style.top = (rect.bottom + 10) + "px";
+            }
+        } else {
+            toolbar.style.display = "none";
+        }
+    }
 });
 
 
@@ -2280,12 +2280,23 @@ function initDragging() {
         const dx = x - startX;
         const dy = y - startY;
 
-        // Only start dragging after moving at least 4px (to preserve click/selection)
-        if (!moved && Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
+        // Only start dragging after moving at least 8px (to prioritize text selection)
+        if (!moved && Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+
+        // If user is actually trying to select text, don't hijack it with a drag
+        if (!moved && window.getSelection().toString().trim().length > 0) {
+            isDown = false;
+            return;
+        }
 
         e.preventDefault();
+        if (!moved) {
+            // Cancel any accidental partial selection before entering drag mode
+            window.getSelection().removeAllRanges();
+        }
+        
         moved = true;
-        reader.classList.add('dragging');
+        reader.classList.add('grabbing');
 
         const walkX = dx * 2.5;
         const walkY = dy * 2.5;
