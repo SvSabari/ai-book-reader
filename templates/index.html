@@ -100,8 +100,11 @@
                         onclick="document.getElementById('findBox').style.display='flex'; document.getElementById('findInput').focus();">
                         🔍 Find
                     </button>
+                    <button id="emotionModeBtn" class="btn-icon" onclick="toggleEmotionMode()" title="Toggle Emotional Reading">
+                        🎭 Emotion Mode
+                    </button>
                     <button id="playPauseBtn" class="btn-icon" onclick="togglePlayPause()">
-                        ▶ Read Full
+                        Read Full ▶
                     </button>
                     <button class="close-btn" onclick="closeBookAction()" title="Close Book">✕</button>
                 </div>
@@ -188,8 +191,11 @@
             <div id="imageExplanationModal" class="modal-overlay" style="display: none;">
                 <div class="modal-content">
                     <h3>🖼️ Image Explanation</h3>
+                    <div id="imageExplanationPreviewContainer" style="margin-bottom: 15px; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.1); display: none;">
+                        <img id="imageExplanationPreview" src="" style="width: 100%; height: auto; max-height: 300px; object-fit: contain; display: block;">
+                    </div>
                     <div id="imageExplanationText"
-                        style="margin: 15px 0; text-align: left; max-height: 200px; overflow-y: auto; color: var(--text-color);">
+                        style="margin: 15px 0; text-align: left; max-height: 250px; overflow-y: auto; color: var(--text-main); line-height: 1.6; font-size: 0.95rem;">
                         Analyzing image...</div>
                     <div class="modal-actions">
                         <button class="btn-primary"

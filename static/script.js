@@ -109,13 +109,16 @@ function showUploadToast(msg, type) {
         font-size: 0.9rem; font-weight: 600; box-shadow: 0 4px 20px rgba(0,0,0,0.35);
         z-index: 9999; animation: toastIn 0.3s ease; max-width: 380px; text-align: center;
     `;
-    toast.textContent = msg;
+    toast.innerHTML = msg;
     document.body.appendChild(toast);
 
-    // Auto-dismiss after 4 seconds (info-type stays until replaced)
-    if (type !== "info") {
-        setTimeout(() => toast.remove(), 4000);
-    }
+    // Auto-remove after 3.5 seconds
+    setTimeout(() => {
+        if (toast.parentNode) {
+            toast.style.animation = "toastOut 0.3s ease forwards";
+            setTimeout(() => { if (toast.parentNode) toast.remove(); }, 300);
+        }
+    }, 3500);
 }
 
 let _processingPollTimer = null;
@@ -625,24 +628,30 @@ function downloadBook(bookId, bookName) {
 }
 
 function deleteBook(bookId) {
-    if (!confirm("Do you want to delete this book?")) {
-        return;
-    }
+    showBookmarkModal(
+        "Delete Book?",
+        "Are you sure you want to permanently remove this book from your library? This action cannot be undone.",
+        "Yes, Delete",
+        "Keep Book",
+        "Cancel",
+        () => {
+            // EXECUTE DELETE
+            resetReadingSession();
+            let playPauseBtn = document.getElementById("playPauseBtn");
+            if(playPauseBtn) playPauseBtn.innerText = "Read Full ▶";
 
-    resetReadingSession();
-    let playPauseBtn = document.getElementById("playPauseBtn");
-    if(playPauseBtn) playPauseBtn.innerText = "Read Full ▶";
-
-    fetch("/delete_book/" + bookId, {
-        method: "POST"
-    })
-    .then(res => res.json())
-    .then(data => {
-        alert(data.message || data.error);
-        document.getElementById("reader").innerHTML = "";
-        document.getElementById("booktitle").innerText = "No book selected";
-        loadBooks();
-    });
+            fetch("/delete_book/" + bookId, { method: "POST" })
+            .then(res => res.json())
+            .then(data => {
+                showUploadToast(data.message || data.error, data.error ? "error" : "success");
+                document.getElementById("reader").innerHTML = '<div class="empty-state">Select a book from the sidebar to start reading.</div>';
+                document.getElementById("booktitle").innerText = "No book selected";
+                loadBooks();
+            });
+        },
+        () => { /* Stay - no action */ },
+        () => { /* Cancel - no action */ }
+    );
 }
 
 let lastActiveRange = null;
@@ -1103,11 +1112,30 @@ async function readAloud() {
         return;
     }
 
-    // Auto-restart from the beginning if the user completed the book and clicked Read Full again
-    // Using a more generous threshold to account for trailing punctuation/whitespace
-    if (currentAbsoluteCharIndex >= text.length - 200) {
-        currentAbsoluteCharIndex = 0;
+    // PDF SYNC: If we're on a multi-page book and starting fresh (offset 0), 
+    // find the first visible page and start from there.
+    if (currentAbsoluteCharIndex === 0) {
+        let pages = document.querySelectorAll('[id^="pdf-page-"]');
+        let reader = document.getElementById("reader");
+        let readerRect = reader.getBoundingClientRect();
+        
+        for (let page of pages) {
+            let rect = page.getBoundingClientRect();
+            // Start from the first page that is at least partially in the upper half of the viewport
+            if (rect.bottom > readerRect.top + 50) {
+                // Find this page's offset in our global node map
+                for (let i = 0; i < globalTextNodes.length; i++) {
+                    if (page.contains(globalTextNodes[i])) {
+                        currentAbsoluteCharIndex = globalNodeOffsets[i];
+                        break;
+                    }
+                }
+                break;
+            }
+        }
     }
+
+    // Auto-restart if near end...
 
     stopReading();
     isReadingAloud = true;
@@ -1143,7 +1171,7 @@ async function readAloud() {
     utterancePool = []; // Reset pool for new session
     if (watchdogTimer) clearTimeout(watchdogTimer);
     
-    if (testShort !== 'en') {
+    if (testShort !== 'en' || isEmotionModeActive) {
         playFallbackAudioQueue(chunks, currentChunkAbsStart, testShort, false);
         return;
     }
@@ -1168,6 +1196,7 @@ async function readAloud() {
         runningOffset += chunk.length;
 
         let utterance = new SpeechSynthesisUtterance(trimmed);
+        utterance.rate = 1.0;
 
         utterance.onstart = function() {
             removeReadingMarks();
@@ -1272,7 +1301,7 @@ async function resumeReadingFromIndex(index, startPaused = false) {
     let testLang = getSelectedLanguage();
     let testShort = testLang ? testLang.split('-')[0].toLowerCase() : 'en';
 
-    if (testShort !== 'en') {
+    if (testShort !== 'en' || isEmotionModeActive) {
         playFallbackAudioQueue(chunks, chunkOffset, testShort, startPaused);
         return;
     }
@@ -1306,6 +1335,7 @@ async function resumeReadingFromIndex(index, startPaused = false) {
         runningOffset += chunk.length;
 
         let utterance = new SpeechSynthesisUtterance(trimmed);
+        utterance.rate = 1.0;
         let lang = getSelectedLanguage();
         if (lang) {
             utterance.lang = lang;
@@ -1411,19 +1441,46 @@ async function resetReadingSession() {
 async function togglePlayPause() {
     let playPauseBtn = document.getElementById("playPauseBtn");
     
+    if (!currentBookId) {
+        showUploadToast("📚 Please select a book from your library first!", "info");
+        return;
+    }
+    
     if (!isReadingAloud) {
         await readAloud();
     } else {
         if (isPaused) {
-            if (currentFallbackAudio) currentFallbackAudio.play();
-            else window.speechSynthesis.resume();
+            // RESUME
             isPaused = false;
-            if(playPauseBtn) playPauseBtn.innerText = "Pause ⏸";
+            if (isEmotionModeActive) {
+                // Robust Restart-based Resume: ensures both voice and highlighting are perfectly synced
+                window.speechSynthesis.cancel();
+                playNextFallback(false, true); // Clean restart of last emotive chunk
+            } else if (currentFallbackAudio) {
+                currentFallbackAudio.play();
+            } else {
+                window.speechSynthesis.resume();
+            }
+            if (playPauseBtn) playPauseBtn.innerText = "Pause ⏸";
         } else {
-            if (currentFallbackAudio) currentFallbackAudio.pause();
-            else window.speechSynthesis.pause();
+            // PAUSE
             isPaused = true;
-            if(playPauseBtn) playPauseBtn.innerText = "Resume ▶";
+            if (isEmotionModeActive) {
+                window.speechSynthesis.pause();
+                // 1. Capture progress to enable slicing for accurate resume
+                if (lastEmotionItem && typeof lastEmotionItemProgress !== 'undefined') {
+                    // Slide the text and offset to where we actually stopped
+                    lastEmotionItem.text = lastEmotionItem.text.substring(lastEmotionItemProgress).trim();
+                    lastEmotionItem.offset += lastEmotionItemProgress;
+                    lastEmotionItemProgress = 0; // Reset for the next resume
+                }
+                window.speechSynthesis.cancel(); // Prepare for clean restart on resume
+            } else if (currentFallbackAudio) {
+                currentFallbackAudio.pause();
+            } else {
+                window.speechSynthesis.pause();
+            }
+            if (playPauseBtn) playPauseBtn.innerText = "Resume ▶";
         }
     }
 }
@@ -2350,70 +2407,200 @@ function highlightReadingWord(absoluteWordPosition, charLength) {
     removeReadingMarks();
 }
 
-function playNextFallback(startPaused = false) {
-    if(!isReadingAloud || fallbackQueue.length === 0) {
+let isEmotionModeActive = false;
+let currentEmotionUtterance = null;
+let lastEmotionItem = null; 
+let lastEmotionItemProgress = 0; // Track exact progress within a chunk for seamless resume
+
+function playNextFallback(startPaused = false, isRetry = false) {
+    if(!isReadingAloud || (fallbackQueue.length === 0 && !window.speechSynthesis.speaking && !isRetry)) {
         stopReading(true);
         return;
     }
     
-    let item = fallbackQueue.shift();
+    // Resume current if specifically told to (retry mechanism)
+    let item = (isRetry && lastEmotionItem) ? lastEmotionItem : fallbackQueue.shift();
+    lastEmotionItem = item;
+
+    if (!item) return;
+    
     currentAbsoluteCharIndex = item.offset;
-    
     removeReadingMarks();
-    
+
+    // EMOTION MODE: Use Web Speech API for real-time pitch/rate control
+    if (isEmotionModeActive) {
+        window.speechSynthesis.cancel(); // Stop old audio
+        
+        // 1. Analyze Emotion FIRST
+        fetch("/analyze_emotion", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: item.text })
+        })
+        .then(res => res.json())
+        .then(data => {
+            const emotion = data.emotion || 'neutral';
+            updateReaderMood(emotion);
+            
+            // 2. Play with emotive params
+            let utterance = new SpeechSynthesisUtterance(item.text);
+            currentEmotionUtterance = utterance; // Cache for pause/resume tracking
+            const voices = window.speechSynthesis.getVoices();
+            utterance.voice = voices.find(v => v.name.includes("Google") || v.name.includes("Premium")) || voices[0];
+            
+            // Emotive Params mapping
+            if (emotion === 'happy') { utterance.pitch = 1.4; utterance.rate = 1.1; }
+            else if (emotion === 'sad') { utterance.pitch = 0.7; utterance.rate = 0.8; }
+            else if (emotion === 'angry') { utterance.pitch = 1.2; utterance.rate = 1.3; }
+            else if (emotion === 'fear') { utterance.pitch = 0.8; utterance.rate = 0.9; }
+            else { utterance.pitch = 1.0; utterance.rate = 1.0; }
+            let boundaryReceived = false;
+            utterance.onboundary = (event) => {
+                if (event.name === 'word' || event.name === "boundary") {
+                    boundaryReceived = true;
+                    lastEmotionItemProgress = event.charIndex;
+                    
+                    let substring = item.text.substring(event.charIndex);
+                    let wordMatch = substring.match(/^[\w\u0080-\uFFFF']+/);
+                    let charLength = event.charLength || (wordMatch ? wordMatch[0].length : 5);
+                    highlightReadingWord(item.offset + event.charIndex, charLength);
+                }
+            };
+
+            // FALLBACK: Timer-based highlighting only if onboundary fails (Premium stability)
+            let words = [];
+            let regex = /\S+/g;
+            let match;
+            while ((match = regex.exec(item.text)) !== null) {
+                words.push({ index: match.index, length: match[0].length });
+            }
+
+            utterance.onstart = () => {
+                let baseCharsPerSec = 16;
+                let durationMs = (item.text.length / (baseCharsPerSec * utterance.rate)) * 1000; 
+                let startTime = Date.now();
+                
+                let highlightInterval = setInterval(() => {
+                    if (!isReadingAloud || isPaused || isEmotionModeActive === false || boundaryReceived) {
+                        clearInterval(highlightInterval);
+                        return;
+                    }
+                    let elapsed = Date.now() - startTime;
+                    let progress = elapsed / durationMs;
+                    if (progress >= 1.0) {
+                        clearInterval(highlightInterval);
+                        return;
+                    }
+                    let wordIdx = Math.floor(progress * words.length);
+                    if (wordIdx < words.length) {
+                        lastEmotionItemProgress = words[wordIdx].index;
+                        highlightReadingWord(item.offset + words[wordIdx].index, words[wordIdx].length);
+                    }
+                }, 100);
+
+                utterance.onend = () => {
+                    boundaryReceived = false;
+                    clearInterval(highlightInterval);
+                    currentEmotionUtterance = null;
+                    lastEmotionItemProgress = 0; // Done with chunk
+                    updateReaderMood('neutral');
+                    if (isReadingAloud) playNextFallback();
+                };
+            };
+
+            if(!startPaused && !isPaused) window.speechSynthesis.speak(utterance);
+        });
+        return;
+    }
+
+    // NORMAL MODE: Use gTTS Backend for high quality stable voice
     currentFallbackAudio = new Audio(item.url);
-    currentFallbackAudio.playbackRate = 0.9;
+    currentFallbackAudio.playbackRate = 0.95;
     
     let words = [];
     let regex = /\S+/g;
     let match;
     while ((match = regex.exec(item.text)) !== null) {
-        words.push({
-            startOffset: item.offset + match.index,
-            length: match[0].length
-        });
+        words.push({ startOffset: item.offset + match.index, length: match[0].length });
     }
     let lastWordIndex = -1;
 
     currentFallbackAudio.addEventListener('timeupdate', () => {
         if (!currentFallbackAudio.duration || words.length === 0) return;
-        
-        // Use cumulative character progress for better timing than simple floor division
-        let currentTime = currentFallbackAudio.currentTime;
-        let totalTime = currentFallbackAudio.duration;
-        let progress = currentTime / totalTime;
-        
+        let progress = currentFallbackAudio.currentTime / currentFallbackAudio.duration;
         let wordIndex = Math.floor(progress * words.length);
         if (wordIndex >= words.length) wordIndex = words.length - 1;
-        
         if (wordIndex !== lastWordIndex) {
             lastWordIndex = wordIndex;
-            let currentWord = words[wordIndex];
-            
-            // Safety: Ensure we don't skip the last letter by slightly over-calculating if at end of word list
-            let displayLength = currentWord.length;
-            if (wordIndex === words.length - 1 && progress > 0.95) {
-                // If it's the last word and we're nearly done, ensure full highlight
-            }
-
-            currentAbsoluteCharIndex = currentWord.startOffset;
-            highlightReadingWord(currentWord.startOffset, displayLength);
+            highlightReadingWord(words[wordIndex].startOffset, words[wordIndex].length);
         }
     });
     
-    currentFallbackAudio.onended = () => {
-        playNextFallback();
-    };
-    currentFallbackAudio.onerror = () => {
-        console.warn("Fallback audio chunk failed, proceeding.");
-        setTimeout(playNextFallback, 500);
-    };
+    currentFallbackAudio.onended = () => playNextFallback();
+    currentFallbackAudio.onerror = () => setTimeout(playNextFallback, 500);
     
     if(!startPaused && !isPaused) {
-        currentFallbackAudio.play().catch(e => {
-            console.error("Audio playback blocked", e);
-            setTimeout(playNextFallback, 500);
-        });
+        currentFallbackAudio.play().catch(e => setTimeout(playNextFallback, 500));
+    }
+}
+
+
+
+function toggleEmotionMode() {
+    isEmotionModeActive = !isEmotionModeActive;
+    const btn = document.getElementById('emotionModeBtn');
+    
+    if (isEmotionModeActive) {
+        btn.classList.add('active');
+        btn.innerHTML = "🎭 Emotion: ON";
+        showUploadToast("🎭 Emotion-based Reading Enabled", "info");
+    } else {
+        btn.classList.remove('active');
+        btn.innerHTML = "🎭 Emotion Mode";
+        updateReaderMood('neutral'); // Reset
+        showUploadToast("🎭 Emotion Mode Disabled", "info");
+    }
+
+    // Seamless Handoff: If we are already reading, switch engines mid-stream
+    if (isReadingAloud) {
+        // 1. Capture current position
+        const resumePos = currentAbsoluteCharIndex;
+        
+        // 2. Stop everything
+        window.speechSynthesis.cancel();
+        if (currentFallbackAudio) {
+            currentFallbackAudio.pause();
+            currentFallbackAudio = null;
+        }
+        
+        // 3. Restart from same word using the new mode
+        // Small delay ensures browser state settles
+        setTimeout(() => {
+            resumeReadingFromIndex(resumePos, isPaused);
+        }, 100);
+    }
+}
+
+function updateReaderMood(emotion) {
+    const reader = document.getElementById('reader');
+    if (!reader) return;
+    
+    // Remove old moods
+    reader.classList.remove('mood-happy', 'mood-sad', 'mood-angry', 'mood-fear', 'mood-neutral');
+    
+    // Apply new mood
+    if (emotion !== 'neutral') {
+        reader.classList.add(`mood-${emotion}`);
+    }
+    
+    // Subtly adjust TTS pitch/rate if possible (Web Speech API)
+    // Note: gTTS backend is already generated, but we can't easily change it mid-stream
+    // However, for local speech synthesis we can:
+    if (typeof utterance !== 'undefined' && utterance) {
+        if (emotion === 'happy') { utterance.pitch = 1.3; utterance.rate = 1.1; }
+        if (emotion === 'sad') { utterance.pitch = 0.8; utterance.rate = 0.8; }
+        if (emotion === 'angry') { utterance.pitch = 1.2; utterance.rate = 1.2; }
+        if (emotion === 'fear') { utterance.pitch = 1.1; utterance.rate = 0.9; }
     }
 }
 
@@ -2451,6 +2638,10 @@ async function executeClosingSequence() {
     }
 
     window.speechSynthesis.cancel();
+    if (currentFallbackAudio) {
+        currentFallbackAudio.pause();
+        currentFallbackAudio = null;
+    }
     isReadingAloud = false;
     isPaused = false;
     let playPauseBtn = document.getElementById("playPauseBtn");
@@ -2802,14 +2993,25 @@ function initDragging() {
 
 // Intercept image clicks for explanation
 document.addEventListener('click', function(e) {
-    if (e.target && e.target.tagName && e.target.tagName.toLowerCase() === 'img') {
-        // Only trigger if inside the reader and not an OCR span or UI icon
-        if (e.target.closest('#reader') && !e.target.closest('.ocr-word')) {
-            // Allow text selection interaction directly over the image!
-            if (window.getSelection().toString().trim().length > 0) return;
-            
-            explainImage(e.target);
+    if (!e.target) return;
+    
+    // Check if target is an img, or a child of an img-ocr-wrapper
+    let imgElement = null;
+    if (e.target.tagName && e.target.tagName.toLowerCase() === 'img') {
+        imgElement = e.target;
+    } else {
+        // Did user click on an OCR word or the layer over an image?
+        let wrapper = e.target.closest('.img-ocr-wrapper');
+        if (wrapper) {
+            imgElement = wrapper.querySelector('img');
         }
+    }
+
+    if (imgElement && imgElement.closest('#reader')) {
+        // Only trigger explanation if not selecting text or clicking specifically on a word to highlight it
+        if (e.target.closest('.ocr-word') || window.getSelection().toString().trim().length > 0) return;
+        
+        explainImage(imgElement);
     }
 });
 
@@ -2817,14 +3019,23 @@ function explainImage(imgElement) {
     let src = imgElement.src;
     if (!src) return;
 
-    // Capture surrounding text context to help AI/fallback understand the image purpose
+    // Show preview and loading state
+    const preview = document.getElementById('imageExplanationPreview');
+    const previewContainer = document.getElementById('imageExplanationPreviewContainer');
+    const textEl = document.getElementById('imageExplanationText');
+    const modal = document.getElementById('imageExplanationModal');
+
+    preview.src = src;
+    previewContainer.style.display = 'block';
+    textEl.innerHTML = "<div class='ai-loading-container'><span class='pulse-dot'></span> <span style='color: var(--text-light); opacity: 0.8;'>AI is analyzing this visual...</span></div>";
+    modal.style.display = 'flex';
+
+    // Capture surrounding text context to help AI understand
     let contextText = "";
     let parent = imgElement.parentElement;
     if (parent) {
-        // Look at previous 2 and next 2 paragraphs for rich context
         let contentStr = parent.textContent.trim();
         if (contentStr.length < 50) {
-            // If the parent is just the image wrapper, look at siblings
             let prev = imgElement.closest('.pdf-img-top')?.previousElementSibling || parent.previousElementSibling;
             if (prev) contextText += prev.innerText + " ";
             let next = imgElement.closest('.pdf-text-bottom')?.nextElementSibling || parent.nextElementSibling;
@@ -2835,15 +3046,9 @@ function explainImage(imgElement) {
     }
     contextText = contextText.trim().substring(0, 1500);
 
-    // Show loading state in modal
-    document.getElementById('imageExplanationText').innerHTML = "<span style='color: var(--text-light);'>Analyzing image context... This may take a few seconds on first run.</span>";
-    document.getElementById('imageExplanationModal').style.display = 'flex';
-
     fetch("/explain_image", {
         method: "POST",
-        headers: {
-            "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
             src: src, 
             book_id: currentBookId,
@@ -2853,17 +3058,33 @@ function explainImage(imgElement) {
     .then(res => res.json())
     .then(data => {
         if (data.explanation) {
-            document.getElementById('imageExplanationText').innerText = data.explanation;
+            typeWriterEffect(textEl, data.explanation);
         } else if (data.error) {
-            document.getElementById('imageExplanationText').innerHTML = `<span style="color: #ef4444;">Error: ${data.error}</span>`;
+            textEl.innerHTML = `<span style="color: #ef4444; font-weight: 500;">❌ Analysis Failed: ${data.error}</span>`;
         } else {
-            document.getElementById('imageExplanationText').innerText = "Could not generate an explanation.";
+            textEl.innerText = "The AI couldn't formulate a clear explanation for this image. Try another section.";
         }
     })
     .catch(err => {
         console.error("Explain image error:", err);
-        document.getElementById('imageExplanationText').innerHTML = `<span style="color: #ef4444;">Network or server error occurred.</span>`;
+        textEl.innerHTML = `<span style="color: #ef4444; font-weight: 500;">🔌 Network Error: Check your server connection.</span>`;
     });
+}
+
+function typeWriterEffect(element, text) {
+    element.innerText = "";
+    let i = 0;
+    const speed = 10; // ms per char
+    
+    function type() {
+        if (i < text.length) {
+            element.innerText += text.charAt(i);
+            i++;
+            element.scrollTop = element.scrollHeight;
+            setTimeout(type, speed);
+        }
+    }
+    type();
 }
 
 // --- SMART VOICE ASSISTANT (AI MODE) ---
