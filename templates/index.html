@@ -57,7 +57,8 @@
                     <!-- Native Translation Dropdown -->
                     <div class="dropdown-wrapper">
                         <select id="langSelect" class="lang-dropdown" onchange="translateBook()">
-                            <option value="en">English (Original)</option>
+                            <option value="orig" selected> Select Language</option>
+                            <option value="en">English</option>
                             <option value="hi">Hindi</option>
                             <option value="bn">Bengali</option>
                             <option value="te">Telugu</option>
@@ -80,6 +81,15 @@
                         </select>
                     </div>
 
+                    <div class="page-controls" style="display: none; align-items: center; gap: 8px; margin: 0 10px;">
+                        <span style="color: white; font-size: 0.85rem; font-weight: 600;">Page:</span>
+                        <input type="number" id="currentPageInput" min="1" value="1"
+                            style="width: 50px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); color: white; padding: 2px 5px; border-radius: 4px; text-align: center;"
+                            onchange="jumpToPage(this.value)">
+                        <span id="totalPagesLabel"
+                            style="color: rgba(255, 255, 255, 0.7); font-size: 0.85rem; font-weight: 500;">/ 0</span>
+                    </div>
+
                     <div class="zoom-controls">
                         <button class="btn-zoom" onclick="changeZoom(-0.1)" title="Zoom Out">−</button>
                         <span id="zoomLevel" class="zoom-level">100%</span>
@@ -99,65 +109,23 @@
 
             <div id="findBox" class="find-box" style="display:none;">
                 <input type="text" id="findInput" placeholder="Find in this book..." onkeyup="findText(event)">
+                <span id="searchCount" class="search-count"
+                    style="margin: 0 15px; color: #666; font-size: 0.9rem; font-weight: 600; min-width: 80px;"></span>
                 <button class="btn-secondary" onclick="closeFindBox()">✕</button>
             </div>
 
             <div id="reader-wrapper">
-                <!-- Book Loader Animation Container -->
-                <div id="bookLoader" class="book-loader" style="display: none;">
-                    <div class="book">
-                        <div class="inner">
-                            <div class="left"></div>
-                            <div class="middle"></div>
-                            <div class="right"></div>
-                        </div>
-                        <ul>
-                            <li></li>
-                            <li></li>
-                            <li></li>
-                            <li></li>
-                            <li></li>
-                            <li></li>
-                            <li></li>
-                            <li></li>
-                            <li></li>
-                            <li></li>
-                            <li></li>
-                            <li></li>
-                            <li></li>
-                            <li></li>
-                            <li></li>
-                            <li></li>
-                            <li></li>
-                            <li></li>
-                        </ul>
+                <!-- Simple Loader -->
+                <div id="simpleLoader" style="display: none; flex-direction: column; align-items: center; justify-content: center; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 1000;">
+                    <div class="book-flipping">
+                        <div class="spine"></div>
+                        <div class="cover left"></div>
+                        <div class="cover right"></div>
+                        <div class="flipping-page"></div>
+                        <div class="flipping-page"></div>
+                        <div class="flipping-page"></div>
                     </div>
-                    <p id="loaderText"
-                        style="margin-top: 24px; color: var(--text-light); font-weight: 500; letter-spacing: 1px;">
-                        Loading book...</p>
-                </div>
-
-                <!-- Translation Loader Animation Container -->
-                <div id="translationLoader" class="translation-loader" style="display: none;">
-                    <div class="translation-boxes">
-                        <div class="box box-en">A</div>
-                        <div class="box box-tr">文</div>
-                    </div>
-                    <p id="translationLoaderText"
-                        style="margin-top: 36px; color: var(--text-light); font-weight: 500; letter-spacing: 1px;">
-                        Translating language...</p>
-                </div>
-
-                <!-- Unique Closing Animation Container -->
-                <div id="closingLoader" class="closing-book-container" style="display: none;">
-                    <div class="closing-book">
-                        <div class="closing-cover"></div>
-                        <div class="closing-pages"></div>
-                        <div class="closing-back"></div>
-                    </div>
-                    <p id="closingText"
-                        style="margin-top: 40px; color: var(--text-light); font-weight: 600; letter-spacing: 2px; text-transform: uppercase; font-size: 0.8rem;">
-                        Closing Book...</p>
+                    <p id="loaderText" class="loader-text-animated">Loading book...</p>
                 </div>
 
                 <div id="reader" class="reader-box">
@@ -189,10 +157,6 @@
                 </div>
             </div> <!-- Close reader-wrapper -->
 
-            <!-- Storyteller Animation Container -->
-            <div id="storytellerAnimation" class="storyteller-bot" style="display: none;">
-                <img src="/static/storyteller_man_transparent.gif" class="storyteller-image" alt="Storyteller" />
-            </div>
 
 
             <!-- Bookmark Prompt Modal -->
@@ -208,10 +172,133 @@
                 </div>
             </div>
 
+            <!-- Voice Interaction Overlay -->
+            <div id="voiceStatus" class="voice-status" style="display: none;">
+                <div class="voice-pulse-ring"></div>
+                <div class="voice-mic-icon">🎙️</div>
+                <p id="voiceTranscript">Listening...</p>
+            </div>
+
+            <!-- Floating Voice Assistant Button -->
+            <button id="voiceBtn" class="voice-btn" onclick="toggleVoiceAssistant()" title="Ask AI (Voice)">
+                <span class="mic-icon">🎙️</span>
+            </button>
+
+            <!-- Image Explanation Modal -->
+            <div id="imageExplanationModal" class="modal-overlay" style="display: none;">
+                <div class="modal-content">
+                    <h3>🖼️ Image Explanation</h3>
+                    <div id="imageExplanationText"
+                        style="margin: 15px 0; text-align: left; max-height: 200px; overflow-y: auto; color: var(--text-color);">
+                        Analyzing image...</div>
+                    <div class="modal-actions">
+                        <button class="btn-primary"
+                            onclick="document.getElementById('imageExplanationModal').style.display='none'">Close</button>
+                    </div>
+                </div>
+            </div>
+
         </main>
     </div>
 
-    <script src="/static/script.js?v=8"></script>
+    <style>
+        /* Voice Assistant Specific Styles */
+        .voice-btn {
+            position: fixed;
+            bottom: 45px;
+            left: 330px;
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--primary), var(--accent));
+            border: none;
+            color: white;
+            font-size: 24px;
+            cursor: pointer;
+            box-shadow: 0 8px 25px rgba(139, 92, 246, 0.4);
+            z-index: 10000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .voice-btn:hover {
+            transform: scale(1.1) translateY(-5px);
+            box-shadow: 0 12px 30px rgba(139, 92, 246, 0.6);
+        }
+
+        .voice-btn.active {
+            background: #e7713f;
+            box-shadow: 0 0 0 15px rgba(239, 68, 68, 0.2);
+            animation: pulse-red 1.5s infinite;
+        }
+
+        .voice-status {
+            position: fixed;
+            top: 40px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 15px 30px;
+            background: rgba(15, 23, 42, 0.95);
+            border: 2px solid rgba(139, 92, 246, 0.5);
+            border-radius: 50px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            z-index: 10001;
+            box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(10px);
+            animation: slideDownIn 0.4s ease-out;
+        }
+
+        .voice-pulse-ring {
+            width: 12px;
+            height: 12px;
+            background: #ef4444;
+            border-radius: 50%;
+            animation: mic-pulse 1.2s infinite;
+        }
+
+        #voiceTranscript {
+            color: white;
+            font-size: 0.95rem;
+            font-weight: 500;
+            letter-spacing: 0.5px;
+            max-width: 400px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        @keyframes mic-pulse {
+            0% {
+                transform: scale(1);
+                opacity: 1;
+            }
+
+            100% {
+                transform: scale(2.5);
+                opacity: 0;
+            }
+        }
+
+        @keyframes pulse-red {
+            0% {
+                box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.5);
+            }
+
+            70% {
+                box-shadow: 0 0 0 20px rgba(239, 68, 68, 0);
+            }
+
+            100% {
+                box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+            }
+        }
+    </style>
+
+    <script src="/static/script.js?v=9"></script>
 </body>
 
 </html>

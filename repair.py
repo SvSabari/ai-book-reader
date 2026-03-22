@@ -5,37 +5,42 @@ from app import extract_book_html, EXTRACTED_FOLDER
 def repair():
     conn = sqlite3.connect('database.db')
     cur = conn.cursor()
-    cur.execute('SELECT id, path, extracted_path FROM books')
+    cur.execute('SELECT id, path, extracted_path, status FROM books')
     rows = cur.fetchall()
 
-    for row_id, file_path, old_ext_path in rows:
+    for row_id, file_path, old_ext_path, status in rows:
+        needs_repair = False
+        if status != 'ready':
+            needs_repair = True
+            print(f"Book {row_id} has status '{status}'. Repairing...")
+        elif not os.path.exists(old_ext_path):
+            needs_repair = True
+            print(f"Extracted file for {row_id} is missing. Repairing...")
+            
+        if not needs_repair:
+            continue
+
         if not os.path.exists(file_path):
-            print(f"Skipping {file_path}, does not exist.")
+            print(f"Skipping {file_path}, source file does not exist.")
+            cur.execute("UPDATE books SET status='error' WHERE id=?", (row_id,))
             continue
         
         try:
+            print(f"Extracting {file_path}...")
             extracted_html = extract_book_html(file_path)
-            filename = os.path.basename(file_path)
-            new_extracted_filename = filename + ".html"
-            new_extracted_path = os.path.join(EXTRACTED_FOLDER, new_extracted_filename)
             
-            with open(new_extracted_path, "w", encoding="utf-8") as f:
+            with open(old_ext_path, "w", encoding="utf-8") as f:
                 f.write(extracted_html)
                 
-            cur.execute('UPDATE books SET extracted_path = ? WHERE id = ?', (new_extracted_path, row_id))
-            print(f"Repaired {file_path} -> {new_extracted_path}")
+            cur.execute("UPDATE books SET status='ready' WHERE id=?", (row_id,))
+            conn.commit()
+            print(f"✅ Repaired {file_path} -> {old_ext_path}")
             
-            # Clean up old extraction if it's different and exists
-            if os.path.exists(old_ext_path) and os.path.normpath(old_ext_path) != os.path.normpath(new_extracted_path):
-                try: 
-                    os.remove(old_ext_path)
-                    print(f"Deleted old extraction {old_ext_path}")
-                except Exception as e: 
-                    print(f"Failed to delete {old_ext_path}: {e}")
         except Exception as e:
-            print(f"Error repairing {file_path}: {e}")
+            print(f"❌ Error repairing {file_path}: {e}")
+            cur.execute("UPDATE books SET status='error' WHERE id=?", (row_id,))
+            conn.commit()
 
-    conn.commit()
     conn.close()
     print("Repair complete.")
 
