@@ -1213,9 +1213,9 @@ async function readAloud() {
         return;
     }
 
-    // PDF SYNC: If we're on a multi-page book and starting fresh (offset 0), 
-    // find the first visible page and start from there.
-    if (currentAbsoluteCharIndex === 0) {
+    // PDF SYNC: Only jump to the visible page if we are starting fresh (offset 0)
+    // AND the user has actually scrolled down significantly. Otherwise, start at the very beginning.
+    if (currentAbsoluteCharIndex === 0 && reader.scrollTop > 300) {
         let pages = document.querySelectorAll('[id^="pdf-page-"]');
         let reader = document.getElementById("reader");
         let readerRect = reader.getBoundingClientRect();
@@ -2462,6 +2462,17 @@ function playFallbackAudioQueue(chunks, startOffset, shortLang, startPaused) {
         isPaused = true;
     }
     
+    // PRE-FETCH the first chunk's emotion immediately to cut initial delay
+    if (isEmotionModeActive && fallbackQueue.length > 0) {
+        fetch("/analyze_emotion", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: fallbackQueue[0].text })
+        }).then(res => res.json()).then(data => {
+            fallbackQueue[0].prefetchedEmotion = data.emotion || 'neutral';
+        }).catch(() => {});
+    }
+
     // gTTS is almost exclusively a female voice, so we set a dummy voice object for detection
     playNextFallback(startPaused);
 }
@@ -2600,18 +2611,33 @@ function playNextFallback(startPaused = false, isRetry = false) {
         window.speechSynthesis.cancel(); // Stop old audio
         const jobId = currentNarrationJobId;
         
-        // 1. Analyze Emotion FIRST
-        fetch("/analyze_emotion", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: item.text })
-        })
-        .then(res => res.json())
+        // 1. Check if we have a prefetched emotion or fetch it now
+        let emotionPromise = item.prefetchedEmotion ? 
+            Promise.resolve({ emotion: item.prefetchedEmotion }) :
+            fetch("/analyze_emotion", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text: item.text })
+            }).then(res => res.json());
+
+        emotionPromise
         .then(data => {
             if (jobId !== currentNarrationJobId || !isReadingAloud) return; 
             
             const emotion = data.emotion || 'neutral';
             updateReaderMood(emotion);
+            
+            // LOOK-AHEAD: Pre-fetch next chunk's emotion while this one plays
+            if (fallbackQueue.length > 0) {
+                const nextItem = fallbackQueue[0];
+                fetch("/analyze_emotion", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ text: nextItem.text })
+                }).then(res => res.json()).then(d => {
+                    nextItem.prefetchedEmotion = d.emotion || 'neutral';
+                }).catch(() => {});
+            }
             
             const targetLang = getSelectedLanguage() || 'en-US';
             const shortLang = targetLang.split("-")[0].toLowerCase();

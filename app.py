@@ -34,6 +34,18 @@ os.makedirs(EXTRACTED_FOLDER, exist_ok=True)
 # Global cache to store pre-tokenized sentences for the currently active book
 # Structure: { book_id: (timestamp, [sentences]) }
 SENTENCE_CACHE = {}
+_SENTIMENT_ANALYZER = None
+
+def get_sentiment_analyzer():
+    global _SENTIMENT_ANALYZER
+    if _SENTIMENT_ANALYZER is None:
+        try:
+            from transformers import pipeline
+            _SENTIMENT_ANALYZER = pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english", device=-1)
+        except Exception as e:
+            print(f"Sentiment model pre-load failed: {e}")
+            _SENTIMENT_ANALYZER = "FAILED"
+    return _SENTIMENT_ANALYZER if _SENTIMENT_ANALYZER != "FAILED" else None
 
 def get_book_sentences(book_id):
     """Retrieve or generate tokenized sentences for a book to avoid repeated parsing."""
@@ -1469,16 +1481,14 @@ def analyze_emotion():
 
         # 2. AI Fallback (using Transformers if internet/memory allows)
         try:
-            if not hasattr(app, "sentiment_analyzer"):
-                from transformers import pipeline
-                # Quick, small mode for simple sentiment
-                app.sentiment_analyzer = pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english", device=-1)
-            
-            res = app.sentiment_analyzer(text[:512])[0]
-            if res['label'] == 'POSITIVE':
-                return jsonify({"emotion": "happy"})
-            else:
-                return jsonify({"emotion": "fear"}) # Fear/Suspense is a good "negative" mood for books
+            analyzer = get_sentiment_analyzer()
+            if analyzer:
+                res = analyzer(text[:512])[0]
+                if res['label'] == 'POSITIVE':
+                    return jsonify({"emotion": "happy"})
+                else:
+                    return jsonify({"emotion": "fear"}) # Fear/Suspense is a good "negative" mood for books
+            return jsonify({"emotion": "neutral"})
         except:
             return jsonify({"emotion": "neutral"})
 
