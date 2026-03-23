@@ -103,6 +103,12 @@
                     <button id="emotionModeBtn" class="btn-icon" onclick="toggleEmotionMode()" title="Toggle Emotional Reading">
                         🎭 Emotion Mode
                     </button>
+                    <!-- Speed Controller Pill -->
+                    <div class="speed-control" style="display: flex; align-items: center; border-radius: 20px; background: rgba(0,0,0,0.5); padding: 2px 8px; gap: 4px; border: 1px solid rgba(255,255,255,0.15); margin-left: 4px;">
+                        <button onclick="changeSpeed(-0.1)" class="btn-icon-s" title="Slower" style="background:none; border:none; color:white; font-size:1.1rem; cursor:pointer;" onmouseover="this.style.opacity=0.7" onmouseout="this.style.opacity=1">-</button>
+                        <span id="speedDisplay" style="color: white; font-size: 0.8rem; font-weight: 700; min-width: 44px; text-align: center; letter-spacing: -0.5px;">1.0x</span>
+                        <button onclick="changeSpeed(0.1)" class="btn-icon-s" title="Faster" style="background:none; border:none; color:white; font-size:1.1rem; cursor:pointer;" onmouseover="this.style.opacity=0.7" onmouseout="this.style.opacity=1">+</button>
+                    </div>
                     <button id="playPauseBtn" class="btn-icon" onclick="togglePlayPause()">
                         Read Full ▶
                     </button>

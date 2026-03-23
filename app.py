@@ -120,41 +120,56 @@ def extract_image_text(file_path):
 
     h, w = image.shape[:2]
     
-    # Scale image appropriately for optical recognition
-    max_dim = 1600
+    # Scale image upwards for better character recognition (Premium resolution)
+    max_dim = 2400
     scale = 1.0
-    if max(h, w) > max_dim:
+    if max(h, w) < 1400:
+        scale = 1400 / max(h, w)
+    elif max(h, w) > max_dim:
         scale = max_dim / max(h, w)
-    elif max(h, w) < 800:
-        # Upscale small images for accurate text extraction
-        scale = min(2.5, 1600 / max(h, w))
         
     if scale != 1.0:
-        image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
+        image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LANCZOS4)
         
+    # Pre-processing for better OCR accuracy
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    # Bilateral filter removes noise while preserving sharp edges of characters
+    denoised = cv2.bilateralFilter(gray, 9, 75, 75)
+    
+    # Adaptive thresholding handles uneven lighting common in book photos
+    thresh = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+    
+    # Dilate/Erode to fill gaps in broken character lines (Common in low-res Tamil text)
+    kernel = np.ones((2,2), np.uint8)
+    processed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+
     config = r'--tessdata-dir c:\ai_book_reader\tessdata --oem 3 --psm 3 -l tam+eng'
     
     try:
-        t_normal = pytesseract.image_to_string(gray, config=config)
+        # 1. Try with processed binary image (Best for clean photos)
+        t_proc = pytesseract.image_to_string(processed, config=config)
         
-        # Blur pass to ignore noise
-        g_blur = cv2.GaussianBlur(gray, (5,5), 0)
-        t_blur = pytesseract.image_to_string(g_blur, config=config)
+        # 2. Try with raw grayscale if binarization failed to capture faint text
+        t_gray = pytesseract.image_to_string(gray, config=config)
         
-        # High contrast pass to catch faint styling like graphic titles
-        g_boost = cv2.convertScaleAbs(gray, alpha=2.0, beta=-50)
-        t_boost = pytesseract.image_to_string(g_boost, config=config)
+        # 3. High contrast mode
+        boosted = cv2.convertScaleAbs(gray, alpha=1.5, beta=-30)
+        t_boost = pytesseract.image_to_string(boosted, config=config)
         
         combined_lines = []
         seen = set()
         
-        for text_block in [t_normal, t_blur, t_boost]:
+        # Merge results, prioritizing the most accurate text blocks
+        for text_block in [t_proc, t_gray, t_boost]:
+            if not text_block: continue
             for line in text_block.split('\n'):
                 line = line.strip()
-                if line and len(line) > 1 and line.lower() not in seen:
-                    seen.add(line.lower())
-                    combined_lines.append(line)
+                if line and len(line) > 2:
+                    # Basic cleanup of garbage noise
+                    if line.lower() not in seen:
+                        seen.add(line.lower())
+                        combined_lines.append(line)
         
         return "\n".join(combined_lines)
     except Exception as e:
@@ -726,6 +741,9 @@ def open_book(book_id):
     })
 
 
+    return jsonify({"message": "Highlight saved successfully"})
+
+
 @app.route("/save_highlight", methods=["POST"])
 def save_highlight():
     data = request.get_json()
@@ -748,6 +766,30 @@ def save_highlight():
     conn.close()
 
     return jsonify({"message": "Highlight saved successfully"})
+
+
+@app.route("/delete_highlight", methods=["POST"])
+def delete_highlight():
+    data = request.get_json()
+
+    book_id = data.get("book_id")
+    highlighted_text = data.get("highlighted_text")
+
+    if not book_id or not highlighted_text:
+        return jsonify({"error": "Missing data"})
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute(
+        "DELETE FROM highlights WHERE book_id = ? AND highlighted_text = ?",
+        (book_id, highlighted_text)
+    )
+
+    conn.commit()
+    conn.close()
+
+    return jsonify({"message": "Highlight deleted successfully"})
 
 
 @app.route("/highlights/<int:book_id>")

@@ -99,6 +99,7 @@ body {
     overflow: hidden;
     display: inline-block;
     margin-bottom: 16px;
+    max-width: 100%;
 }
 
 .file-input-wrapper input[type=file] {
@@ -121,6 +122,11 @@ body {
     cursor: pointer;
     font-size: 0.85rem;
     transition: all 0.2s;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: middle;
 }
 
 .btn-upload-label:hover {
@@ -1193,9 +1199,6 @@ body {
 
 /* ============================= Highlighting & TTS marks ============================= */
 
-
-
-
 @keyframes bounceBot {
 
     0%,
@@ -1318,17 +1321,18 @@ body {
 .book-back {
     width: 60px;
     height: 40px;
-    background: #944c20; /* Matches primary theme */
+    background: #944c20;
+    /* Matches primary theme */
     border-radius: 4px;
     position: absolute;
     z-index: 0;
-    box-shadow: 0 5px 15px rgba(0,0,0,0.4);
+    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.4);
 }
 
 .book-page {
     width: 30px;
     height: 40px;
-    background: #fbf5e9; 
+    background: #fbf5e9;
     border: 1px solid #944c20;
     border-radius: 1px 4px 4px 1px;
     position: absolute;
@@ -1337,14 +1341,34 @@ body {
     animation: page-flip 1.5s infinite cubic-bezier(0.445, 0.05, 0.55, 0.95);
 }
 
-.book-page:nth-child(2) { animation-delay: 0.15s; z-index: 5; }
-.book-page:nth-child(3) { animation-delay: 0.3s; z-index: 4; }
-.book-page:nth-child(4) { animation-delay: 0.45s; z-index: 3; }
+.book-page:nth-child(2) {
+    animation-delay: 0.15s;
+    z-index: 5;
+}
+
+.book-page:nth-child(3) {
+    animation-delay: 0.3s;
+    z-index: 4;
+}
+
+.book-page:nth-child(4) {
+    animation-delay: 0.45s;
+    z-index: 3;
+}
 
 @keyframes page-flip {
-    0% { transform: rotateY(0deg); }
-    80% { transform: rotateY(-180deg); }
-    100% { transform: rotateY(-180deg); opacity: 0; }
+    0% {
+        transform: rotateY(0deg);
+    }
+
+    80% {
+        transform: rotateY(-180deg);
+    }
+
+    100% {
+        transform: rotateY(-180deg);
+        opacity: 0;
+    }
 }
 
 .loader-text-animated {
@@ -1353,13 +1377,22 @@ body {
     font-weight: 700;
     letter-spacing: 2px;
     text-transform: uppercase;
-    text-shadow: 0 2px 5px rgba(0,0,0,0.5);
+    text-shadow: 0 2px 5px rgba(0, 0, 0, 0.5);
     animation: loader-pulse 1.8s infinite ease-in-out;
 }
 
 @keyframes loader-pulse {
-    0%, 100% { opacity: 0.5; transform: scale(0.96); }
-    50% { opacity: 1; transform: scale(1); }
+
+    0%,
+    100% {
+        opacity: 0.5;
+        transform: scale(0.96);
+    }
+
+    50% {
+        opacity: 1;
+        transform: scale(1);
+    }
 }
 
 /* Animated Book Loader: Spinning Cover and Flipping Page Lines */
@@ -1390,7 +1423,7 @@ body {
     left: 0;
     transform-origin: center center;
     animation: spin-cover-pulse 2s infinite linear;
-    box-shadow: 0 8px 20px rgba(0,0,0,0.3);
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.3);
 }
 
 .page-lines {
@@ -1414,18 +1447,41 @@ body {
     transform-origin: center center;
 }
 
-.page-line:nth-child(2) { animation-delay: 0.2s; opacity: 0.7; }
-.page-line:nth-child(3) { animation-delay: 0.4s; opacity: 0.5; }
+.page-line:nth-child(2) {
+    animation-delay: 0.2s;
+    opacity: 0.7;
+}
+
+.page-line:nth-child(3) {
+    animation-delay: 0.4s;
+    opacity: 0.5;
+}
 
 @keyframes spin-cover-pulse {
-    0% { transform: rotateY(0deg) scale(1); }
-    50% { transform: rotateY(180deg) scale(1.1); }
-    100% { transform: rotateY(360deg) scale(1); }
+    0% {
+        transform: rotateY(0deg) scale(1);
+    }
+
+    50% {
+        transform: rotateY(180deg) scale(1.1);
+    }
+
+    100% {
+        transform: rotateY(360deg) scale(1);
+    }
 }
 
 @keyframes page-line-flip {
-    0%, 100% { transform: scaleX(1); }
-    50% { transform: scaleX(0.2); opacity: 0.3; }
+
+    0%,
+    100% {
+        transform: scaleX(1);
+    }
+
+    50% {
+        transform: scaleX(0.2);
+        opacity: 0.3;
+    }
 }
 
 .loader-text-animated {
@@ -1434,13 +1490,22 @@ body {
     font-weight: 700;
     letter-spacing: 1.5px;
     text-transform: uppercase;
-    text-shadow: 0 2px 4px rgba(0,0,0,0.4);
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.4);
     animation: loader-pulse 1.8s infinite ease-in-out;
 }
 
 @keyframes loader-pulse {
-    0%, 100% { opacity: 0.6; transform: scale(0.98); }
-    50% { opacity: 1; transform: scale(1); }
+
+    0%,
+    100% {
+        opacity: 0.6;
+        transform: scale(0.98);
+    }
+
+    50% {
+        opacity: 1;
+        transform: scale(1);
+    }
 }
 
 /* Straight Flipping Book Loader - Self-Contained and Stable */
@@ -1451,6 +1516,7 @@ body {
     perspective: 600px;
     margin: 20px 0;
 }
+
 .book-flipping .spine {
     width: 4px;
     height: 50px;
@@ -1461,6 +1527,7 @@ body {
     z-index: 10;
     border-radius: 2px;
 }
+
 .book-flipping .cover {
     width: 40px;
     height: 50px;
@@ -1468,10 +1535,18 @@ body {
     position: absolute;
     top: 0;
     border-radius: 2px 4px 4px 2px;
-    box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
 }
-.book-flipping .cover.left { left: 0; border-radius: 4px 2px 2px 4px; }
-.book-flipping .cover.right { right: 0; border-radius: 2px 4px 4px 2px; }
+
+.book-flipping .cover.left {
+    left: 0;
+    border-radius: 4px 2px 2px 4px;
+}
+
+.book-flipping .cover.right {
+    right: 0;
+    border-radius: 2px 4px 4px 2px;
+}
 
 .book-flipping .flipping-page {
     width: 40px;
@@ -1486,15 +1561,41 @@ body {
     animation: flip-page-solid 2s infinite ease-in-out;
 }
 
-.book-flipping .flipping-page:nth-child(3) { animation-delay: 0.15s; z-index: 5; }
-.book-flipping .flipping-page:nth-child(4) { animation-delay: 0.3s; z-index: 4; }
-.book-flipping .flipping-page:nth-child(5) { animation-delay: 0.45s; z-index: 3; }
+.book-flipping .flipping-page:nth-child(3) {
+    animation-delay: 0.15s;
+    z-index: 5;
+}
+
+.book-flipping .flipping-page:nth-child(4) {
+    animation-delay: 0.3s;
+    z-index: 4;
+}
+
+.book-flipping .flipping-page:nth-child(5) {
+    animation-delay: 0.45s;
+    z-index: 3;
+}
 
 @keyframes flip-page-solid {
-    0% { transform: rotateY(0deg); opacity: 1; }
-    70% { transform: rotateY(-180deg); opacity: 1; }
-    90% { transform: rotateY(-180deg); opacity: 0; }
-    100% { transform: rotateY(-180deg); opacity: 0; }
+    0% {
+        transform: rotateY(0deg);
+        opacity: 1;
+    }
+
+    70% {
+        transform: rotateY(-180deg);
+        opacity: 1;
+    }
+
+    90% {
+        transform: rotateY(-180deg);
+        opacity: 0;
+    }
+
+    100% {
+        transform: rotateY(-180deg);
+        opacity: 0;
+    }
 }
 
 .loader-text-animated {
@@ -1503,24 +1604,45 @@ body {
     font-weight: 700;
     letter-spacing: 1.5px;
     text-transform: uppercase;
-    text-shadow: 0 2px 4px rgba(0,0,0,0.4);
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.4);
     animation: loader-pulse 1.8s infinite ease-in-out;
     margin-top: 15px;
 }
 
 @keyframes loader-pulse {
-    0%, 100% { opacity: 0.6; transform: scale(0.98); }
-    50% { opacity: 1; transform: scale(1); }
+
+    0%,
+    100% {
+        opacity: 0.6;
+        transform: scale(0.98);
+    }
+
+    50% {
+        opacity: 1;
+        transform: scale(1);
+    }
 }
 
 @keyframes spin {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
+    0% {
+        transform: rotate(0deg);
+    }
+
+    100% {
+        transform: rotate(360deg);
+    }
 }
 
 @keyframes slideDownIn {
-    from { transform: translate(-50%, -30px); opacity: 0; }
-    to { transform: translate(-50%, 0); opacity: 1; }
+    from {
+        transform: translate(-50%, -30px);
+        opacity: 0;
+    }
+
+    to {
+        transform: translate(-50%, 0);
+        opacity: 1;
+    }
 }
 
 /* AI Loading Animation for Image Explanation */
@@ -1540,14 +1662,24 @@ body {
 }
 
 @keyframes dot-pulse {
-    0%, 100% { transform: scale(1); opacity: 0.5; }
-    50% { transform: scale(1.4); opacity: 1; }
+
+    0%,
+    100% {
+        transform: scale(1);
+        opacity: 0.5;
+    }
+
+    50% {
+        transform: scale(1.4);
+        opacity: 1;
+    }
 }
 
 /* Image Explanation Modal Enhancement */
 #imageExplanationModal .modal-content {
     max-width: 550px;
-    background: #fdfaf6; /* Parchment white */
+    background: #fdfaf6;
+    /* Parchment white */
     border: 2px solid #5c3924;
     padding: 24px;
 }
@@ -1561,7 +1693,8 @@ body {
 }
 
 #imageExplanationText {
-    white-space: pre-wrap; /* To handle line breaks in description */
+    white-space: pre-wrap;
+    /* To handle line breaks in description */
     font-family: 'Inter', sans-serif;
 }
 
@@ -1571,25 +1704,29 @@ body {
 }
 
 .mood-happy {
-    background-color: #fef9c3 !important; /* Soft yellow */
+    background-color: #fef9c3 !important;
+    /* Soft yellow */
     box-shadow: 0 0 25px rgba(253, 224, 71, 0.4) !important;
     border-color: #fde047 !important;
 }
 
 .mood-sad {
-    background-color: #e0f2fe !important; /* Cold blue */
+    background-color: #e0f2fe !important;
+    /* Cold blue */
     box-shadow: 0 0 25px rgba(186, 230, 253, 0.4) !important;
     border-color: #bae6fd !important;
 }
 
 .mood-angry {
-    background-color: #fee2e2 !important; /* Soft red alert */
+    background-color: #fee2e2 !important;
+    /* Soft red alert */
     box-shadow: 0 0 25px rgba(254, 202, 202, 0.4) !important;
     border-color: #fecaca !important;
 }
 
 .mood-fear {
-    background-color: #f1f5f9 !important; /* Eerie cold grey */
+    background-color: #f1f5f9 !important;
+    /* Eerie cold grey */
     box-shadow: 0 0 35px rgba(15, 23, 42, 0.3) !important;
     border-color: #94a3b8 !important;
     filter: brightness(0.9) contrast(1.1);
@@ -1603,8 +1740,17 @@ body {
 }
 
 @keyframes flash-pulse {
-    0%, 100% { transform: scale(1); opacity: 1; }
-    50% { transform: scale(1.05); opacity: 0.85; }
+
+    0%,
+    100% {
+        transform: scale(1);
+        opacity: 1;
+    }
+
+    50% {
+        transform: scale(1.05);
+        opacity: 0.85;
+    }
 }
 
 /* Book Folding Closing Animation */
@@ -1617,7 +1763,21 @@ body {
 }
 
 @keyframes book-fold-shut {
-    0% { transform: rotateY(0deg) scale(1); opacity: 1; filter: contrast(1); }
-    50% { transform: rotateY(90deg) scale(0.9); opacity: 0.5; filter: contrast(1.2) brightness(0.8); }
-    100% { transform: rotateY(180deg) scale(0.8); opacity: 0; filter: contrast(1.5) brightness(0.5); }
+    0% {
+        transform: rotateY(0deg) scale(1);
+        opacity: 1;
+        filter: contrast(1);
+    }
+
+    50% {
+        transform: rotateY(90deg) scale(0.9);
+        opacity: 0.5;
+        filter: contrast(1.2) brightness(0.8);
+    }
+
+    100% {
+        transform: rotateY(180deg) scale(0.8);
+        opacity: 0;
+        filter: contrast(1.5) brightness(0.5);
+    }
 }

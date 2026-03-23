@@ -2,6 +2,46 @@ let currentBookId = null;
 let currentBookText = "";
 let currentBookDetectedLangCode = "en";
 let activeBooksList = []; 
+let currentSpeed = 1.0; 
+
+function changeSpeed(delta) {
+    // 0.1x increments for ultimate smoothness
+    currentSpeed = Math.max(0.4, Math.min(3.0, currentSpeed + delta));
+    currentSpeed = parseFloat(currentSpeed.toFixed(1)); 
+    
+    let display = document.getElementById("speedDisplay");
+    if(display) display.innerText = currentSpeed + "x";
+    
+    // Immediate Apply
+    if (isReadingAloud && !isPaused) {
+        if (typeof currentFallbackAudio !== 'undefined' && currentFallbackAudio) {
+            currentFallbackAudio.playbackRate = currentSpeed;
+        } else {
+            // Standard SpeechSynthesis needs a full restart to apply new rate
+            restartNarrator();
+        }
+    }
+}
+
+function restartNarrator() {
+    if (!isReadingAloud) return;
+    const resumePos = currentAbsoluteCharIndex;
+    
+    // Stop all engines immediately
+    window.speechSynthesis.cancel();
+    currentNarrationJobId++; // Lethal: Instantly invalidates all pending async callbacks
+    
+    if (currentFallbackAudio) {
+        currentFallbackAudio.pause();
+        currentFallbackAudio = null;
+    }
+    
+    // Resume with current settings after a tiny delay for browser stability
+    setTimeout(() => {
+        resumeReadingFromIndex(resumePos, isPaused);
+    }, 150);
+}
+
 let totalPages = 0;
  // 'male' or 'female' or null
 
@@ -683,6 +723,49 @@ function saveHighlight() {
         return;
     }
 
+    // TOGGLE LOGIC: Check if this range intersects with or matches an existing highlight
+    let existingIndex = currentHighlights.findIndex(h => {
+        let jh = typeof h === 'string' ? JSON.parse(h) : h;
+        // Robust intersection check: If selection overlaps significantly with an existing highlight
+        // or if the selection is entirely within an existing highlight.
+        const isOverlap = (rangeData.startChar < jh.endChar && rangeData.endChar > jh.startChar);
+        if (!isOverlap) return false;
+
+        // Ensure we aren't accidentally toggling off a highlight just because we brushed past it
+        // Check if the intersection is meaningful (e.g. either close proximity of offsets OR substantial overlap)
+        const startDiff = Math.abs(jh.startChar - rangeData.startChar);
+        const endDiff = Math.abs(jh.endChar - rangeData.endChar);
+        
+        // Match if offsets are very close OR if selection is clearly targeting this highlight
+        return (startDiff < 8 && endDiff < 8) || (rangeData.startChar >= jh.startChar && rangeData.endChar <= jh.endChar);
+    });
+
+    if (existingIndex !== -1) {
+        console.log("Toggle OFF: Removing highlight", rangeData);
+        let itemToRemove = currentHighlights[existingIndex];
+        currentHighlights.splice(existingIndex, 1);
+        
+        // Remove from server
+        fetch("/delete_highlight", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                book_id: currentBookId,
+                highlighted_text: itemToRemove
+            })
+        }).then(res => {
+            if (res.ok) console.log("Highlight removed from server");
+        });
+
+        // Visually remove: Clear all and re-apply remaining
+        clearManualHighlights();
+        applyExistingHighlights();
+        
+        if (toolbar) toolbar.style.display = "none";
+        selection.removeAllRanges();
+        return;
+    }
+
     console.log("Applying highlight to range:", rangeData);
     
     // Apply visual highlight immediately
@@ -852,6 +935,24 @@ function highlightAbsoluteRange(reader, item, className) {
 // Global cache for characters to nodes mapping to avoid repeated traversal
 let textNodeCache = [];
 let totalCharCount = 0;
+
+function clearManualHighlights() {
+    let reader = document.getElementById("reader");
+    if (!reader) return;
+    
+    let highlights = reader.querySelectorAll('.highlight');
+    highlights.forEach(el => {
+        let parent = el.parentNode;
+        if (parent) {
+            // Un-wrap: insert children back into parent and remove the span
+            while (el.firstChild) {
+                parent.insertBefore(el.firstChild, el);
+            }
+            parent.removeChild(el);
+            parent.normalize();
+        }
+    });
+}
 
 function applyExistingHighlights() {
     if (!currentHighlights || currentHighlights.length === 0) return;
@@ -1196,7 +1297,7 @@ async function readAloud() {
         runningOffset += chunk.length;
 
         let utterance = new SpeechSynthesisUtterance(trimmed);
-        utterance.rate = 1.0;
+        utterance.rate = currentSpeed;
 
         utterance.onstart = function() {
             removeReadingMarks();
@@ -1270,9 +1371,8 @@ async function resumeReadingFromIndex(index, startPaused = false) {
     if (watchdogTimer) clearTimeout(watchdogTimer);
     startSpeechKeepAlive(); // Keep long sessions alive
 
-    if (!globalTextNodes || globalTextNodes.length === 0 || !globalReadingText) {
-        rebuildReadingNodeMap();
-    }
+    // CRITICAL: Always rebuild node map to stay in sync with dynamic changes (translation/zoom/OCR)
+    rebuildReadingNodeMap();
     
     let text = globalReadingText;
     if (!text || !text.trim()) return;
@@ -1335,7 +1435,7 @@ async function resumeReadingFromIndex(index, startPaused = false) {
         runningOffset += chunk.length;
 
         let utterance = new SpeechSynthesisUtterance(trimmed);
-        utterance.rate = 1.0;
+        utterance.rate = currentSpeed;
         let lang = getSelectedLanguage();
         if (lang) {
             utterance.lang = lang;
@@ -1350,7 +1450,7 @@ async function resumeReadingFromIndex(index, startPaused = false) {
              // Pass voice to detect gender
         }
     }
-    utterance.rate = 0.9;
+    utterance.rate = currentSpeed;
         let thisChunkStartOffset = chunkOffset;
         chunkOffset += chunk.length;
         
@@ -1372,28 +1472,59 @@ async function resumeReadingFromIndex(index, startPaused = false) {
             if (completedTasks === totalTasks) stopReading(true);
         };
 
+        const jobId = currentNarrationJobId;
+        
         utterance.onboundary = function(event) {
-            if (event.name !== 'word' && event.name !== 'sentence') return;
-            
+            if (jobId !== currentNarrationJobId || event.name !== 'word') return;
+            boundaryReceived = true;
             let charLength = event.charLength || event.currentTarget.text.substring(event.charIndex).split(/\s+/)[0].length;
-            
             let absoluteWordPosition = actualStartOffset + event.charIndex;
             currentAbsoluteCharIndex = absoluteWordPosition;
-
-            requestAnimationFrame(() => {
-                highlightReadingWord(absoluteWordPosition, charLength);
-            });
-
-            // Watchdog: If we're at the very last chunk, set a timer to finish up 
-            // if onend fails to fire.
-            if (index === chunks.length - 1) {
-                if (watchdogTimer) clearTimeout(watchdogTimer);
-                watchdogTimer = setTimeout(() => {
-                    if (isReadingAloud && !isPaused) stopReading(true);
-                }, 4000); 
-            }
+            highlightReadingWord(absoluteWordPosition, charLength);
         };
         
+        // Timer-based fallback for environments/voices that don't support onboundary
+        utterance.onstart = function() { 
+            if (jobId !== currentNarrationJobId) return;
+            removeReadingMarks(); 
+            let words = [];
+            let regex = /\S+/g;
+            let match;
+            while ((match = regex.exec(trimmed)) !== null) {
+                words.push({ startOffset: actualStartOffset + match.index, length: match[0].length });
+            }
+            
+            let baseDuration = (trimmed.length / (14 * utterance.rate)) * 1000;
+            let startTime = Date.now();
+            let interval = setInterval(() => {
+                if (jobId !== currentNarrationJobId || boundaryReceived || !isReadingAloud || isPaused || utterancePool.indexOf(utterance) === -1) {
+                    clearInterval(interval);
+                    return;
+                }
+                let elapsed = Date.now() - startTime;
+                let progress = elapsed / baseDuration;
+                if (progress >= 1.0) { clearInterval(interval); return; }
+                
+                let wordIdx = Math.floor(progress * words.length);
+                if (wordIdx < words.length && wordIdx >= 0) {
+                    currentAbsoluteCharIndex = words[wordIdx].startOffset;
+                    highlightReadingWord(words[wordIdx].startOffset, words[wordIdx].length);
+                }
+            }, 100);
+        };
+        
+        utterancePool.push(utterance); // Keep reference alive
+        utterance.onend = function() {
+            boundaryReceived = false;
+            utterancePool = utterancePool.filter(u => u !== utterance);
+            completedTasks++;
+            if (completedTasks === totalTasks) stopReading(true);
+        };
+        utterance.onerror = () => {
+             utterancePool = utterancePool.filter(u => u !== utterance);
+             completedTasks++;
+             if (completedTasks === totalTasks) stopReading(true);
+        };
         window.speechSynthesis.speak(utterance);
     });
     
@@ -1402,20 +1533,32 @@ async function resumeReadingFromIndex(index, startPaused = false) {
     }
 }
 
+let currentNarrationJobId = 0;
+
 function stopReading(isComplete = false) {
-    window.speechSynthesis.resume(); // Prevent deadlocks where a paused engine ignores cancel
+    currentNarrationJobId++; // Lethal: Instantly invalidates all pending async callbacks
+    window.speechSynthesis.resume(); 
     window.speechSynthesis.cancel();
-    stopSpeechKeepAlive(); // Clear the pulse interval
+    stopSpeechKeepAlive(); 
+    
     if (currentFallbackAudio) {
         currentFallbackAudio.pause();
+        currentFallbackAudio.ontimeupdate = null;
         currentFallbackAudio = null;
     }
+
+    fallbackQueue = []; 
+    currentEmotionUtterance = null;
+    lastEmotionItem = null;
+    lastEmotionItemProgress = 0;
+    
     isReadingAloud = false;
     isPaused = false;
     lastHighlightPos = -1;
     if (watchdogTimer) clearTimeout(watchdogTimer);
     utterancePool = [];
     
+    removeReadingMarks();
     if (isComplete) {
         currentAbsoluteCharIndex = 0;
         let reader = document.getElementById("reader");
@@ -1452,10 +1595,11 @@ async function togglePlayPause() {
         if (isPaused) {
             // RESUME
             isPaused = false;
+            // Enhanced Resume
             if (isEmotionModeActive) {
-                // Robust Restart-based Resume: ensures both voice and highlighting are perfectly synced
                 window.speechSynthesis.cancel();
-                playNextFallback(false, true); // Clean restart of last emotive chunk
+                if (currentFallbackAudio) { currentFallbackAudio.pause(); currentFallbackAudio = null; }
+                playNextFallback(false, true); // Clean restart for sync
             } else if (currentFallbackAudio) {
                 currentFallbackAudio.play();
             } else {
@@ -1467,14 +1611,16 @@ async function togglePlayPause() {
             isPaused = true;
             if (isEmotionModeActive) {
                 window.speechSynthesis.pause();
-                // 1. Capture progress to enable slicing for accurate resume
-                if (lastEmotionItem && typeof lastEmotionItemProgress !== 'undefined') {
-                    // Slide the text and offset to where we actually stopped
+                if (currentFallbackAudio) currentFallbackAudio.pause();
+
+                // TRACK PROGRESS: Save the exact spot where we were paused
+                if (lastEmotionItem && typeof lastEmotionItemProgress !== 'undefined' && lastEmotionItemProgress > 0) {
+                    console.log("Saving resume point at offset:", lastEmotionItemProgress);
                     lastEmotionItem.text = lastEmotionItem.text.substring(lastEmotionItemProgress).trim();
                     lastEmotionItem.offset += lastEmotionItemProgress;
-                    lastEmotionItemProgress = 0; // Reset for the next resume
+                    lastEmotionItemProgress = 0; // Reset for next use
                 }
-                window.speechSynthesis.cancel(); // Prepare for clean restart on resume
+                window.speechSynthesis.cancel(); // Necessary for clean restart later
             } else if (currentFallbackAudio) {
                 currentFallbackAudio.pause();
             } else {
@@ -1659,7 +1805,7 @@ function readSelectedText() {
     }
     
     let utterance = new SpeechSynthesisUtterance(selectedText);
-    utterance.rate = 0.9;
+    utterance.rate = currentSpeed;
     
     if (lang) {
         utterance.lang = lang;
@@ -2085,11 +2231,13 @@ async function translateBook() {
     titleEl.innerText = "Translating book... Please wait...";
     showTranslationLoader("Initializing AI Translation Engine...");
     
+    reader.normalize(); // Merge adjacent text nodes to prevent "First Letter Only" translation bugs
     let walker = document.createTreeWalker(reader, NodeFilter.SHOW_TEXT, null, false);
     let nodes = [];
     while (walker.nextNode()) {
         let node = walker.currentNode;
-        if (node.nodeValue.trim().length > 0 && !node.parentNode.classList.contains('empty-state')) {
+        // Aggressive capture: even nodes in OCR fallbacks should be translated for a complete book experience
+        if (node.nodeValue.trim().length > 0) {
             nodes.push(node);
         }
     }
@@ -2133,14 +2281,18 @@ async function translateBook() {
     let initialChunks = chunks.slice(0, 5);
     let backgroundChunks = chunks.slice(5);
     
-    let translateRecursive = async (batchNodes) => {
+    let translateRecursive = async (batchNodes, retryCount = 0) => {
         if (batchNodes.length === 0 || window.activeTranslationJob !== currentJob) return;
         
         let batchTexts = batchNodes.map(n => n.nodeValue);
-        let joinedText = batchTexts.join(" ~|~ ");
+        let separator = " ||| ";
+        let joinedText = batchTexts.join(separator);
         let translateApiLang = targetLang.split("-")[0];
         
         try {
+            // Delay to avoid 429 Rate Limiting on large batches
+            if (retryCount > 0) await new Promise(r => setTimeout(r, 1000 * (retryCount+1)));
+
             let url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${translateApiLang}&dt=t&q=${encodeURIComponent(joinedText)}`;
             let res = await fetch(url);
 
@@ -2153,25 +2305,31 @@ async function translateBook() {
                     });
                 }
                 
-                let translatedTexts = fullTranslation.split(/\s*~\|~\s*/);
-                
+                // Flexible splitting for standard " ||| "
+                let translatedTexts = fullTranslation.split(/\s*\|\|\|\s*/);
+                translatedTexts = translatedTexts.map(t => t.trim()).filter(t => t.length > 0);
+
                 if (translatedTexts.length === batchNodes.length) {
                     for (let j = 0; j < batchNodes.length; j++) {
-                        let cleanText = translatedTexts[j].replace(/~\|~/g, "").trim();
+                        let cleanText = translatedTexts[j];
                         if (batchNodes[j].nodeValue.match(/\s$/)) cleanText += " ";
                         batchNodes[j].nodeValue = cleanText;
                     }
                 } else if (batchNodes.length > 1) {
-                    // Exact parity lost. Binary split for fallback.
+                    // Parity mismatch: Split into tiny pairs for guaranteed success
                     let mid = Math.floor(batchNodes.length / 2);
                     await Promise.all([
                         translateRecursive(batchNodes.slice(0, mid)),
                         translateRecursive(batchNodes.slice(mid))
                     ]);
                 } else if (batchNodes.length === 1) {
-                    batchNodes[0].nodeValue = fullTranslation.replace(/~\|~/g, "").trim() + (batchNodes[0].nodeValue.match(/\s$/) ? " " : "");
+                    batchNodes[0].nodeValue = fullTranslation.trim() + (batchNodes[0].nodeValue.match(/\s$/) ? " " : "");
                 }
-            } else if (!res.ok && batchNodes.length > 1) {
+            } else if (res.status === 429 && retryCount < 3) {
+                // Rate limited: Wait and retry this exact batch
+                await translateRecursive(batchNodes, retryCount + 1);
+            } else if (batchNodes.length > 1) {
+                // Network error or other: binary split
                 let mid = Math.floor(batchNodes.length / 2);
                 await Promise.all([
                     translateRecursive(batchNodes.slice(0, mid)),
@@ -2199,11 +2357,12 @@ async function translateBook() {
     // Await initial screen chunks
     await Promise.all(initialChunks.map(processChunk));
     
-    // Instantly reveal first pages
+    // Instantly reveal first pages and snap the node map to the new translation
     if (window.activeTranslationJob === currentJob) {
         currentBookText = reader.innerHTML;
         titleEl.innerText = originalTitle;
         hideLoader();
+        setTimeout(() => rebuildReadingNodeMap(), 50); // Important: Map the new translated structure
     }
     
     // Proper background task pool for maximum throughput
@@ -2368,6 +2527,7 @@ function highlightReadingWord(absoluteWordPosition, charLength) {
             }
         }
 
+        let foundAny = false;
         for (let i = startSearchAt; i < globalTextNodes.length; i++) {
             let nodeStart = globalNodeOffsets[i];
             let node = globalTextNodes[i];
@@ -2375,6 +2535,7 @@ function highlightReadingWord(absoluteWordPosition, charLength) {
             let nodeEnd = nodeStart + nodeLen;
 
             if (nodeEnd > startChar && nodeStart < endChar) {
+                foundAny = true;
                 lastMarkedNodeIndex = i; // Cache this for the next word
                 let sliceStart = Math.max(0, startChar - nodeStart);
                 let sliceEnd = Math.min(nodeLen, endChar - nodeStart);
@@ -2400,6 +2561,13 @@ function highlightReadingWord(absoluteWordPosition, charLength) {
             }
             if (nodeStart >= endChar) break;
         }
+        
+        // SELF-HEALING: If we failed to find the target chars in a valid range, the map is likely stale.
+        if (!foundAny && globalReadingText && startChar < globalReadingText.length && !window._rebuildingMap) {
+            window._rebuildingMap = true;
+            rebuildReadingNodeMap();
+            setTimeout(() => { window._rebuildingMap = false; highlightReadingWord(absoluteWordPosition, charLength); }, 20);
+        }
         return;
     }
 
@@ -2413,8 +2581,8 @@ let lastEmotionItem = null;
 let lastEmotionItemProgress = 0; // Track exact progress within a chunk for seamless resume
 
 function playNextFallback(startPaused = false, isRetry = false) {
-    if(!isReadingAloud || (fallbackQueue.length === 0 && !window.speechSynthesis.speaking && !isRetry)) {
-        stopReading(true);
+    if(!isReadingAloud || isPaused || (fallbackQueue.length === 0 && !window.speechSynthesis.speaking && !isRetry)) {
+        if (!isPaused && isReadingAloud) stopReading(true);
         return;
     }
     
@@ -2430,6 +2598,7 @@ function playNextFallback(startPaused = false, isRetry = false) {
     // EMOTION MODE: Use Web Speech API for real-time pitch/rate control
     if (isEmotionModeActive) {
         window.speechSynthesis.cancel(); // Stop old audio
+        const jobId = currentNarrationJobId;
         
         // 1. Analyze Emotion FIRST
         fetch("/analyze_emotion", {
@@ -2439,83 +2608,140 @@ function playNextFallback(startPaused = false, isRetry = false) {
         })
         .then(res => res.json())
         .then(data => {
+            if (jobId !== currentNarrationJobId || !isReadingAloud) return; 
+            
             const emotion = data.emotion || 'neutral';
             updateReaderMood(emotion);
             
-            // 2. Play with emotive params
-            let utterance = new SpeechSynthesisUtterance(item.text);
-            currentEmotionUtterance = utterance; // Cache for pause/resume tracking
-            const voices = window.speechSynthesis.getVoices();
-            utterance.voice = voices.find(v => v.name.includes("Google") || v.name.includes("Premium")) || voices[0];
+            const targetLang = getSelectedLanguage() || 'en-US';
+            const shortLang = targetLang.split("-")[0].toLowerCase();
             
-            // Emotive Params mapping
-            if (emotion === 'happy') { utterance.pitch = 1.4; utterance.rate = 1.1; }
-            else if (emotion === 'sad') { utterance.pitch = 0.7; utterance.rate = 0.8; }
-            else if (emotion === 'angry') { utterance.pitch = 1.2; utterance.rate = 1.3; }
-            else if (emotion === 'fear') { utterance.pitch = 0.8; utterance.rate = 0.9; }
-            else { utterance.pitch = 1.0; utterance.rate = 1.0; }
-            let boundaryReceived = false;
-            utterance.onboundary = (event) => {
-                if (event.name === 'word' || event.name === "boundary") {
-                    boundaryReceived = true;
-                    lastEmotionItemProgress = event.charIndex;
-                    
-                    let substring = item.text.substring(event.charIndex);
-                    let wordMatch = substring.match(/^[\w\u0080-\uFFFF']+/);
-                    let charLength = event.charLength || (wordMatch ? wordMatch[0].length : 5);
-                    highlightReadingWord(item.offset + event.charIndex, charLength);
-                }
-            };
+            // CLARITY STRATEGY: English uses Native Pitch/Rate. Others use gTTS for clarity.
+            if (shortLang === 'en') {
+                let utterance = new SpeechSynthesisUtterance(item.text);
+                currentEmotionUtterance = utterance;
+                utterance.lang = targetLang;
+                const voices = window.speechSynthesis.getVoices();
+                // HIGH QUALITY PREFERENCE: Look for "US English Female" or "Natural" / "Google" / "Microsoft Online"
+                utterance.voice = voices.find(v => v.lang.startsWith('en') && v.name.includes("Microsoft Zira")) ||
+                                  voices.find(v => v.lang.startsWith('en') && v.name.includes("US English Female")) ||
+                                  voices.find(v => v.lang.startsWith('en') && v.name.includes("Google") && v.name.includes("UK")) ||
+                                  voices.find(v => v.lang.startsWith('en') && v.name.includes("Natural")) ||
+                                  voices.find(v => v.lang.startsWith('en') && v.name.includes("Google")) || 
+                                  voices.find(v => v.lang.startsWith('en')) || voices[0];
 
-            // FALLBACK: Timer-based highlighting only if onboundary fails (Premium stability)
-            let words = [];
-            let regex = /\S+/g;
-            let match;
-            while ((match = regex.exec(item.text)) !== null) {
-                words.push({ index: match.index, length: match[0].length });
-            }
-
-            utterance.onstart = () => {
-                let baseCharsPerSec = 16;
-                let durationMs = (item.text.length / (baseCharsPerSec * utterance.rate)) * 1000; 
-                let startTime = Date.now();
+                if (emotion === 'happy') { utterance.pitch = 1.4; utterance.rate = 1.2 * currentSpeed; }
+                else if (emotion === 'sad') { utterance.pitch = 0.7; utterance.rate = 0.7 * currentSpeed; }
+                else if (emotion === 'angry') { utterance.pitch = 1.2; utterance.rate = 1.3 * currentSpeed; }
+                else if (emotion === 'fear') { utterance.pitch = 0.8; utterance.rate = 0.8 * currentSpeed; }
+                else { utterance.pitch = 1.0; utterance.rate = 1.0 * currentSpeed; }
                 
-                let highlightInterval = setInterval(() => {
-                    if (!isReadingAloud || isPaused || isEmotionModeActive === false || boundaryReceived) {
-                        clearInterval(highlightInterval);
-                        return;
+                let boundaryReceived = false;
+                utterance.onboundary = (event) => {
+                    if (jobId !== currentNarrationJobId || event.name === 'sentence') return;
+                    if (event.name === 'word') {
+                        boundaryReceived = true;
+                        lastEmotionItemProgress = event.charIndex; // TRACK PROGRESS FOR RESUME
+                        currentAbsoluteCharIndex = item.offset + event.charIndex;
+                        highlightReadingWord(item.offset + event.charIndex, event.charLength || 5);
                     }
-                    let elapsed = Date.now() - startTime;
-                    let progress = elapsed / durationMs;
-                    if (progress >= 1.0) {
-                        clearInterval(highlightInterval);
-                        return;
+                };
+
+                // Timer-based fallback for Emotion-triggered speech (high reliability)
+                utterance.onstart = () => { 
+                    if (jobId !== currentNarrationJobId) return;
+                    let words = [];
+                    let regex = /\S+/g;
+                    let match;
+                    while ((match = regex.exec(item.text)) !== null) {
+                        words.push({ startOffset: item.offset + match.index, length: match[0].length });
                     }
-                    let wordIdx = Math.floor(progress * words.length);
-                    if (wordIdx < words.length) {
-                        lastEmotionItemProgress = words[wordIdx].index;
-                        highlightReadingWord(item.offset + words[wordIdx].index, words[wordIdx].length);
-                    }
-                }, 100);
+                    
+                    let baseDur = (item.text.length / (14 * utterance.rate)) * 1000; // Refined chars-per-second
+                    let startT = Date.now();
+                    let hIn = setInterval(() => {
+                        // REMOVED 'boundaryReceived' check: Let the timer be an unstoppable backup
+                        if (jobId !== currentNarrationJobId || boundaryReceived || !isReadingAloud || !isEmotionModeActive || isPaused) {
+                            clearInterval(hIn);
+                            return;
+                        }
+                        let elapsed = Date.now() - startT;
+                        let progress = elapsed / baseDur;
+                        if (progress >= 1.0) { clearInterval(hIn); return; }
+                        
+                        let idx = Math.floor(progress * words.length);
+                        if (idx < words.length && idx >= 0) {
+                            let curr = words[idx];
+                            lastEmotionItemProgress = curr.startOffset - item.offset; // TRACK PROGRESS FOR RESUME
+                            currentAbsoluteCharIndex = curr.startOffset; // Update global pointer for seamless speed shifts
+                            highlightReadingWord(curr.startOffset, curr.length);
+                        }
+                    }, 80); 
+                };
 
                 utterance.onend = () => {
-                    boundaryReceived = false;
-                    clearInterval(highlightInterval);
-                    currentEmotionUtterance = null;
-                    lastEmotionItemProgress = 0; // Done with chunk
-                    updateReaderMood('neutral');
-                    if (isReadingAloud) playNextFallback();
+                    if (jobId !== currentNarrationJobId) return;
+                    removeReadingMarks();
+                    if (isReadingAloud && !isPaused) playNextFallback();
                 };
-            };
+                utterance.onerror = () => { if (jobId === currentNarrationJobId) setTimeout(playNextFallback, 500); };
+                window.speechSynthesis.speak(utterance);
+            } else {
+                // gTTS HIGH CLARITY (with enhanced speed-based emotion)
+                let url = `/tts?lang=${shortLang}&text=${encodeURIComponent(item.text.trim())}`;
+                let audio = new Audio(url);
+                currentFallbackAudio = audio;
 
-            if(!startPaused && !isPaused) window.speechSynthesis.speak(utterance);
+                // Emotive Speed Mapping - Enhanced sensitivity scaled by currentSpeed
+                if (emotion === 'happy') audio.playbackRate = 1.25 * currentSpeed;
+                else if (emotion === 'sad') audio.playbackRate = 0.75 * currentSpeed;
+                else if (emotion === 'angry') audio.playbackRate = 1.35 * currentSpeed;
+                else if (emotion === 'fear') audio.playbackRate = 0.95 * currentSpeed;
+                else audio.playbackRate = 1.0 * currentSpeed;
+
+                // Word-by-word highlighting for clarity mode (gTTS)
+                let words = [];
+                let regex = /\S+/g;
+                let match;
+                while ((match = regex.exec(item.text)) !== null) {
+                    words.push({ startOffset: item.offset + match.index, length: match[0].length });
+                }
+                let lastWordIndex = -1;
+                
+                audio.ontimeupdate = () => {
+                    // Heartbeat Check: Prevent ghost highlights from previous sentences
+                    if (jobId !== currentNarrationJobId || currentFallbackAudio !== audio) {
+                        audio.ontimeupdate = null;
+                        return;
+                    }
+                    if (!audio.duration || words.length === 0) return;
+                    let progress = audio.currentTime / audio.duration;
+                    let wordIndex = Math.floor(progress * words.length);
+                    if (wordIndex >= words.length) wordIndex = words.length - 1;
+                    if (wordIndex !== lastWordIndex) {
+                        lastWordIndex = wordIndex;
+                        lastEmotionItemProgress = words[wordIndex].startOffset - item.offset; // TRACK PROGRESS FOR RESUME
+                        currentAbsoluteCharIndex = words[wordIndex].startOffset;
+                        highlightReadingWord(words[wordIndex].startOffset, words[wordIndex].length);
+                    }
+                };
+
+                audio.play();
+                audio.onended = () => {
+                    if (jobId !== currentNarrationJobId) return;
+                    audio.ontimeupdate = null;
+                    removeReadingMarks();
+                    if (isReadingAloud && !isPaused) playNextFallback();
+                };
+                audio.onerror = () => { if (jobId === currentNarrationJobId) setTimeout(playNextFallback, 500); };
+            }
         });
         return;
     }
 
     // NORMAL MODE: Use gTTS Backend for high quality stable voice
     currentFallbackAudio = new Audio(item.url);
-    currentFallbackAudio.playbackRate = 0.95;
+    currentFallbackAudio.playbackRate = currentSpeed;
     
     let words = [];
     let regex = /\S+/g;
@@ -2561,23 +2787,9 @@ function toggleEmotionMode() {
         showUploadToast("🎭 Emotion Mode Disabled", "info");
     }
 
-    // Seamless Handoff: If we are already reading, switch engines mid-stream
+    // Seamless Handoff: If we are already reading, switch engines mid-stream using the unified restarter
     if (isReadingAloud) {
-        // 1. Capture current position
-        const resumePos = currentAbsoluteCharIndex;
-        
-        // 2. Stop everything
-        window.speechSynthesis.cancel();
-        if (currentFallbackAudio) {
-            currentFallbackAudio.pause();
-            currentFallbackAudio = null;
-        }
-        
-        // 3. Restart from same word using the new mode
-        // Small delay ensures browser state settles
-        setTimeout(() => {
-            resumeReadingFromIndex(resumePos, isPaused);
-        }, 100);
+        restartNarrator();
     }
 }
 
@@ -2597,10 +2809,10 @@ function updateReaderMood(emotion) {
     // Note: gTTS backend is already generated, but we can't easily change it mid-stream
     // However, for local speech synthesis we can:
     if (typeof utterance !== 'undefined' && utterance) {
-        if (emotion === 'happy') { utterance.pitch = 1.3; utterance.rate = 1.1; }
-        if (emotion === 'sad') { utterance.pitch = 0.8; utterance.rate = 0.8; }
-        if (emotion === 'angry') { utterance.pitch = 1.2; utterance.rate = 1.2; }
-        if (emotion === 'fear') { utterance.pitch = 1.1; utterance.rate = 0.9; }
+        if (emotion === 'happy') { utterance.pitch = 1.3; utterance.rate = 1.1 * currentSpeed; }
+        if (emotion === 'sad') { utterance.pitch = 0.8; utterance.rate = 0.8 * currentSpeed; }
+        if (emotion === 'angry') { utterance.pitch = 1.2; utterance.rate = 1.2 * currentSpeed; }
+        if (emotion === 'fear') { utterance.pitch = 1.1; utterance.rate = 0.9 * currentSpeed; }
     }
 }
 
