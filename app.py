@@ -1467,10 +1467,12 @@ def analyze_emotion():
 
         # 1. Rule-based Fast Emotion Mapping (Very stable and instant)
         emotion_rules = {
-            "happy": ["happy", "joy", "wonderful", "delighted", "smile", "laugh", "cheerful", "magic", "sunshine", "hope", "love", "friend"],
-            "sad": ["sad", "cried", "tear", "unhappy", "lost", "death", "lonely", "darkness", "misery", "sorrow", "alone", "grave"],
-            "angry": ["angry", "rage", "hate", "fight", "shout", "mad", "fury", "annoyed", "bitter", "punch", "strike"],
-            "fear": ["fear", "scared", "terrified", "ghost", "dark", "shadow", "unknown", "scary", "shiver", "beast", "creepy", "dangerous"]
+            "happy": ["happy", "joy", "wonderful", "delighted", "smile", "laugh", "cheerful", "magic", "sunshine", "hope", "love", "friend", "proud", "achieved"],
+            "sad": ["sad", "cried", "tear", "unhappy", "lost", "death", "lonely", "darkness", "misery", "sorrow", "alone", "grave", "hurt", "pain", "hopeless"],
+            "angry": ["angry", "rage", "hate", "fight", "shout", "mad", "fury", "annoyed", "bitter", "punch", "strike", "vengeance"],
+            "fear": ["fear", "scared", "terrified", "ghost", "dark", "shadow", "unknown", "scary", "shiver", "beast", "creepy", "dangerous", "nervous"],
+            "excited": ["excited", "amazing", "wow", "unbelievable", "can't wait", "next", "incredible", "thrilled", "shocked", "surprised"],
+            "peaceful": ["peaceful", "calm", "relax", "quiet", "still", "serene", "comfort", "harmony", "rest", "tired"]
         }
 
         found_counts = {emotion: sum(1 for word in words if word in text) for emotion, words in emotion_rules.items()}

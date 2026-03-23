@@ -2641,25 +2641,25 @@ function playNextFallback(startPaused = false, isRetry = false) {
             
             const targetLang = getSelectedLanguage() || 'en-US';
             const shortLang = targetLang.split("-")[0].toLowerCase();
+            const voices = window.speechSynthesis.getVoices();
             
-            // CLARITY STRATEGY: English uses Native Pitch/Rate. Others use gTTS for clarity.
-            if (shortLang === 'en') {
+            // SMART VOICE STRATEGY: Prefer Native Pitch/Rate for ANY language that has a browser voice.
+            // Falls back to gTTS only if the browser lacks a native voice for that language.
+            let nativeVoice = voices.find(v => v.lang.toLowerCase().replace('_','-') === targetLang.toLowerCase()) || 
+                              voices.find(v => v.lang.toLowerCase().startsWith(shortLang));
+
+            if (nativeVoice) {
                 let utterance = new SpeechSynthesisUtterance(item.text);
                 currentEmotionUtterance = utterance;
-                utterance.lang = targetLang;
-                const voices = window.speechSynthesis.getVoices();
-                // HIGH QUALITY PREFERENCE: Look for "US English Female" or "Natural" / "Google" / "Microsoft Online"
-                utterance.voice = voices.find(v => v.lang.startsWith('en') && v.name.includes("Microsoft Zira")) ||
-                                  voices.find(v => v.lang.startsWith('en') && v.name.includes("US English Female")) ||
-                                  voices.find(v => v.lang.startsWith('en') && v.name.includes("Google") && v.name.includes("UK")) ||
-                                  voices.find(v => v.lang.startsWith('en') && v.name.includes("Natural")) ||
-                                  voices.find(v => v.lang.startsWith('en') && v.name.includes("Google")) || 
-                                  voices.find(v => v.lang.startsWith('en')) || voices[0];
+                utterance.lang = nativeVoice.lang;
+                utterance.voice = nativeVoice;
 
-                if (emotion === 'happy') { utterance.pitch = 1.4; utterance.rate = 1.2 * currentSpeed; }
-                else if (emotion === 'sad') { utterance.pitch = 0.7; utterance.rate = 0.7 * currentSpeed; }
-                else if (emotion === 'angry') { utterance.pitch = 1.2; utterance.rate = 1.3 * currentSpeed; }
-                else if (emotion === 'fear') { utterance.pitch = 0.8; utterance.rate = 0.8 * currentSpeed; }
+                if (emotion === 'happy') { utterance.pitch = 1.8; utterance.rate = 1.4 * currentSpeed; }
+                else if (emotion === 'excited') { utterance.pitch = 2.0; utterance.rate = 1.8 * currentSpeed; }
+                else if (emotion === 'sad') { utterance.pitch = 0.3; utterance.rate = 0.4 * currentSpeed; }
+                else if (emotion === 'angry') { utterance.pitch = 0.6; utterance.rate = 1.9 * currentSpeed; }
+                else if (emotion === 'fear') { utterance.pitch = 2.0; utterance.rate = 0.6 * currentSpeed; }
+                else if (emotion === 'peaceful') { utterance.pitch = 0.8; utterance.rate = 0.7 * currentSpeed; }
                 else { utterance.pitch = 1.0; utterance.rate = 1.0 * currentSpeed; }
                 
                 let boundaryReceived = false;
@@ -2718,11 +2718,13 @@ function playNextFallback(startPaused = false, isRetry = false) {
                 let audio = new Audio(url);
                 currentFallbackAudio = audio;
 
-                // Emotive Speed Mapping - Enhanced sensitivity scaled by currentSpeed
-                if (emotion === 'happy') audio.playbackRate = 1.25 * currentSpeed;
-                else if (emotion === 'sad') audio.playbackRate = 0.75 * currentSpeed;
-                else if (emotion === 'angry') audio.playbackRate = 1.35 * currentSpeed;
-                else if (emotion === 'fear') audio.playbackRate = 0.95 * currentSpeed;
+                // MAX EMOTIVE Speed Mapping - Extreme deltas for sensory saturation
+                if (emotion === 'happy') audio.playbackRate = 1.6 * currentSpeed;
+                else if (emotion === 'excited') audio.playbackRate = 2.1 * currentSpeed;
+                else if (emotion === 'sad') audio.playbackRate = 0.4 * currentSpeed;
+                else if (emotion === 'angry') audio.playbackRate = 1.8 * currentSpeed;
+                else if (emotion === 'fear') audio.playbackRate = 0.6 * currentSpeed;
+                else if (emotion === 'peaceful') audio.playbackRate = 0.75 * currentSpeed;
                 else audio.playbackRate = 1.0 * currentSpeed;
 
                 // Word-by-word highlighting for clarity mode (gTTS)
@@ -2823,22 +2825,17 @@ function updateReaderMood(emotion) {
     const reader = document.getElementById('reader');
     if (!reader) return;
     
-    // Remove old moods
-    reader.classList.remove('mood-happy', 'mood-sad', 'mood-angry', 'mood-fear', 'mood-neutral');
-    
-    // Apply new mood
-    if (emotion !== 'neutral') {
-        reader.classList.add(`mood-${emotion}`);
-    }
+    // Color changes disabled by user request. 
+    // We only manage vocal parameters (pitch/rate) now for a cleaner UI.
     
     // Subtly adjust TTS pitch/rate if possible (Web Speech API)
-    // Note: gTTS backend is already generated, but we can't easily change it mid-stream
-    // However, for local speech synthesis we can:
     if (typeof utterance !== 'undefined' && utterance) {
-        if (emotion === 'happy') { utterance.pitch = 1.3; utterance.rate = 1.1 * currentSpeed; }
-        if (emotion === 'sad') { utterance.pitch = 0.8; utterance.rate = 0.8 * currentSpeed; }
-        if (emotion === 'angry') { utterance.pitch = 1.2; utterance.rate = 1.2 * currentSpeed; }
-        if (emotion === 'fear') { utterance.pitch = 1.1; utterance.rate = 0.9 * currentSpeed; }
+        if (emotion === 'happy') { utterance.pitch = 1.8; utterance.rate = 1.4 * currentSpeed; }
+        else if (emotion === 'excited') { utterance.pitch = 2.0; utterance.rate = 1.8 * currentSpeed; }
+        else if (emotion === 'sad') { utterance.pitch = 0.3; utterance.rate = 0.4 * currentSpeed; }
+        else if (emotion === 'angry') { utterance.pitch = 0.6; utterance.rate = 1.9 * currentSpeed; }
+        else if (emotion === 'fear') { utterance.pitch = 2.0; utterance.rate = 0.6 * currentSpeed; }
+        else if (emotion === 'peaceful') { utterance.pitch = 0.8; utterance.rate = 0.7 * currentSpeed; }
     }
 }
 
