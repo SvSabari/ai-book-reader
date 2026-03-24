@@ -1,0 +1,13 @@
+/* STABLE READER ZOOM: Only scale internal content, keep boundaries fixed */
+.reader-box {
+    display: block !important;
+    transform: none !important;
+    zoom: 1 !important;
+    --zoom-level: 1; /* Default variable */
+}
+
+.reader-box > * {
+    /* Scale children recursively using the variable set via JS */
+    zoom: var(--zoom-level, 1);
+    transform-origin: top left;
+}

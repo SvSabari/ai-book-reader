@@ -20,7 +20,9 @@ import json
 import requests
 import traceback
 import io
-from bs4 import BeautifulSoup
+import pyttsx3
+import uuid
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 
@@ -260,31 +262,10 @@ def ocr_embedded_images(html):
             nparr = np.frombuffer(data, np.uint8)
             img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             if img_cv is not None:
-                h, w = img_cv.shape[:2]
-                if h >= 20 and w >= 20:
-                    # Upscale and stabilize scanned PDF images for accurate text extraction
-                    max_dim = 1600
-                    scale = 1.0
-                    if max(h, w) > max_dim:
-                        scale = max_dim / max(h, w)
-                    elif max(h, w) < 800:
-                        scale = min(2.5, 1600 / max(h, w))
-                        
-                    if scale != 1.0:
-                        img_cv = cv2.resize(img_cv, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
-                        
-                    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-                    
-                    try:
-                        text = pytesseract.image_to_string(gray, config=r'--tessdata-dir c:\ai_book_reader\tessdata --oem 3 --psm 3 -l tam+eng')
-                    except:
-                        text = ""
-                        
-                    # Filter and clean without dropping short valid text
-                    text = " ".join([t.strip() for t in text.split("\n") if t.strip()])
-                    
-                    if text:
-                        return start, end, f'{img_tag}<span class="ocr-fallback-text ocr-text-hidden" aria-hidden="true">{text}</span>'
+                # Use the sophisticated overlay builder for perfect highlighting/selection
+                overlay_html = build_ocr_overlay_html(img_tag, img_cv)
+                if overlay_html:
+                    return start, end, overlay_html
         except Exception:
             pass
         return start, end, img_tag
@@ -383,7 +364,9 @@ def extract_pdf_html(file_path):
         html_parts.append(page_html)
         
     pdf.close()
-    return "".join(html_parts)
+    full_html = "".join(html_parts)
+    # Enable OCR for embedded images so they become selectable/readable
+    return ocr_embedded_images(full_html)
 
 
 def extract_docx_html(file_path):
@@ -537,20 +520,31 @@ def extract_book_html(file_path):
     elif ext == ".pptx":
         return extract_pptx_html(file_path)
     elif ext in [".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif", ".tiff"]:
-        text = extract_image_text(file_path)
+        # Professional Standalone Image Processing
         filename = os.path.basename(file_path)
+        img_np = cv2.imread(file_path)
         
+        if img_np is None:
+             return f"<div style='background: white; padding: 40px; color: red;'>Could not read image metadata for {filename}</div>"
+
+        # 1. Build Interactive Overlay (Selectable text ON the image)
+        img_tag = f'<img src="/uploads/{filename}" style="max-width: 100%; height: auto; max-height: 900px; display: inline-block; border-radius: 12px; box-shadow: 0 6px 16px rgba(0,0,0,0.15);" />'
+        overlay_html = build_ocr_overlay_html(img_tag, img_np)
+        
+        # 2. Extract Plain Text (For the bottom view/accessibility)
+        text = extract_image_text(file_path)
         clean_text_html = ""
         for line in text.split("\n"):
             line = line.strip()
             if line:
                 clean_text_html += f'<p style="margin-bottom: 1.25em;">{line}</p>'
                 
-        # Structure standalone images EXACTLY identical to the PDF flex pages natively
+        final_img_area = overlay_html if overlay_html else f'<div style="text-align: center;">{img_tag}</div>'
+
         html = f"""
             <div id="pdf-page-0" class="lazy-page-container flex-page" data-original-width="800" style="display: flex; flex-direction: column; margin-bottom: 40px; border-bottom: 2px solid #ddd; padding: 20px 40px; gap: 30px;">
                 <div class="pdf-img-top" style="text-align: center; margin-bottom: 20px; width: 100%; display: block;">
-                    <img src='/uploads/{filename}' style="max-width: 100%; height: auto; max-height: 900px; display: inline-block; border-radius: 12px; box-shadow: 0 6px 16px rgba(0,0,0,0.15);" />
+                    {final_img_area}
                 </div>
                 <div class="pdf-text-bottom" style="line-height: 1.8; color: var(--text-main); word-break: break-word; text-align: left; padding: 0 10px;">
                     {clean_text_html}
@@ -710,23 +704,90 @@ def books():
 @app.route("/tts")
 def tts():
     text = request.args.get("text", "")
-    lang = request.args.get("lang", "en")
+    lang = request.args.get("lang", "en") or "en"
+    gender = request.args.get("gender", "female").lower()
+    
     if not text:
         return "No text", 400
     
-    try:
-        tts_obj = gTTS(text=text, lang=lang)
-        fp = io.BytesIO()
-        tts_obj.write_to_fp(fp)
-        fp.seek(0)
-        return send_file(fp, mimetype="audio/mpeg")
-    except Exception as e:
-        print(f"TTS Error: {e}")
-        return str(e), 500
+    # Standardize language (ta-IN -> ta)
+    l = lang.split('-')[0].lower() if '-' in lang else lang.lower()
+    
+    # Professional Neural Voice Map (Comprehensive)
+    VOICE_MAP = {
+        'en': { 'female': 'en-US-AriaNeural', 'male': 'en-US-GuyNeural' },
+        'ta': { 'female': 'ta-IN-PallaviNeural', 'male': 'ta-IN-ValluvarNeural' },
+        'hi': { 'female': 'hi-IN-SwaraNeural', 'male': 'hi-IN-MadhurNeural' },
+        'kn': { 'female': 'kn-IN-SapnaNeural', 'male': 'kn-IN-GaganNeural' },
+        'te': { 'female': 'te-IN-ShrutiNeural', 'male': 'te-IN-MohanNeural' },
+        'ml': { 'female': 'ml-IN-SobhanaNeural', 'male': 'ml-IN-MidhunNeural' },
+        'pa': { 'female': 'pa-IN-OjasNeural', 'male': 'pa-IN-GurumaNeural' },
+        'gu': { 'female': 'gu-IN-DhwaniNeural', 'male': 'gu-IN-NiranjanNeural' },
+        'mr': { 'female': 'mr-IN-AarohiNeural', 'male': 'mr-IN-ManoharNeural' },
+        'bn': { 'female': 'bn-IN-TanishaaNeural', 'male': 'bn-IN-BashkarNeural' },
+        'fr': { 'female': 'fr-FR-DeniseNeural', 'male': 'fr-FR-HenriNeural' },
+        'es': { 'female': 'es-ES-ElviraNeural', 'male': 'es-ES-AlvaroNeural' },
+        'de': { 'female': 'de-DE-KatjaNeural', 'male': 'de-DE-ConradNeural' },
+        'it': { 'female': 'it-IT-ElsaNeural', 'male': 'it-IT-DiegoNeural' },
+        'zh': { 'female': 'zh-CN-XiaoxiaoNeural', 'male': 'zh-CN-YunxiNeural' }
+    }
+    
+    # HYBRID ENGINE: Edge Neural for major languages, gTTS for regional fallbacks
+    EDGE_SUPPORTED = ['en','ta','hi','bn','kn','te','ml','gu','mr','fr','es','de','it','zh']
+    
+    if l in ['pa', 'or'] or l not in EDGE_SUPPORTED:
+        # PURE FALLBACK FOR PUNJABI & ODIA
+        try:
+            from gtts import gTTS
+            import io
+            tts_obj = gTTS(text=text, lang=l, slow=False)
+            fp = io.BytesIO()
+            tts_obj.write_to_fp(fp)
+            fp.seek(0)
+            return send_file(fp, mimetype="audio/mpeg")
+        except Exception as e:
+            print(f"gTTS Fallback Failed for {l}: {e}")
+            voice = 'en-US-AriaNeural' # Ultimate fallback
+    else:
+        voice = VOICE_MAP.get(l, {}).get(gender, 'en-US-AriaNeural')
 
+
+    import edge_tts
+    from flask import Response
+
+    # HIGH-PERFORMANCE STREAMING GENERATOR
+    async def stream_audio():
+        communicate = edge_tts.Communicate(text, voice)
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                yield chunk["data"]
+
+    try:
+        # Return a streaming response for zero initial lag
+        return Response(stream_audio_sync(stream_audio()), mimetype="audio/mpeg")
+    except Exception as e:
+        print(f"Streaming TTS failed: {e}")
+        return "TTS Failure", 500
+
+# Helper to bridge async generator to sync Flask
+def stream_audio_sync(async_gen):
+    import asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        while True:
+            try:
+                # We fetch chunks one by one from the async stream
+                chunk = loop.run_until_complete(async_gen.__anext__())
+                yield chunk
+            except StopAsyncIteration:
+                break
+    finally:
+        loop.close()
 
 @app.route("/book/<int:book_id>")
 def open_book(book_id):
+
     conn = get_conn()
     cur = conn.cursor()
 
@@ -1066,7 +1127,90 @@ def summarize_text():
         traceback.print_exc()
         return jsonify({"error": "Summarization failed internally."}), 500
 
+@app.route("/generate_quiz", methods=["POST"])
+def generate_quiz():
+    import traceback, random, re
+    from collections import defaultdict
+
+    try:
+        data = request.get_json()
+        text = data.get("text", "")
+        book_id = data.get("book_id")
+
+        if book_id and not text:
+            sentences = get_book_sentences(book_id)
+            text = " ".join(sentences)
+
+        if not text or len(text.strip()) < 100:
+            return jsonify({"error": "Content too sparse to generate a quality quiz."}), 400
+
+        # 1. CLEAN & TOKENIZE
+        sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+        all_words = re.findall(r'\b\w{4,}\b', text.lower())
+        
+        # 2. KEYWORDS EXTRACTION (Frequent nouns/concepts)
+        stop_words = set(['the', 'and', 'that', 'with', 'from', 'this', 'their', 'which', 'will', 'have', 'been', 'were', 'about'])
+        freq = defaultdict(int)
+        for w in all_words:
+            if w not in stop_words: freq[w] += 1
+        
+        top_keywords = sorted(freq, key=freq.get, reverse=True)[:50]
+        
+        # 3. QUESTION FACTORY
+        questions = []
+        # Look for sentences that define concepts (X is Y)
+        candidates = []
+        for s in sentences:
+            if re.search(r'\b(is|was|means|refers to|defined as|called|known as)\b', s, re.I):
+                candidates.append(s)
+        
+        random.shuffle(candidates)
+        
+        for s in candidates[:25]: # Process up to 25 candidates to find 10 good ones
+            # Try to mask a keyword
+            words = re.findall(r'\b\w+\b', s)
+            possible_masks = [w for w in words if w.lower() in top_keywords and len(w) > 3]
+            
+            if not possible_masks: continue
+            
+            mask = random.choice(possible_masks)
+            # Create distractors from other keywords
+            distractors = [k for k in top_keywords if k.lower() != mask.lower()]
+            if len(distractors) < 3: continue
+            
+            options = random.sample(distractors, 3) + [mask]
+            random.shuffle(options)
+            
+            # Format question: Blanket the word
+            q_text = re.sub(r'\b' + re.escape(mask) + r'\b', '__________', s, count=1, flags=re.I)
+            
+            questions.append({
+                "question": q_text,
+                "options": options,
+                "answer": mask
+            })
+            
+            if len(questions) >= 10: break
+
+            
+        if not questions:
+            # Fallback: Simple keyword definitions
+            for k in top_keywords[:5]:
+                questions.append({
+                    "question": f"Based on the text, what is a key concept identified as '{k}'?",
+                    "options": random.sample(top_keywords[10:13], 3) + [k],
+                    "answer": k
+                })
+                random.shuffle(questions[-1]["options"])
+
+        return jsonify({"questions": questions})
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": "Quiz generation failed."}), 500
+
 @app.route("/ask", methods=["POST"])
+
 def ask_question():
     import traceback
     try:

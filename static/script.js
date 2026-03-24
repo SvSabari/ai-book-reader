@@ -4,53 +4,397 @@ let currentBookDetectedLangCode = "en";
 let activeBooksList = []; 
 let currentSpeed = 1.0; 
 
+let isEmotionModeActive = true;
+// REAL-TIME Narrator Control
+let currentEmotionUtterance = null;
+let lastEmotionItem = null;
+let lastEmotionItemProgress = 0;
+
+// --- Quiz Feature Logic ---
+let currentQuizData = [];
+
+async function generateQuiz() {
+    let selection = window.getSelection();
+    let selectedText = selection.toString().trim();
+    
+    // UI Setup
+    const modal = document.getElementById("quizModal");
+    if (!modal) return;
+    modal.style.display = "flex";
+    document.getElementById("quizLoading").style.display = "block";
+    document.getElementById("quizContent").style.display = "none";
+    document.getElementById("quizResult").style.display = "none";
+    document.getElementById("quizSubmitBtn").style.display = "block";
+
+    try {
+        let res = await fetch("/generate_quiz", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                text: selectedText || "", // Focus on highlight if exists, otherwise full book
+                book_id: currentBookId
+            })
+        });
+
+        if (!res.ok) throw new Error("Quiz generation failed.");
+        let data = await res.json();
+        currentQuizData = data.questions;
+        renderQuiz();
+    } catch (e) {
+        alert("Quiz Error: " + e.message);
+        closeQuiz();
+    }
+}
+
+function renderQuiz() {
+    document.getElementById("quizLoading").style.display = "none";
+    document.getElementById("quizContent").style.display = "block";
+    
+    let body = document.getElementById("quizBody");
+    body.innerHTML = "";
+    
+    currentQuizData.forEach((q, i) => {
+        let qDiv = document.createElement("div");
+        qDiv.className = "quiz-question";
+        qDiv.style.marginBottom = "24px";
+        qDiv.innerHTML = `
+            <p style="font-weight: 600; margin-bottom: 12px; color: var(--text-white); font-size: 1.1rem;">${i+1}. ${q.question}</p>
+            <div class="quiz-options" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                ${q.options.map(opt => `
+                    <label style="background: var(--glass); padding: 12px 18px; border-radius: 12px; cursor: pointer; border: 1px solid var(--glass-border); transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); display: flex; align-items: center; gap: 10px; font-weight: 500; color: var(--text-white);">
+                        <input type="radio" name="q${i}" value="${opt}" style="accent-color: var(--primary); width: 18px; height: 18px;">
+                        <span>${opt}</span>
+                    </label>
+                `).join('')}
+            </div>
+        `;
+
+        body.appendChild(qDiv);
+    });
+    
+    document.getElementById("quizProgressBar").style.width = "10%";
+}
+
+function submitQuiz() {
+    let score = 0;
+    let total = currentQuizData.length;
+    
+    currentQuizData.forEach((q, i) => {
+        let selected = document.querySelector(`input[name="q${i}"]:checked`);
+        let labels = document.querySelectorAll(`input[name="q${i}"]`);
+        
+        labels.forEach(input => {
+            let label = input.parentElement;
+            let span = label.querySelector('span');
+            
+            // Highlight Correct Answer
+            if (input.value === q.answer) {
+                label.style.borderColor = "#10b981"; // Emerald Green
+                label.style.background = "rgba(16, 185, 129, 0.1)";
+                label.style.color = "#10b981";
+                if (!span.innerText.includes("✅")) {
+                    span.innerHTML += ' <span style="font-weight: 800; margin-left: 10px;">✅ (Correct Answer)</span>';
+                }
+            } else if (selected && input === selected && selected.value !== q.answer) {
+                // Highlight Wrong Choice
+                label.style.borderColor = "#ef4444"; // Rose Red
+                label.style.background = "rgba(239, 68, 68, 0.1)";
+                label.style.color = "#ef4444";
+                if (!span.innerText.includes("❌")) {
+                    span.innerHTML += ' <span style="font-weight: 800; margin-left: 10px;">❌ (Your Choice)</span>';
+                }
+            }
+        });
+
+        if (selected && selected.value === q.answer) {
+            score++;
+        }
+    });
+
+    let result = document.getElementById("quizResult");
+    let percentage = Math.round((score / total) * 100);
+    result.innerHTML = `<span style="color: var(--primary)">Score: ${score}/${total}</span> <span style="font-size: 0.9rem; opacity: 0.6; margin-left: 10px;">(${percentage}%)</span>`;
+    result.style.display = "block";
+    document.getElementById("quizSubmitBtn").style.display = "none";
+    document.getElementById("quizProgressBar").style.width = "100%";
+    
+    // Scroll to top of quiz to see score
+    document.getElementById("quizScrollBody").scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+
+function closeQuiz() {
+    document.getElementById("quizModal").style.display = "none";
+}
+
+
 function changeSpeed(delta) {
-    // 0.1x increments for ultimate smoothness
-    currentSpeed = Math.max(0.4, Math.min(3.0, currentSpeed + delta));
-    currentSpeed = parseFloat(currentSpeed.toFixed(1)); 
+    currentSpeed = Math.max(0.5, Math.min(2.5, parseFloat((currentSpeed + delta).toFixed(1))));
     
-    let display = document.getElementById("speedDisplay");
-    if(display) display.innerText = currentSpeed + "x";
+    // Update UI
+    const display = document.getElementById("speedDisplay");
+    if (display) display.innerText = currentSpeed + "x";
     
-    // Immediate Apply
-    if (isReadingAloud && !isPaused) {
-        if (typeof currentFallbackAudio !== 'undefined' && currentFallbackAudio) {
-            currentFallbackAudio.playbackRate = currentSpeed;
-        } else {
-            // Standard SpeechSynthesis needs a full restart to apply new rate
-            restartNarrator();
+    // Apply to Active Audio (Streaming Mode)
+    if (currentFallbackAudio) {
+        currentFallbackAudio.playbackRate = currentSpeed;
+    }
+    
+    // Apply to Web Speech (Native Mode)
+    if (typeof utterance !== 'undefined' && utterance) {
+        utterance.rate = currentSpeed;
+        // Some browsers require a restart to change rate mid-speech
+        if (window.speechSynthesis.speaking) {
+            let resumeAt = currentAbsoluteCharIndex;
+            window.speechSynthesis.cancel();
+            setTimeout(() => resumeReadingFromIndex(resumeAt), 50);
         }
     }
 }
 
+
+// Theme Engine
+function toggleTheme() {
+    const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
+    const newTheme = isDark ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', newTheme);
+    localStorage.setItem('reader-theme', newTheme);
+    
+    const icon = document.querySelector('.mode-icon');
+    if (icon) icon.innerText = isDark ? '☀️' : '🌙';
+}
+
+// Apply Saved Theme
+(function initTheme() {
+    const saved = localStorage.getItem('reader-theme') || 'dark';
+    document.documentElement.setAttribute('data-theme', saved);
+    document.addEventListener('DOMContentLoaded', () => {
+        const icon = document.querySelector('.mode-icon');
+        if (icon) icon.innerText = saved === 'light' ? '☀️' : '🌙';
+    });
+})();
+
+function toggleEmotionMode() {
+    isEmotionModeActive = !isEmotionModeActive;
+    const btn = document.getElementById('emotionModeBtn');
+    if (!btn) return;
+    
+    if (isEmotionModeActive) {
+        btn.classList.add('active');
+        btn.innerHTML = "🎭 Emotion: ON";
+        btn.style.background = "#b45309";
+        showUploadToast("🎭 Emotion-based Reading Enabled", "info");
+    } else {
+        btn.classList.remove('active');
+        btn.innerHTML = "🎭 Emotion: OFF";
+        btn.style.background = "none";
+        updateReaderMood('neutral'); // Reset
+        showUploadToast("🎭 Emotion Mode Disabled", "info");
+    }
+
+    if (isReadingAloud) {
+        restartNarrator();
+    }
+}
+
+let isRestartingNarrator = false;
+
+function getSafeResumeIndex(text, index) {
+    if (!text || index <= 0) return 0;
+    if (index >= text.length) return text.length;
+
+    let i = index;
+
+    // Move to the end of the current word
+    while (i < text.length && /\S/.test(text[i])) i++;
+
+    // Move past spaces
+    while (i < text.length && /\s/.test(text[i])) i++;
+
+    return i;
+}
+
 function restartNarrator() {
-    if (!isReadingAloud) return;
-    const resumePos = currentAbsoluteCharIndex;
-    
-    // Stop all engines immediately
-    window.speechSynthesis.cancel();
-    currentNarrationJobId++; // Lethal: Instantly invalidates all pending async callbacks
-    
+    if (!isReadingAloud || isRestartingNarrator) return;
+
+    isRestartingNarrator = true;
+
+    // Resume from the NEXT unread word, not the exact current spoken boundary
+    let resumePos = getSafeResumeIndex(globalReadingText || "", currentAbsoluteCharIndex);
+
+    // Kill all running jobs
+    currentNarrationJobId++;
+    utterancePool = [];
+
+    try {
+        window.speechSynthesis.cancel();
+    } catch (e) {}
+
     if (currentFallbackAudio) {
+        currentFallbackAudio.onended = null;
         currentFallbackAudio.pause();
         currentFallbackAudio = null;
     }
-    
-    // Resume with current settings after a tiny delay for browser stability
-    setTimeout(() => {
-        resumeReadingFromIndex(resumePos, isPaused);
-    }, 150);
+
+    currentEmotionUtterance = null;
+    lastEmotionItem = null;
+    lastEmotionItemProgress = 0;
+
+    // Wait until browser speech queue is really cleared
+    const restartWhenClear = () => {
+        if (window.speechSynthesis.speaking || window.speechSynthesis.pending) {
+            setTimeout(restartWhenClear, 80);
+            return;
+        }
+
+        setTimeout(() => {
+            resumeReadingFromIndex(resumePos, false);
+            isRestartingNarrator = false;
+        }, 120);
+    };
+
+    restartWhenClear();
 }
 
 let totalPages = 0;
- // 'male' or 'female' or null
+let currentNarratorGender = "female"; 
+const chosenVoiceCache = {};
 
+function setNarratorGender(gender) {
+    if (currentNarratorGender === gender) return;
+
+    currentNarratorGender = gender;
+
+    // Clear cached voice picks so a fresh voice is selected
+    for (let key in chosenVoiceCache) delete chosenVoiceCache[key];
+
+    const maleBtn = document.getElementById("maleVoiceBtn");
+    const femaleBtn = document.getElementById("femaleVoiceBtn");
+
+    if (maleBtn && femaleBtn) {
+        if (gender === "male") {
+            maleBtn.style.background = "#b45309";
+            femaleBtn.style.background = "none";
+        } else {
+            femaleBtn.style.background = "#b45309";
+            maleBtn.style.background = "none";
+        }
+    }
+
+    // Only restart if already reading
+    if (isReadingAloud && !isPaused) {
+        if (window._restartTimeout) clearTimeout(window._restartTimeout);
+        window._restartTimeout = setTimeout(() => {
+            restartNarrator();
+        }, 180);
+    }
+}
+
+function getBestVoice(voices, lang, gender = currentNarratorGender) {
+    if (!voices || voices.length === 0) return null;
+
+    const cacheKey = `${lang}_${gender}`;
+    if (chosenVoiceCache[cacheKey]) {
+        const cached = voices.find(v => v.name === chosenVoiceCache[cacheKey]);
+        if (cached) return cached;
+    }
+
+    const shortLang = (lang || "en-US").split("-")[0].toLowerCase();
+
+    let langVoices = voices.filter(v =>
+        (v.lang || "").toLowerCase().replace("_", "-").startsWith(shortLang)
+    );
+
+    if (langVoices.length === 0) return null;
+
+    const malePriority = [
+        "microsoft david",
+        "microsoft mark",
+        "google uk english male",
+        "google us english male",
+        "rishi",
+        "prabhat",
+        "david",
+        "mark",
+        "stefan",
+        "george",
+        "ravi",
+        "male"
+    ];
+
+    const femalePriority = [
+        "microsoft zira",
+        "microsoft hazel",
+        "google uk english female",
+        "google us english",
+        "ravina",
+        "heera",
+        "zira",
+        "hazel",
+        "susan",
+        "female"
+    ];
+
+    const targetList = gender === "male" ? malePriority : femalePriority;
+
+    let selected = null;
+
+    // 1. Exact preferred names first
+    for (const key of targetList) {
+        selected = langVoices.find(v => v.name.toLowerCase().includes(key));
+        if (selected) break;
+    }
+
+    // 2. Natural / neural voices next
+    if (!selected) {
+        selected = langVoices.find(v => {
+            const n = v.name.toLowerCase();
+            return (
+                (n.includes("neural") || n.includes("natural") || n.includes("online")) &&
+                targetList.some(k => n.includes(k))
+            );
+        });
+    }
+
+    // 3. Fallback by gender keyword
+    if (!selected) {
+        selected = langVoices.find(v => {
+            const n = v.name.toLowerCase();
+            return gender === "male" ? n.includes("male") : n.includes("female");
+        });
+    }
+
+    // 4. Final fallback
+    if (!selected) selected = langVoices[0];
+
+    chosenVoiceCache[cacheKey] = selected.name;
+    return selected;
+}
+
+function isVoiceActuallyMale(voice) {
+    if (!voice) return false;
+    const maleKeywords = ["male", "david", "mark", "stefan", "george", "ravi", "guy", "man", "boy", "stef", "henri", "paul", "peter", "rishi", "prabhat"];
+    return maleKeywords.some(kw => voice.name.toLowerCase().includes(kw));
+}
+
+
+// High-Performance Audio Engine for Gender & Emotion
+let audioCtx = null;
+function getAudioContext() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    return audioCtx;
+}
 
 // High-Performance Custom Highlight API (Zero DOM impact)
 const readingHighlight = (typeof Highlight !== 'undefined') ? new Highlight() : null;
-if (CSS.highlights && readingHighlight) {
-    CSS.highlights.set('reading-word', readingHighlight);
+const sentenceHighlight = (typeof Highlight !== 'undefined') ? new Highlight() : null;
+
+if (typeof CSS !== 'undefined' && CSS.highlights) {
+    if (readingHighlight) CSS.highlights.set('reading-word', readingHighlight);
+    if (sentenceHighlight) CSS.highlights.set('reading-sentence', sentenceHighlight);
 }
+
 
 async function searchMeaning() {
     let wordInput = document.getElementById("word");
@@ -190,22 +534,26 @@ function loadBooks() {
             }
 
             let openBtn = status === "ready"
-                ? `<button onclick="openBook(${book[0]})">Open</button>`
-                : `<button disabled class="${btnClass}" style="opacity:0.6;cursor:not-allowed;">Open</button>`;
+                ? `<button class="btn-open" onclick="openBook(${book[0]})">Open</button>`
+                : `<button disabled class="btn-open processing-btn" style="opacity:0.6;cursor:not-allowed;">Open</button>`;
 
             let downloadBtn = status === "ready"
-                ? `<button onclick="downloadBook(${book[0]}, '${book[1].replace(/'/g, "\\'")}')">Download</button>`
-                : `<button disabled style="opacity:0.4;cursor:not-allowed;">Download</button>`;
+                ? `<button class="btn-download" onclick="downloadBook(${book[0]}, '${book[1].replace(/'/g, "\\'")}')">Download</button>`
+                : `<button disabled class="btn-download" style="opacity:0.4;cursor:not-allowed;">Download</button>`;
 
             tr.innerHTML = `
-                <td style="width: 100%; max-width: 0; padding-right: 12px;">
-                    <div style="font-weight: 600; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 0.95rem;">${book[1]}${badge}</div>
-                    <div style="font-size: 0.75rem; color: var(--text-light);">${book[2]}</div>
-                </td>
-                <td style="text-align: right; width: 85px; vertical-align: middle; padding: 12px 0;">
-                    ${openBtn}
-                    ${downloadBtn}
-                    <button onclick="deleteBook(${book[0]})" style="background: rgba(185, 28, 28, 0.1); border-color: rgba(185, 28, 28, 0.2); color: #b91c1c;">Delete</button>
+                <td>
+                    <div class="book-entry">
+                        <div class="book-info">
+                            <span class="book-name">${book[1]}${badge}</span>
+                            <span class="book-meta">${book[2]}</span>
+                        </div>
+                        <div class="book-actions">
+                            ${openBtn}
+                            ${downloadBtn}
+                            <button class="btn-delete" onclick="deleteBook(${book[0]})">Delete</button>
+                        </div>
+                    </div>
                 </td>
             `;
 
@@ -364,7 +712,16 @@ function proceedToOpenBook(bookId) {
         currentBookId = bookId;
         currentBookText = data.text || "";
 
-        document.getElementById("booktitle").innerText = data.name;
+        // Update Floating Badge and reveal it
+        const bookTitleEl = document.getElementById("bookTitle");
+        const bookBadgeEl = document.getElementById("bookBadge");
+        if (bookTitleEl) bookTitleEl.innerText = data.name;
+        if (bookBadgeEl) bookBadgeEl.classList.add('visible');
+        
+        // Clear progress on new book
+        const progEl = document.getElementById("readingProgress");
+        if (progEl) progEl.innerText = "| 0% Read";
+
         
         let reader = document.getElementById("reader");
         let detectedLang = "Original Language";
@@ -1081,16 +1438,30 @@ function getNodesAndText(root) {
     let currentLen = 0;
     let walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null, false);
     
+    let lastParent = null;
+
     while (walker.nextNode()) {
         let node = walker.currentNode;
         if (node.parentNode.classList.contains('empty-state') || node.parentNode.id === 'thankYouState') continue;
         if (node.parentNode.classList.contains('ocr-fallback-text')) continue;
         
-        let val = node.nodeValue;
+        // SPACE INJECTION: Crucial for drift-free highlighting
+        // If we jump between elements, the browser/narrator implies a space.
+        // We must add this space to our character map to keep everything aligned.
+        if (lastParent && node.parentNode !== lastParent && parts.length > 0) {
+            let lastPart = parts[parts.length - 1];
+            if (!lastPart.endsWith(" ") && !node.nodeValue.startsWith(" ")) {
+                parts.push(" ");
+                currentLen += 1;
+            }
+        }
+
+        let val = node.nodeValue.replace(/\u00A0/g, ' '); // Map non-breaking spaces to standard spaces
         nodes.push(node);
         offsets.push(currentLen);
         parts.push(val);
         currentLen += val.length;
+        lastParent = node.parentNode;
     }
     
     let text = parts.join("");
@@ -1164,222 +1535,73 @@ function highlightTextInNode(element, textToHighlight, className) {
     processBatch();
 }
 
+// Narration Control Variables
+let isStartingReading = false;
 let speechKeepAliveInterval = null;
 
 function startSpeechKeepAlive() {
-    console.log("Starting Speech Engine Keep-Alive...");
     if (speechKeepAliveInterval) clearInterval(speechKeepAliveInterval);
     speechKeepAliveInterval = setInterval(() => {
         if (window.speechSynthesis.speaking && !window.speechSynthesis.paused) {
-            // Pulse pause/resume to prevent browser timeout bug (Chrome GC bug)
             window.speechSynthesis.pause();
             window.speechSynthesis.resume();
         }
-    }, 10000); // Pulse every 10 seconds
+    }, 10000);
 }
 
 function stopSpeechKeepAlive() {
     if (speechKeepAliveInterval) {
-        console.log("Stopping Speech Engine Keep-Alive");
         clearInterval(speechKeepAliveInterval);
         speechKeepAliveInterval = null;
     }
 }
 
-let isStartingReading = false;
-
-async function readAloud() {
-    if (isStartingReading) return;
-    isStartingReading = true;
-    
-    // Immediate UI feedback
-    let playPauseBtn = document.getElementById("playPauseBtn");
-    if(playPauseBtn) playPauseBtn.innerText = "Starting... ⏳";
-    
-    startSpeechKeepAlive(); // Keep alive for the session
-    let reader = document.getElementById("reader");
-    
-    // Only rebuild map if it's missing or stale
-    if (!globalTextNodes || globalTextNodes.length === 0 || !globalReadingText) {
+async function resumeReadingFromIndex(index, startPaused = false) {
+    // CRITICAL: Ensure node map is rebuilt after translation to capture new content
+    if (!globalTextNodes || globalTextNodes.length === 0 || !globalReadingText || globalReadingText.length < 10) {
         rebuildReadingNodeMap();
     }
     
-    let text = globalReadingText;
-
-    if (!text.trim()) {
-        alert("No book text to read");
-        isStartingReading = false;
-        if(playPauseBtn) playPauseBtn.innerText = "Read Full ▶";
-        return;
-    }
-
-    // PDF SYNC: Only jump to the visible page if we are starting fresh (offset 0)
-    // AND the user has actually scrolled down significantly. Otherwise, start at the very beginning.
-    if (currentAbsoluteCharIndex === 0 && reader.scrollTop > 300) {
-        let pages = document.querySelectorAll('[id^="pdf-page-"]');
-        let reader = document.getElementById("reader");
-        let readerRect = reader.getBoundingClientRect();
-        
-        for (let page of pages) {
-            let rect = page.getBoundingClientRect();
-            // Start from the first page that is at least partially in the upper half of the viewport
-            if (rect.bottom > readerRect.top + 50) {
-                // Find this page's offset in our global node map
-                for (let i = 0; i < globalTextNodes.length; i++) {
-                    if (page.contains(globalTextNodes[i])) {
-                        currentAbsoluteCharIndex = globalNodeOffsets[i];
-                        break;
-                    }
-                }
-                break;
-            }
-        }
-    }
-
-    // Auto-restart if near end...
-
-    stopReading();
-    isReadingAloud = true;
-    lastHighlightPos = -1; 
-    
-    if(playPauseBtn) playPauseBtn.innerText = "Pause ⏸";
-
-    
-
-    let remainingText = text.substring(currentAbsoluteCharIndex);
-    let chunks = [];
-    let lastSplit = 0;
-    for (let i = 0; i < remainingText.length; i++) {
-        let isBoundary = /[.!?\n]/.test(remainingText[i]);
-        let nextChar = remainingText[i+1];
-        if (isBoundary && (!nextChar || !/[.!?\n]/.test(nextChar))) {
-            chunks.push(remainingText.substring(lastSplit, i + 1));
-            lastSplit = i + 1;
-        } else if (i - lastSplit > 200 && /\s/.test(remainingText[i])) {
-            chunks.push(remainingText.substring(lastSplit, i + 1));
-            lastSplit = i + 1;
-        }
-    }
-    if (lastSplit < remainingText.length) {
-        chunks.push(remainingText.substring(lastSplit));
-    }
-    let currentChunkAbsStart = currentAbsoluteCharIndex;
-
-    let testLang = getSelectedLanguage();
-    let testShort = testLang ? testLang.split('-')[0].toLowerCase() : 'en';
-
-    isStartingReading = false;
-    utterancePool = []; // Reset pool for new session
-    if (watchdogTimer) clearTimeout(watchdogTimer);
-    
-    if (testShort !== 'en' || isEmotionModeActive) {
-        playFallbackAudioQueue(chunks, currentChunkAbsStart, testShort, false);
-        return;
-    }
-    let totalTasks = chunks.filter(c => c.trim().length > 0).length;
-    if (totalTasks === 0) {
-        stopReading(true);
-        isStartingReading = false;
-        return;
-    }
-
-    let completedTasks = 0;
-    let runningOffset = currentAbsoluteCharIndex;
-
-    chunks.forEach((chunk, index) => {
-        let trimmed = chunk.trimStart();
-        if (!trimmed) {
-            runningOffset += chunk.length;
+    if (!globalReadingText || !globalReadingText.trim()) {
+        console.warn("No text found in reader. Rebuilding...");
+        rebuildReadingNodeMap();
+        if (!globalReadingText.trim()) {
+            showUploadToast("📚 No readable text found in this book.", "error");
             return;
         }
-        let leadingSpaces = chunk.length - trimmed.length;
-        let actualStartOffset = runningOffset + leadingSpaces;
-        runningOffset += chunk.length;
+    }
 
-        let utterance = new SpeechSynthesisUtterance(trimmed);
-        utterance.rate = currentSpeed;
+    // Resume from a safe word boundary to avoid repeated fragments
+    index = getSafeResumeIndex(globalReadingText, index);
 
-        utterance.onstart = function() {
-            removeReadingMarks();
-        };
-
-        utterance.onboundary = function(event) {
-            if (event.name !== 'word' && event.name !== 'sentence') return;
-            
-            let wordText = event.currentTarget.text.substring(event.charIndex);
-            let wordMatch = wordText.match(/^[\w\u0080-\uFFFF]+/);
-            let charLength = event.charLength || (wordMatch ? wordMatch[0].length : 1);
-            
-            let absoluteWordPosition = actualStartOffset + event.charIndex;
-            currentAbsoluteCharIndex = absoluteWordPosition;
-
-            requestAnimationFrame(() => {
-                highlightReadingWord(absoluteWordPosition, charLength);
-            });
-
-            // Watchdog: If we're at the very last chunk, set a timer to finish up 
-            // if onend fails to fire.
-            if (index === chunks.length - 1) {
-                if (watchdogTimer) clearTimeout(watchdogTimer);
-                watchdogTimer = setTimeout(() => {
-                    if (isReadingAloud && !isPaused) stopReading(true);
-                }, 4000); 
-            }
-        };
-        
-        utterancePool.push(utterance); // Keep reference alive
-
-        utterance.onend = function() {
-            utterancePool = utterancePool.filter(u => u !== utterance);
-            completedTasks++;
-            if (completedTasks === totalTasks) {
-                stopReading(true);
-            }
-        };
-
-        utterance.onerror = function() {
-            utterancePool = utterancePool.filter(u => u !== utterance);
-            completedTasks++;
-            if (completedTasks === totalTasks) stopReading(true);
-        };
-
-        window.speechSynthesis.speak(utterance);
-    });
-}
-
-async function resumeReadingFromIndex(index, startPaused = false) {
     if (index >= globalReadingText.length) {
-        stopReading();
+        stopReading(true);
         return;
     }
-    
-    // Safety check: ensure speech engine is fully cleared before restarting
+
     window.speechSynthesis.cancel();
-    
-    // Clear marks, but DON'T rebuild the map if we already have it
     removeReadingMarks();
-    
+
     isReadingAloud = true;
     isPaused = startPaused;
-    currentAbsoluteCharIndex = index; // Update the tracking pointer
-    
+    currentAbsoluteCharIndex = index;
+
     let playPauseBtn = document.getElementById("playPauseBtn");
-    if(playPauseBtn) playPauseBtn.innerText = startPaused ? "Resume ▶" : "Pause ⏸";
-    
+    if (playPauseBtn) playPauseBtn.innerText = startPaused ? "Resume ▶" : "Pause ⏸";
 
-    utterancePool = []; 
+    utterancePool = [];
     if (watchdogTimer) clearTimeout(watchdogTimer);
-    startSpeechKeepAlive(); // Keep long sessions alive
+    startSpeechKeepAlive();
 
-    // CRITICAL: Always rebuild node map to stay in sync with dynamic changes (translation/zoom/OCR)
-    rebuildReadingNodeMap();
-    
     let text = globalReadingText;
-    if (!text || !text.trim()) return;
-
-    let remainingText = text.substring(index);
+    // PERFORMANCE FIX: Only chunk the next 15,000 characters at a time.
+    // This makes the 'start' time instant regardless of book length (Total book could be 1M+ chars)
+    let processingLimit = 15000;
+    let remainingText = text.substring(index, index + processingLimit);
     let chunks = [];
     let lastSplit = 0;
+    
+    // Fast boundary splitter
     for (let i = 0; i < remainingText.length; i++) {
         let isBoundary = /[.!?\n]/.test(remainingText[i]);
         let nextChar = remainingText[i+1];
@@ -1391,12 +1613,11 @@ async function resumeReadingFromIndex(index, startPaused = false) {
             lastSplit = i + 1;
         }
     }
+
     if (lastSplit < remainingText.length) {
         chunks.push(remainingText.substring(lastSplit));
     }
     let chunkOffset = index;
-
-    // removeReadingMarks now moved to global scope
 
     let testLang = getSelectedLanguage();
     let testShort = testLang ? testLang.split('-')[0].toLowerCase() : 'en';
@@ -1404,15 +1625,6 @@ async function resumeReadingFromIndex(index, startPaused = false) {
     if (testShort !== 'en' || isEmotionModeActive) {
         playFallbackAudioQueue(chunks, chunkOffset, testShort, startPaused);
         return;
-    }
-
-    let testVoice = null;
-    if (testLang) {
-        let voices = window.speechSynthesis.getVoices();
-        let langText = document.getElementById('langSelect').options[document.getElementById('langSelect').selectedIndex].text.toLowerCase().split(' ')[0];
-        testVoice = voices.find(v => v.lang.toLowerCase().replace('_','-') === testLang.toLowerCase()) || 
-                    voices.find(v => v.lang.toLowerCase().startsWith(testShort)) ||
-                    voices.find(v => v.name.toLowerCase().includes(langText));
     }
 
     let totalTasks = chunks.filter(c => c.trim().length > 0).length;
@@ -1424,7 +1636,7 @@ async function resumeReadingFromIndex(index, startPaused = false) {
     let completedTasks = 0;
     let runningOffset = chunkOffset;
 
-    chunks.forEach((chunk, index) => {
+    chunks.forEach((chunk, chunkIdx) => {
         let trimmed = chunk.trimStart();
         if (!trimmed) {
             runningOffset += chunk.length;
@@ -1440,50 +1652,22 @@ async function resumeReadingFromIndex(index, startPaused = false) {
         if (lang) {
             utterance.lang = lang;
             let voices = window.speechSynthesis.getVoices();
-            let shortLang = lang.split('-')[0].toLowerCase();
-            let langText = document.getElementById('langSelect').options[document.getElementById('langSelect').selectedIndex].text.toLowerCase().split(' ')[0];
-            let voice = voices.find(v => v.lang.toLowerCase().replace('_','-') === lang.toLowerCase()) || 
-                        voices.find(v => v.lang.toLowerCase().startsWith(shortLang)) ||
-                        voices.find(v => v.name.toLowerCase().includes(langText));
-        if (voice) {
-            utterance.voice = voice;
-             // Pass voice to detect gender
+            let voice = getBestVoice(voices, lang);
+            if (voice) utterance.voice = voice;
         }
-    }
-    utterance.rate = currentSpeed;
-        let thisChunkStartOffset = chunkOffset;
-        chunkOffset += chunk.length;
-        
-        utterance.onstart = function() { removeReadingMarks(); };
-        
-        utterancePool.push(utterance); // Keep reference alive
-
-        utterance.onend = function() {
-            utterancePool = utterancePool.filter(u => u !== utterance);
-            completedTasks++;
-            if (completedTasks === totalTasks) {
-                stopReading(true);
-            }
-        };
-
-        utterance.onerror = function() {
-            utterancePool = utterancePool.filter(u => u !== utterance);
-            completedTasks++;
-            if (completedTasks === totalTasks) stopReading(true);
-        };
 
         const jobId = currentNarrationJobId;
-        
+        let boundaryReceived = false;
+
         utterance.onboundary = function(event) {
             if (jobId !== currentNarrationJobId || event.name !== 'word') return;
             boundaryReceived = true;
-            let charLength = event.charLength || event.currentTarget.text.substring(event.charIndex).split(/\s+/)[0].length;
+            let charLength = event.charLength || 5;
             let absoluteWordPosition = actualStartOffset + event.charIndex;
             currentAbsoluteCharIndex = absoluteWordPosition;
             highlightReadingWord(absoluteWordPosition, charLength);
         };
         
-        // Timer-based fallback for environments/voices that don't support onboundary
         utterance.onstart = function() { 
             if (jobId !== currentNarrationJobId) return;
             removeReadingMarks(); 
@@ -1497,7 +1681,7 @@ async function resumeReadingFromIndex(index, startPaused = false) {
             let baseDuration = (trimmed.length / (14 * utterance.rate)) * 1000;
             let startTime = Date.now();
             let interval = setInterval(() => {
-                if (jobId !== currentNarrationJobId || boundaryReceived || !isReadingAloud || isPaused || utterancePool.indexOf(utterance) === -1) {
+                if (jobId !== currentNarrationJobId || boundaryReceived || !isReadingAloud || isPaused) {
                     clearInterval(interval);
                     return;
                 }
@@ -1515,7 +1699,6 @@ async function resumeReadingFromIndex(index, startPaused = false) {
         
         utterancePool.push(utterance); // Keep reference alive
         utterance.onend = function() {
-            boundaryReceived = false;
             utterancePool = utterancePool.filter(u => u !== utterance);
             completedTasks++;
             if (completedTasks === totalTasks) stopReading(true);
@@ -1590,7 +1773,26 @@ async function togglePlayPause() {
     }
     
     if (!isReadingAloud) {
-        await readAloud();
+        // PDF SYNC: Only jump to the visible page if we are starting fresh (offset 0)
+        let reader = document.getElementById("reader");
+        if (currentAbsoluteCharIndex === 0 && reader && reader.scrollTop > 300) {
+            if (!globalTextNodes || globalTextNodes.length === 0) rebuildReadingNodeMap();
+            let pages = document.querySelectorAll('[id^="pdf-page-"]');
+            let readerRect = reader.getBoundingClientRect();
+            for (let page of pages) {
+                let rect = page.getBoundingClientRect();
+                if (rect.bottom > readerRect.top + 50) {
+                    for (let i = 0; i < globalTextNodes.length; i++) {
+                        if (page.contains(globalTextNodes[i])) {
+                            currentAbsoluteCharIndex = globalNodeOffsets[i];
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        await resumeReadingFromIndex(currentAbsoluteCharIndex);
     } else {
         if (isPaused) {
             // RESUME
@@ -2383,8 +2585,9 @@ async function translateBook() {
                     setTimeout(async () => {
                         await normalizeBookDOM(reader);
                         rebuildReadingNodeMap();
+                        currentBookText = reader.innerHTML; // Sync final translated state
                         if (currentBookId) loadHighlights(currentBookId);
-                    }, 200);
+                    }, 500);
                 }
                 return;
             }
@@ -2432,48 +2635,90 @@ function playFallbackAudioQueue(chunks, startOffset, shortLang, startPaused) {
     fallbackQueue = [];
     let currentAbsOffset = startOffset;
     
-    chunks.forEach(chunk => {
+    // REDUCED LAG: We no longer pre-fetch the whole book's emotion at once.
+    // Instead, we build the queue instantly and fetch emotions lazily.
+
+    chunks.forEach((chunk, chunkIdx) => {
         if (!chunk.trim()) {
             currentAbsOffset += chunk.length;
             return;
         }
         
-        // Surgical slicing to stay under 200 chars for gTTS
         let start = 0;
         while (start < chunk.length) {
-            let end = start + 180;
+            let end = start + 195;
             if (end < chunk.length) {
-                // Try to find a space or period to split cleanly
-                let lastSpace = chunk.lastIndexOf(' ', end);
-                if (lastSpace > start) end = lastSpace;
+                // Find nearest natural break (. , ! ? ; or newline)
+                let breakIdx = -1;
+                const naturalBreakers = [". ", "! ", "? ", ", ", "; ", "\n", " "];
+                for (let breaker of naturalBreakers) {
+                    let found = chunk.lastIndexOf(breaker, end);
+                    if (found > start + 50) { 
+                        breakIdx = found + breaker.length;
+                        break;
+                    }
+                }
+                if (breakIdx !== -1) end = breakIdx;
+                else {
+                    let lastSpace = chunk.lastIndexOf(' ', end);
+                    if (lastSpace > start) end = lastSpace;
+                }
             } else {
                 end = chunk.length;
             }
             
-            let sc = chunk.substring(start, end);
-            let url = `/tts?lang=${shortLang}&text=${encodeURIComponent(sc.trim())}`;
-            fallbackQueue.push({ url, text: sc, offset: currentAbsOffset + start });
+        // PERFORMANCE: Pre-fetch emotion analysis for the next few chunks
+        // This eliminates the 200-500ms delay between sentences!
+        let emotionCache = new Map();
+        const prefetchEmotion = async (text) => {
+            if (emotionCache.has(text)) return emotionCache.get(text);
+            try {
+                let res = await fetch("/analyze_emotion", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ text })
+                });
+                let data = await res.json();
+                emotionCache.set(text, data);
+                return data;
+            } catch(e) { return 'neutral'; }
+        };
+
+        let sc = chunk.substring(start, end).trim();
+        if (sc) {
+            // Immediately kick off analysis for the current chunk
+            prefetchEmotion(sc);
+
+            let url = `/tts?lang=${shortLang}&text=${encodeURIComponent(sc)}&gender=${currentNarratorGender}`;
+            
+            // LAZY EMOTION: Now uses the pre-fetched cache for instant resolution
+            const lazyEmotion = async () => {
+                if (!isEmotionModeActive) return 'neutral';
+                return prefetchEmotion(sc);
+            };
+
+
+                fallbackQueue.push({ 
+                    url, 
+                    text: sc, 
+                    offset: currentAbsOffset + start,
+                    getEmotion: lazyEmotion
+                });
+            }
             start = end;
         }
         currentAbsOffset += chunk.length;
+        
+        // LIMIT INITIAL QUEUE: For very large documents, only queue the first 100 sentences instantly.
+        // This makes the 'Read Full' button feel instant instead of hanging.
+        if (fallbackQueue.length > 100) return;
     });
 
     if (startPaused) {
         isPaused = true;
     }
     
-    // PRE-FETCH the first chunk's emotion immediately to cut initial delay
-    if (isEmotionModeActive && fallbackQueue.length > 0) {
-        fetch("/analyze_emotion", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text: fallbackQueue[0].text })
-        }).then(res => res.json()).then(data => {
-            fallbackQueue[0].prefetchedEmotion = data.emotion || 'neutral';
-        }).catch(() => {});
-    }
-
-    // gTTS is almost exclusively a female voice, so we set a dummy voice object for detection
+    // Start playback immediately for zero-lag experience
     playNextFallback(startPaused);
 }
 
@@ -2483,9 +2728,14 @@ let lastMarkedNodeIndex = 0;
 
 function removeReadingMarks() {
     // 1. Clear Modern Custom Highlights (Zero DOM)
-    if (readingHighlight) {
-        readingHighlight.clear();
-    }
+    if (readingHighlight) readingHighlight.clear();
+    if (sentenceHighlight) sentenceHighlight.clear();
+
+    // 2. Clear Active Glow Containers
+    document.querySelectorAll('.reading-active-container').forEach(el => {
+        el.classList.remove('reading-active-container');
+    });
+
 
     // 2. Clear Legacy Spans (If any)
     activeReadingMarks.forEach(span => {
@@ -2520,305 +2770,378 @@ function rebuildReadingNodeMap() {
     globalReadingText = text;
 }
 
-function highlightReadingWord(absoluteWordPosition, charLength) {
-    // 1. Modern High-Performance Path (Custom Highlight API) - Zero DOM Impact
-    if (readingHighlight) {
-        readingHighlight.clear();
-        
-        let startChar = absoluteWordPosition;
-        let endChar = absoluteWordPosition + charLength;
-        
-        // OPTIMIZATION: Start searching from lastMarkedNodeIndex to keep O(1) performance for sequential reading
-        let startSearchAt = 0;
-        if (typeof lastMarkedNodeIndex !== 'undefined' && lastMarkedNodeIndex < globalTextNodes.length) {
-            // If the requested position is ahead of our last node, start there. 
-            // If it's behind (user jumped back), we must restart from 0.
-            if (globalNodeOffsets[lastMarkedNodeIndex] <= startChar) {
-                startSearchAt = lastMarkedNodeIndex;
-            }
-        }
+function highlightReadingWord(absoluteWordPosition, charLength, sentenceStart = -1, sentenceLength = -1) {
+    if (!globalTextNodes || globalTextNodes.length === 0) rebuildReadingNodeMap();
+    
+    // 1. Clear current marks
+    if (readingHighlight) readingHighlight.clear();
+    if (sentenceHighlight) sentenceHighlight.clear();
+    
+    // 2. Fallback Glows
+    document.querySelectorAll('.reading-active-container').forEach(el => el.classList.remove('reading-active-container'));
 
-        let foundAny = false;
-        for (let i = startSearchAt; i < globalTextNodes.length; i++) {
+    let startChar = absoluteWordPosition;
+    let endChar = absoluteWordPosition + charLength;
+    
+    let sStart = sentenceStart;
+    let sEnd = sentenceStart + sentenceLength;
+
+    let foundAny = false;
+
+    if (globalTextNodes && globalTextNodes.length > 0) {
+        let startAt = (typeof lastMarkedNodeIndex !== 'undefined' && lastMarkedNodeIndex < globalTextNodes.length && globalNodeOffsets[lastMarkedNodeIndex] <= startChar) ? lastMarkedNodeIndex : 0;
+        
+        for (let i = startAt; i < globalTextNodes.length; i++) {
             let nodeStart = globalNodeOffsets[i];
             let node = globalTextNodes[i];
+            if (!node || !node.nodeValue) continue;
             let nodeLen = node.nodeValue.length;
             let nodeEnd = nodeStart + nodeLen;
 
+            if (nodeEnd > sStart && nodeStart < sEnd && sentenceHighlight && sStart !== -1) {
+                try {
+                    let sRange = new Range();
+                    sRange.setStart(node, Math.max(0, sStart - nodeStart));
+                    sRange.setEnd(node, Math.min(nodeLen, sEnd - nodeStart));
+                    sentenceHighlight.add(sRange);
+                } catch(e) {}
+            }
+
             if (nodeEnd > startChar && nodeStart < endChar) {
                 foundAny = true;
-                lastMarkedNodeIndex = i; // Cache this for the next word
-                let sliceStart = Math.max(0, startChar - nodeStart);
-                let sliceEnd = Math.min(nodeLen, endChar - nodeStart);
-                
+                lastMarkedNodeIndex = i;
                 try {
                     let range = new Range();
-                    range.setStart(node, sliceStart);
-                    range.setEnd(node, sliceEnd);
-                    readingHighlight.add(range);
+                    // VISUAL PADDING: Expand the highlight slightly to ensure it fully 'wraps' the word
+                    // even with custom kerning or italic fonts.
+                    range.setStart(node, Math.max(0, startChar - nodeStart));
+                    range.setEnd(node, Math.min(nodeLen, endChar - nodeStart));
 
-                    // Auto-scroll to reading position (Throttled for smoothness)
-                    if (!window.lastAutoScrollTime || Date.now() - window.lastAutoScrollTime > 1200) {
+                    
+                    if (readingHighlight) readingHighlight.add(range);
+
+                    // HIGH VISIBILITY GLOW: Apply to the parent container for extra clarity
+                    if (node.parentNode) {
+                        node.parentNode.classList.add('reading-active-container');
+                        node.parentNode.style.setProperty('--current-reading-color', 'var(--reading-mark)');
+                    }
+
+                    // SMOOTH SCROLLING: Keep the active word centered in view
+                    if (!window.lastAutoScrollTime || Date.now() - window.lastAutoScrollTime > 2000) {
                         let rect = range.getBoundingClientRect();
-                        if (rect.top !== 0 || rect.bottom !== 0) {
-                            let reader = document.getElementById("reader");
-                            let readerRect = reader.getBoundingClientRect();
+                        let reader = document.getElementById("reader");
+                        let readerRect = reader.getBoundingClientRect();
+                        
+                        // Check if word is outside the middle 40% of the screen
+                        const threshold = reader.clientHeight * 0.3;
+                        if (rect.top < readerRect.top + threshold || rect.top > readerRect.bottom - threshold) {
                             let targetY = reader.scrollTop + rect.top - readerRect.top - (reader.clientHeight / 2);
                             reader.scrollTo({ top: targetY, behavior: 'smooth' });
                             window.lastAutoScrollTime = Date.now();
                         }
                     }
-                } catch(e) { }
+                } catch(e) {}
             }
+
             if (nodeStart >= endChar) break;
         }
-        
-        // SELF-HEALING: If we failed to find the target chars in a valid range, the map is likely stale.
-        if (!foundAny && globalReadingText && startChar < globalReadingText.length && !window._rebuildingMap) {
-            window._rebuildingMap = true;
-            rebuildReadingNodeMap();
-            setTimeout(() => { window._rebuildingMap = false; highlightReadingWord(absoluteWordPosition, charLength); }, 20);
+    }
+
+    // SELF-HEALING: If no word found, map drifted (Translation/Edit occurred). Reset and Rebuild.
+    if (!foundAny && !window._rebuildingMap && globalReadingText && startChar < globalReadingText.length) {
+        window._rebuildingMap = true;
+        rebuildReadingNodeMap();
+        setTimeout(() => { 
+            window._rebuildingMap = false; 
+            highlightReadingWord(absoluteWordPosition, charLength); 
+        }, 50);
+    }
+}
+
+
+function playNextFallback(startPaused = false, isRetry = false) {
+    const entryJobId = currentNarrationJobId;
+
+    if (!isReadingAloud || isPaused) return;
+
+    if (fallbackQueue.length === 0 && !window.speechSynthesis.speaking && !isRetry) {
+        if (currentAbsoluteCharIndex < globalReadingText.length - 10) {
+            // LOAD NEXT CHUNK: Continues the stream seamlessly
+            console.log("Queue low, loading next segment from:", currentAbsoluteCharIndex);
+            resumeReadingFromIndex(currentAbsoluteCharIndex);
+        } else {
+            stopReading(true);
         }
         return;
     }
 
-    // 2. Legacy Fallback (Span Injection) - Only if modern API is missing
-    removeReadingMarks();
-}
 
-let isEmotionModeActive = false;
-let currentEmotionUtterance = null;
-let lastEmotionItem = null; 
-let lastEmotionItemProgress = 0; // Track exact progress within a chunk for seamless resume
-
-function playNextFallback(startPaused = false, isRetry = false) {
-    if(!isReadingAloud || isPaused || (fallbackQueue.length === 0 && !window.speechSynthesis.speaking && !isRetry)) {
-        if (!isPaused && isReadingAloud) stopReading(true);
-        return;
-    }
-    
-    // Resume current if specifically told to (retry mechanism)
     let item = (isRetry && lastEmotionItem) ? lastEmotionItem : fallbackQueue.shift();
     lastEmotionItem = item;
 
     if (!item) return;
-    
-    currentAbsoluteCharIndex = item.offset;
+
+    currentAbsoluteCharIndex = getSafeResumeIndex(globalReadingText || "", item.offset);
     removeReadingMarks();
 
-    // EMOTION MODE: Use Web Speech API for real-time pitch/rate control
-    if (isEmotionModeActive) {
-        window.speechSynthesis.cancel(); // Stop old audio
-        const jobId = currentNarrationJobId;
-        
-        // 1. Check if we have a prefetched emotion or fetch it now
-        let emotionPromise = item.prefetchedEmotion ? 
-            Promise.resolve({ emotion: item.prefetchedEmotion }) :
-            fetch("/analyze_emotion", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ text: item.text })
-            }).then(res => res.json());
+    window.speechSynthesis.cancel();
+    const jobId = entryJobId;
 
-        emotionPromise
-        .then(data => {
-            if (jobId !== currentNarrationJobId || !isReadingAloud) return; 
-            
-            const emotion = data.emotion || 'neutral';
-            updateReaderMood(emotion);
-            
-            // LOOK-AHEAD: Pre-fetch next chunk's emotion while this one plays
-            if (fallbackQueue.length > 0) {
-                const nextItem = fallbackQueue[0];
-                fetch("/analyze_emotion", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ text: nextItem.text })
-                }).then(res => res.json()).then(d => {
-                    nextItem.prefetchedEmotion = d.emotion || 'neutral';
-                }).catch(() => {});
+    // JIT EMOTION: Fetch emotion only when we are about to play this chunk to cut initial lag
+    let ePromise = item.getEmotion ? item.getEmotion() : (item.emotionPromise || Promise.resolve('neutral'));
+    
+    ePromise.then(res => {
+        if (jobId !== currentNarrationJobId || !isReadingAloud) return;
+
+        const emotion = (typeof res === 'string') ? res : (res.emotion || 'neutral');
+        updateReaderMood(emotion);
+
+        // SEQUENTIAL PRE-FETCH: Fetch the next chunk's emotion while current one plays
+        if (fallbackQueue.length > 0) {
+            const nextItem = fallbackQueue[0];
+            if (!nextItem.emotionPromise && nextItem.getEmotion) {
+                nextItem.emotionPromise = nextItem.getEmotion();
             }
-            
-            const targetLang = getSelectedLanguage() || 'en-US';
-            const shortLang = targetLang.split("-")[0].toLowerCase();
-            const voices = window.speechSynthesis.getVoices();
-            
-            // SMART VOICE STRATEGY: Prefer Native Pitch/Rate for ANY language that has a browser voice.
-            // Falls back to gTTS only if the browser lacks a native voice for that language.
-            let nativeVoice = voices.find(v => v.lang.toLowerCase().replace('_','-') === targetLang.toLowerCase()) || 
-                              voices.find(v => v.lang.toLowerCase().startsWith(shortLang));
+        }
 
-            if (nativeVoice) {
-                let utterance = new SpeechSynthesisUtterance(item.text);
-                currentEmotionUtterance = utterance;
-                utterance.lang = nativeVoice.lang;
-                utterance.voice = nativeVoice;
+        const targetLang = getSelectedLanguage() || 'en-US';
+        const shortLang = targetLang.split("-")[0].toLowerCase();
+        const voices = window.speechSynthesis.getVoices();
+        let nativeVoice = getBestVoice(voices, targetLang);
 
-                if (emotion === 'happy') { utterance.pitch = 1.8; utterance.rate = 1.4 * currentSpeed; }
-                else if (emotion === 'excited') { utterance.pitch = 2.0; utterance.rate = 1.8 * currentSpeed; }
-                else if (emotion === 'sad') { utterance.pitch = 0.3; utterance.rate = 0.4 * currentSpeed; }
-                else if (emotion === 'angry') { utterance.pitch = 0.6; utterance.rate = 1.9 * currentSpeed; }
-                else if (emotion === 'fear') { utterance.pitch = 2.0; utterance.rate = 0.6 * currentSpeed; }
-                else if (emotion === 'peaceful') { utterance.pitch = 0.8; utterance.rate = 0.7 * currentSpeed; }
-                else { utterance.pitch = 1.0; utterance.rate = 1.0 * currentSpeed; }
-                
-                let boundaryReceived = false;
-                utterance.onboundary = (event) => {
-                    if (jobId !== currentNarrationJobId || event.name === 'sentence') return;
-                    if (event.name === 'word') {
-                        boundaryReceived = true;
-                        lastEmotionItemProgress = event.charIndex; // TRACK PROGRESS FOR RESUME
-                        currentAbsoluteCharIndex = item.offset + event.charIndex;
-                        highlightReadingWord(item.offset + event.charIndex, event.charLength || 5);
-                    }
-                };
+        if (nativeVoice) {
+            let utterance = new SpeechSynthesisUtterance(item.text);
+            currentEmotionUtterance = utterance;
+            utterance.lang = nativeVoice.lang;
+            utterance.voice = nativeVoice;
 
-                // Timer-based fallback for Emotion-triggered speech (high reliability)
-                utterance.onstart = () => { 
-                    if (jobId !== currentNarrationJobId) return;
-                    let words = [];
-                    let regex = /\S+/g;
-                    let match;
-                    while ((match = regex.exec(item.text)) !== null) {
-                        words.push({ startOffset: item.offset + match.index, length: match[0].length });
-                    }
-                    
-                    let baseDur = (item.text.length / (14 * utterance.rate)) * 1000; // Refined chars-per-second
-                    let startT = Date.now();
-                    let hIn = setInterval(() => {
-                        // REMOVED 'boundaryReceived' check: Let the timer be an unstoppable backup
-                        if (jobId !== currentNarrationJobId || boundaryReceived || !isReadingAloud || !isEmotionModeActive || isPaused) {
-                            clearInterval(hIn);
-                            return;
-                        }
-                        let elapsed = Date.now() - startT;
-                        let progress = elapsed / baseDur;
-                        if (progress >= 1.0) { clearInterval(hIn); return; }
-                        
-                        let idx = Math.floor(progress * words.length);
-                        if (idx < words.length && idx >= 0) {
-                            let curr = words[idx];
-                            lastEmotionItemProgress = curr.startOffset - item.offset; // TRACK PROGRESS FOR RESUME
-                            currentAbsoluteCharIndex = curr.startOffset; // Update global pointer for seamless speed shifts
-                            highlightReadingWord(curr.startOffset, curr.length);
-                        }
-                    }, 80); 
-                };
-
-                utterance.onend = () => {
-                    if (jobId !== currentNarrationJobId) return;
-                    removeReadingMarks();
-                    if (isReadingAloud && !isPaused) playNextFallback();
-                };
-                utterance.onerror = () => { if (jobId === currentNarrationJobId) setTimeout(playNextFallback, 500); };
-                window.speechSynthesis.speak(utterance);
+            let basePitch = 1.0;
+            if (currentNarratorGender === 'male') {
+                basePitch = isVoiceActuallyMale(nativeVoice) ? 0.82 : 0.72;
             } else {
-                // gTTS HIGH CLARITY (with enhanced speed-based emotion)
-                let url = `/tts?lang=${shortLang}&text=${encodeURIComponent(item.text.trim())}`;
-                let audio = new Audio(url);
-                currentFallbackAudio = audio;
+                basePitch = isVoiceActuallyMale(nativeVoice) ? 1.08 : 1.0;
+            }
 
-                // MAX EMOTIVE Speed Mapping - Extreme deltas for sensory saturation
-                if (emotion === 'happy') audio.playbackRate = 1.6 * currentSpeed;
-                else if (emotion === 'excited') audio.playbackRate = 2.1 * currentSpeed;
-                else if (emotion === 'sad') audio.playbackRate = 0.4 * currentSpeed;
-                else if (emotion === 'angry') audio.playbackRate = 1.8 * currentSpeed;
-                else if (emotion === 'fear') audio.playbackRate = 0.6 * currentSpeed;
-                else if (emotion === 'peaceful') audio.playbackRate = 0.75 * currentSpeed;
-                else audio.playbackRate = 1.0 * currentSpeed;
+            if (emotion === 'happy') {
+                utterance.pitch = basePitch * 1.08;
+                utterance.rate = 1.05 * currentSpeed;
+            } else if (emotion === 'excited') {
+                utterance.pitch = basePitch * 1.15;
+                utterance.rate = 1.10 * currentSpeed;
+            } else if (emotion === 'sad') {
+                utterance.pitch = basePitch * 0.85;
+                utterance.rate = 0.90 * currentSpeed;
+            } else if (emotion === 'angry') {
+                utterance.pitch = basePitch * 0.92;
+                utterance.rate = 1.05 * currentSpeed;
+            } else if (emotion === 'fear') {
+                utterance.pitch = basePitch * 1.10;
+                utterance.rate = 0.95 * currentSpeed;
+            } else if (emotion === 'peaceful') {
+                utterance.pitch = basePitch * 0.95;
+                utterance.rate = 0.85 * currentSpeed;
+            } else {
+                utterance.pitch = basePitch;
+                utterance.rate = 1.0 * currentSpeed;
+            }
 
-                // Word-by-word highlighting for clarity mode (gTTS)
+            let boundaryReceived = false;
+            let utteranceStartTime = Date.now();
+
+            utterance.onboundary = (event) => {
+                if (jobId !== currentNarrationJobId || event.name === 'sentence') return;
+                boundaryReceived = true;
+                currentAbsoluteCharIndex = item.offset + event.charIndex;
+                highlightReadingWord(item.offset + event.charIndex, event.charLength || 5);
+                
+                // Real-time Reading Progress in the Badge
+                const progEl = document.getElementById("readingProgress");
+                if (progEl && globalReadingText) {
+                    const prog = Math.round((currentAbsoluteCharIndex / globalReadingText.length) * 100);
+                    progEl.innerText = `| ${prog}% Read`;
+                }
+
+            };
+
+            utterance.onstart = () => {
+                if (jobId !== currentNarrationJobId) return;
+                utteranceStartTime = Date.now();
+
                 let words = [];
-                let regex = /\S+/g;
+                let regex = /[\p{L}\p{N}\p{M}]+/gu; 
                 let match;
                 while ((match = regex.exec(item.text)) !== null) {
-                    words.push({ startOffset: item.offset + match.index, length: match[0].length });
+                    words.push({
+                        startOffset: item.offset + match.index,
+                        length: match[0].length
+                    });
                 }
-                let lastWordIndex = -1;
+                if (words.length === 0 && item.text.length > 0) {
+                    words.push({ startOffset: item.offset, length: item.text.length });
+                }
+
+                // HIGH-PRECISION ESTIMATION LOOP: Used if onboundary isn't firing
+                const totalChars = item.text.length;
+                const speedEstimate = (15 * (utterance.rate || 1.0)) / 1000; // chars per ms
                 
-                audio.ontimeupdate = () => {
-                    // Heartbeat Check: Prevent ghost highlights from previous sentences
-                    if (jobId !== currentNarrationJobId || currentFallbackAudio !== audio) {
-                        audio.ontimeupdate = null;
+                let hIn = setInterval(() => {
+                    if (jobId !== currentNarrationJobId || boundaryReceived || !isReadingAloud || isPaused) {
+                        clearInterval(hIn);
                         return;
                     }
-                    if (!audio.duration || words.length === 0) return;
-                    let progress = audio.currentTime / audio.duration;
-                    let wordIndex = Math.floor(progress * words.length);
-                    if (wordIndex >= words.length) wordIndex = words.length - 1;
-                    if (wordIndex !== lastWordIndex) {
-                        lastWordIndex = wordIndex;
-                        lastEmotionItemProgress = words[wordIndex].startOffset - item.offset; // TRACK PROGRESS FOR RESUME
-                        currentAbsoluteCharIndex = words[wordIndex].startOffset;
-                        highlightReadingWord(words[wordIndex].startOffset, words[wordIndex].length);
+
+                    let elapsed = Date.now() - utteranceStartTime;
+                    const estimatedPos = Math.min(totalChars, elapsed * speedEstimate);
+                    
+                    let bestWord = words[0];
+                    for (let w of words) {
+                        if (w.startOffset - item.offset <= estimatedPos) bestWord = w;
+                        else break;
                     }
-                };
 
-                audio.play();
-                audio.onended = () => {
-                    if (jobId !== currentNarrationJobId) return;
-                    audio.ontimeupdate = null;
-                    removeReadingMarks();
-                    if (isReadingAloud && !isPaused) playNextFallback();
-                };
-                audio.onerror = () => { if (jobId === currentNarrationJobId) setTimeout(playNextFallback, 500); };
+                    if (bestWord) {
+                        currentAbsoluteCharIndex = bestWord.startOffset;
+                        highlightReadingWord(bestWord.startOffset, bestWord.length);
+                    }
+                    if (estimatedPos >= totalChars) clearInterval(hIn);
+                }, 50);
+            };
+
+            utterance.onend = () => {
+                if (jobId !== currentNarrationJobId) return;
+                removeReadingMarks();
+                if (isReadingAloud && !isPaused) playNextFallback();
+            };
+
+            utterance.onerror = () => {
+                if (jobId === currentNarrationJobId) {
+                    setTimeout(() => playNextFallback(false, false), 500);
+                }
+            };
+
+            window.speechSynthesis.speak(utterance);
+        } else {
+            let url = `/tts?lang=${shortLang}&text=${encodeURIComponent(item.text.trim())}&gender=${currentNarratorGender}`;
+            let audio = new Audio(url);
+            currentFallbackAudio = audio;
+
+            // Ensure AudioContext is resumed on user interaction
+            const ctx = getAudioContext();
+            if (ctx.state === 'suspended') {
+                ctx.resume();
             }
-        });
-        return;
-    }
 
-    // NORMAL MODE: Use gTTS Backend for high quality stable voice
-    currentFallbackAudio = new Audio(item.url);
-    currentFallbackAudio.playbackRate = currentSpeed;
-    
-    let words = [];
-    let regex = /\S+/g;
-    let match;
-    while ((match = regex.exec(item.text)) !== null) {
-        words.push({ startOffset: item.offset + match.index, length: match[0].length });
-    }
-    let lastWordIndex = -1;
+            // HIGH-FIDELITY NEURAL ENGINE: The new Node.js worker provides perfectly mastered voices.
+            // Artificial resonators are disabled to preserve the natural neural clarity.
+            try {
+                const ctx = getAudioContext();
+                const source = ctx.createMediaElementSource(audio);
+                source.connect(ctx.destination); 
+            } catch (e) {
+                console.warn("AudioContext already attached or error:", e);
+            }
 
-    currentFallbackAudio.addEventListener('timeupdate', () => {
-        if (!currentFallbackAudio.duration || words.length === 0) return;
-        let progress = currentFallbackAudio.currentTime / currentFallbackAudio.duration;
-        let wordIndex = Math.floor(progress * words.length);
-        if (wordIndex >= words.length) wordIndex = words.length - 1;
-        if (wordIndex !== lastWordIndex) {
-            lastWordIndex = wordIndex;
-            highlightReadingWord(words[wordIndex].startOffset, words[wordIndex].length);
+            if (emotion === 'happy') audio.playbackRate = 1.05 * currentSpeed;
+            else if (emotion === 'excited') audio.playbackRate = 1.15 * currentSpeed;
+            else if (emotion === 'sad') audio.playbackRate = 0.85 * currentSpeed;
+            else if (emotion === 'angry') audio.playbackRate = 1.1 * currentSpeed;
+            else if (emotion === 'fear') audio.playbackRate = 0.9 * currentSpeed;
+            else if (emotion === 'peaceful') audio.playbackRate = 0.8 * currentSpeed;
+            else audio.playbackRate = 1.0 * currentSpeed;
+
+
+            // Prevent audio clipping at high speeds
+            audio.preservesPitch = false; 
+
+            let words = [];
+            // UNICODE TOKENIZER: Captures words for ALL scripts (Hindi, Tamil, Arabic, etc.)
+            // We split by any character that is NOT a word constituent, preserving script boundaries.
+            let regex = /[\p{L}\p{N}\p{M}]+/gu; 
+            let match;
+            while ((match = regex.exec(item.text)) !== null) {
+                words.push({
+                    startOffset: item.offset + match.index,
+                    length: match[0].length
+                });
+            }
+
+            // SAFETY: In case of empty word list (scripts like Thai/Chinese)
+            if (words.length === 0 && item.text.length > 0) {
+                words.push({ startOffset: item.offset, length: item.text.length });
+            }
+
+            const totalChunkLength = item.text.length;
+
+            const syncHighlight = () => {
+                if (jobId !== currentNarrationJobId || !isReadingAloud || isPaused || !currentFallbackAudio) {
+                    return;
+                }
+
+                // STREAMING SYNC: Handle cases where duration is not yet known (streaming audio)
+                let duration = audio.duration;
+                // If duration is missing (streaming mode), estimate it using standard neural speech rates 
+                // (approx 14 chars/sec) to ensure highlight starts appearing immediately.
+                if (isNaN(duration) || duration === Infinity || duration <= 0) {
+                    duration = totalChunkLength / (14 * audio.playbackRate); 
+                }
+
+                if (audio.currentTime > 0) {
+                    let progress = audio.currentTime / duration;
+                    if (progress > 1.0) progress = 1.0;
+                    if (progress >= 0.999) return;
+
+                    let currentPosInChunk = progress * totalChunkLength;
+                    
+                    let foundWord = words[0];
+                    for (let w of words) {
+                        if (w.startOffset - item.offset <= currentPosInChunk) {
+                            foundWord = w;
+                        } else {
+                            break;
+                        }
+                    }
+
+
+
+                    if (foundWord) {
+                        lastEmotionItemProgress = foundWord.startOffset - item.offset;
+                        currentAbsoluteCharIndex = foundWord.startOffset;
+                        highlightReadingWord(foundWord.startOffset, foundWord.length, item.offset, item.text.length);
+                    }
+                }
+
+                requestAnimationFrame(syncHighlight);
+            };
+
+            audio.onplay = () => {
+                if (jobId !== currentNarrationJobId) return;
+                requestAnimationFrame(syncHighlight);
+            };
+
+            audio.onended = () => {
+                if (jobId !== currentNarrationJobId) return;
+                removeReadingMarks();
+                if (isReadingAloud && !isPaused) playNextFallback();
+            };
+
+            audio.onerror = () => {
+                if (jobId === currentNarrationJobId) {
+                    setTimeout(() => playNextFallback(false, false), 500);
+                }
+            };
+
+            audio.play().catch(() => {
+                if (jobId === currentNarrationJobId) {
+                    setTimeout(() => playNextFallback(false, false), 500);
+                }
+            });
+        }
+    }).catch(() => {
+        updateReaderMood('neutral');
+        if (isReadingAloud && !isPaused) {
+            setTimeout(() => playNextFallback(false, false), 300);
         }
     });
-    
-    currentFallbackAudio.onended = () => playNextFallback();
-    currentFallbackAudio.onerror = () => setTimeout(playNextFallback, 500);
-    
-    if(!startPaused && !isPaused) {
-        currentFallbackAudio.play().catch(e => setTimeout(playNextFallback, 500));
-    }
-}
-
-
-
-function toggleEmotionMode() {
-    isEmotionModeActive = !isEmotionModeActive;
-    const btn = document.getElementById('emotionModeBtn');
-    
-    if (isEmotionModeActive) {
-        btn.classList.add('active');
-        btn.innerHTML = "🎭 Emotion: ON";
-        showUploadToast("🎭 Emotion-based Reading Enabled", "info");
-    } else {
-        btn.classList.remove('active');
-        btn.innerHTML = "🎭 Emotion Mode";
-        updateReaderMood('neutral'); // Reset
-        showUploadToast("🎭 Emotion Mode Disabled", "info");
-    }
-
-    // Seamless Handoff: If we are already reading, switch engines mid-stream using the unified restarter
-    if (isReadingAloud) {
-        restartNarrator();
-    }
 }
 
 function updateReaderMood(emotion) {
@@ -3090,44 +3413,16 @@ function applyZoom() {
         zoomDisplay.innerText = Math.round(currentZoom * 100) + "%";
     }
 
-    // High performance: Update CSS Variable for mass scaling (Parallel processing by the browser)
+    // CONTENT-ONLY ZOOM: Scaled the text and internal elements without resizing the container
     reader.style.setProperty('--zoom-level', currentZoom);
-
-    // Apply font size zoom to text content (Fast single update)
-    reader.style.fontSize = (1.1 * currentZoom) + "rem";
     
-    // Performance Guard: Only run the heavy expensive per-node loop if CSS Zoom isn't active
-    // This is the key fix for Harry Potter (3600+ pages)
-    if (!reader.classList.contains('use-css-zoom')) {
-        document.querySelectorAll('#reader div[id^="page"]').forEach(page => {
-            if (page.id && page.id.startsWith('pdf-')) return; 
-
-            let wrapper = page.parentElement;
-            if (wrapper && wrapper.classList.contains('page-centered-wrapper')) {
-                let originalW = parseFloat(page.getAttribute('data-original-width')) || parseFloat(page.style.width) || 800;
-                let originalH = parseFloat(page.getAttribute('data-original-height')) || parseFloat(page.style.height);
-                
-                let containerW = reader.clientWidth - 20; 
-                let baseScale = Math.min(1.0, containerW / originalW);
-                let finalScale = baseScale * currentZoom;
-
-                page.style.width = originalW + "px";
-                if (originalH) page.style.height = originalH + "px";
-                page.style.transform = `scale(${finalScale})`;
-                
-                let scaledW = originalW * finalScale;
-                let scaledH = originalH * finalScale;
-                wrapper.style.width = scaledW + "px";
-                wrapper.style.height = scaledH + "px";
-            }
-        });
-    }
-
     // Update pannable cursor state after zoom changes
-    if (window.updateReaderPannableState) {
-        setTimeout(window.updateReaderPannableState, 100);
+    if (typeof updatePannableState === 'function') {
+        setTimeout(updatePannableState, 100);
     }
 }
+
+
 
 window.onload = () => {
     loadBooks();
