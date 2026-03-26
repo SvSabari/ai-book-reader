@@ -120,6 +120,16 @@ def init_db():
     )
     """)
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS notes(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        book_id INTEGER,
+        content TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+
     conn.commit()
     conn.close()
 
@@ -148,98 +158,78 @@ def extract_image_text(file_path):
     # Pre-processing for better OCR accuracy
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
-    # Bilateral filter removes noise while preserving sharp edges of characters
-    denoised = cv2.bilateralFilter(gray, 9, 75, 75)
+    # SHARPEN: Enhance character edges before binarization
+    sharpen_kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
+    sharpened = cv2.filter2D(gray, -1, sharpen_kernel)
     
-    # Adaptive thresholding handles uneven lighting common in book photos
-    thresh = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+    # 1. Pipeline A: Adaptive (Handles uneven paper/lighting)
+    denoised = cv2.bilateralFilter(sharpened, 9, 75, 75)
+    thresh_adaptive = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
     
-    # Dilate/Erode to fill gaps in broken character lines (Common in low-res Tamil text)
-    kernel = np.ones((2,2), np.uint8)
-    processed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+    # 2. Pipeline B: Otsu Global (Best for clean digital slides)
+    _, thresh_otsu = cv2.threshold(sharpened, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # 3. Pipeline C: Inverted Otsu (Crucial for white text on colored backgrounds)
+    _, thresh_inv = cv2.threshold(sharpened, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-    config = r'--tessdata-dir c:\ai_book_reader\tessdata --oem 3 --psm 3 -l tam+eng'
+    # 4. Pipeline D: Channel-Specific (Best for Red/Maroon text on Orange/Yellow backgrounds)
+    # Standard grayscale averages channels, making red-on-orange disappear.
+    # The green channel provides the highest contrast for red-spectrum text.
+    _, g_chan, _ = cv2.split(image)
+    thresh_green = cv2.adaptiveThreshold(g_chan, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+
+    config = r'--tessdata-dir c:\ai_book_reader\tessdata --oem 3 --psm 3 -l eng+tam'
     
     try:
-        # 1. Try with processed binary image (Best for clean photos)
-        t_proc = pytesseract.image_to_string(processed, config=config)
+        # Multi-Strategy Pipeline
+        passes = [
+            ("adaptive", thresh_adaptive),
+            ("otsu", thresh_otsu),
+            ("inverted", thresh_inv),
+            ("green_chan", thresh_green),
+            ("raw_gray", gray)
+        ]
         
-        # 2. Try with raw grayscale if binarization failed to capture faint text
-        t_gray = pytesseract.image_to_string(gray, config=config)
+        all_results = []
+        for name, img_pass in passes:
+            res_text = pytesseract.image_to_string(img_pass, config=config).strip()
+            if res_text:
+                # Basic cleaning
+                res_text = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', res_text)
+                all_results.append(res_text)
         
-        # 3. High contrast mode
-        boosted = cv2.convertScaleAbs(gray, alpha=1.5, beta=-30)
-        t_boost = pytesseract.image_to_string(boosted, config=config)
+        if not all_results: return ""
         
-        combined_lines = []
-        seen = set()
+        # Strategy: Instead of choosing ONE pass, we aggregate unique lines from ALL successful passes
+        # This catches "HOW TO COMBINE" from pass A AND "TEXT AND IMAGE" from pass B.
+        seen_lines = set()
+        final_lines = []
         
-        # Merge results, prioritizing the most accurate text blocks
-        for text_block in [t_proc, t_gray, t_boost]:
-            if not text_block: continue
-            for line in text_block.split('\n'):
-                line = line.strip()
-                if line and len(line) > 2:
-                    # Basic cleanup of garbage noise
-                    if line.lower() not in seen:
-                        seen.add(line.lower())
-                        combined_lines.append(line)
+        for block in all_results:
+            for line in block.split('\n'):
+                # Clean line
+                line = re.sub(r'[^a-zA-Z0-9\s.,!?:;@&()\"\'-]', '', line).strip()
+                if len(line) < 3: continue
+                
+                # Heuristic Fixes
+                if line.startswith("FIOW "): line = "HOW " + line[5:]
+                
+                # Deduplication logic (Case-insensitive matching to avoid duplicates like 'How' and 'HOW')
+                norm_line = line.lower().replace(" ", "")
+                if norm_line not in seen_lines:
+                    seen_lines.add(norm_line)
+                    final_lines.append(line)
         
-        return "\n".join(combined_lines)
+        return "\n".join(final_lines)
     except Exception as e:
         print(f"OCR failed:", e)
         return ""
 
 
-def build_ocr_overlay_html(img_tag_str, img_cv):
-    """Given an OpenCV image, run OCR and return an HTML snippet with
-    the <img> inside a relative wrapper plus transparent, selectable word spans."""
-    h, w = img_cv.shape[:2]
-    if h < 20 or w < 20:
-        return None
-
-    # Up-scale for better OCR accuracy
-    scale = 2.0
-    img_scaled = cv2.resize(img_cv, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LANCZOS4)
-    gray = cv2.cvtColor(img_scaled, cv2.COLOR_BGR2GRAY)
-
-    # Use image_to_data for bounding boxes (Output.DICT does not require pandas)
-    try:
-        data = pytesseract.image_to_data(gray, config=r'--tessdata-dir c:\ai_book_reader\tessdata --oem 3 --psm 3 -l tam+eng', output_type=pytesseract.Output.DICT)
-    except Exception:
-        return None
-
-    spans_html: List[str] = []
-    for i in range(len(data['text'])):
-        word = str(data['text'][i]).strip()
-        conf = int(data['conf'][i])
-        if not word or conf <= 0:
-            continue
-
-        # Scale bounding box back to original image dimensions
-        bx = data['left'][i] / scale
-        by = data['top'][i] / scale
-        bw = data['width'][i] / scale
-        bh = data['height'][i] / scale
-
-        # Express as percentages of original image size
-        left_pct   = round(bx / w * 100, 4)
-        top_pct    = round(by / h * 100, 4)
-        width_pct  = round(bw / w * 100, 4)
-        height_pct = round(bh / h * 100, 4)
-
-        # Font size roughly matches the rendered word bbox height
-        font_size_pct = round(bh / h * 100, 4)
-
-        spans_html.append(
-            f'<span class="ocr-word" style="left:{left_pct}%;top:{top_pct}%;width:{width_pct}%;height:{height_pct}%;font-size:{font_size_pct}cqh;" title="{word}">{word}</span>'
-        )
-
-    if not spans_html:
-        return None
-
-    ocr_layer = '<div class="ocr-layer">' + ''.join(spans_html) + '</div>'
-    wrapper = f'<div class="img-ocr-wrapper">{img_tag_str}{ocr_layer}</div>'
+def build_clickable_img_wrapper(img_tag_str, img_cv):
+    """Given an OpenCV image tag and image, wrap it in a clickable container for AI explanation."""
+    # We no longer run OCR here as requested.
+    wrapper = f'<div class="img-clickable-wrapper" onclick="explainImage(this)">{img_tag_str}</div>'
     return wrapper
 
 
@@ -262,10 +252,10 @@ def ocr_embedded_images(html):
             nparr = np.frombuffer(data, np.uint8)
             img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             if img_cv is not None:
-                # Use the sophisticated overlay builder for perfect highlighting/selection
-                overlay_html = build_ocr_overlay_html(img_tag, img_cv)
-                if overlay_html:
-                    return start, end, overlay_html
+                # Wrap images in a clickable container for explanation instead of OCR overlay
+                clickable_html = build_clickable_img_wrapper(img_tag, img_cv)
+                if clickable_html:
+                    return start, end, clickable_html
         except Exception:
             pass
         return start, end, img_tag
@@ -500,7 +490,7 @@ def extract_pptx_html(file_path):
 def extract_txt_html(file_path):
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
         text = f.read().replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
-        return f"<div class='txt-content-wrapper' style='padding: 40px; font-family: monospace; line-height: 1.5;'>{text}</div>"
+        return f"<div class='txt-content-wrapper' style='padding: 40px; font-family: monospace; line-height: 1.5; white-space: pre-wrap;'>{text}</div>"
 
 
 def extract_book_html(file_path):
@@ -519,7 +509,7 @@ def extract_book_html(file_path):
         return extract_txt_html(file_path)
     elif ext == ".pptx":
         return extract_pptx_html(file_path)
-    elif ext in [".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif", ".tiff"]:
+    elif ext in [".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif", ".tiff", ".svg", ".ico", ".jfif"]:
         # Professional Standalone Image Processing
         filename = os.path.basename(file_path)
         img_np = cv2.imread(file_path)
@@ -527,11 +517,11 @@ def extract_book_html(file_path):
         if img_np is None:
              return f"<div style='background: white; padding: 40px; color: red;'>Could not read image metadata for {filename}</div>"
 
-        # 1. Build Interactive Overlay (Selectable text ON the image)
+        # 1. Build Clickable Wrapper (For AI explanation on click)
         img_tag = f'<img src="/uploads/{filename}" style="max-width: 100%; height: auto; max-height: 900px; display: inline-block; border-radius: 12px; box-shadow: 0 6px 16px rgba(0,0,0,0.15);" />'
-        overlay_html = build_ocr_overlay_html(img_tag, img_np)
+        clickable_html = build_clickable_img_wrapper(img_tag, img_np)
         
-        # 2. Extract Plain Text (For the bottom view/accessibility)
+        # 2. Extract Plain Text (Restored for Standalone Image Uploads as requested)
         text = extract_image_text(file_path)
         clean_text_html = ""
         for line in text.split("\n"):
@@ -539,7 +529,7 @@ def extract_book_html(file_path):
             if line:
                 clean_text_html += f'<p style="margin-bottom: 1.25em;">{line}</p>'
                 
-        final_img_area = overlay_html if overlay_html else f'<div style="text-align: center;">{img_tag}</div>'
+        final_img_area = clickable_html if clickable_html else f'<div style="text-align: center;">{img_tag}</div>'
 
         html = f"""
             <div id="pdf-page-0" class="lazy-page-container flex-page" data-original-width="800" style="display: flex; flex-direction: column; margin-bottom: 40px; border-bottom: 2px solid #ddd; padding: 20px 40px; gap: 30px;">
@@ -555,68 +545,6 @@ def extract_book_html(file_path):
     else:
         return "<div style='background: white; padding: 40px; color: red;'>Unsupported file format</div>"
 
-
-@app.route("/ocr_image", methods=["POST"])
-def ocr_image_endpoint():
-    """
-    Accept a base64-encoded image, run OCR, and return word bounding boxes
-    as JSON so the browser can render transparent selectable text spans over it.
-    """
-    data = request.get_json()
-    if not data:
-        return jsonify({"words": []})
-
-    b64 = data.get("image", "")
-    if not b64:
-        return jsonify({"words": []})
-
-    try:
-        # Strip data URI header if present
-        if "," in b64:
-            b64 = b64.split(",", 1)[1]
-        raw = base64.b64decode(b64)
-        nparr = np.frombuffer(raw, np.uint8)
-        img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if img_cv is None:
-            return jsonify({"words": []})
-
-        h, w = img_cv.shape[:2]
-        if h < 20 or w < 20:
-            return jsonify({"words": []})
-
-        # Upscale and stabilize scanned PDF images for accurate text extraction
-        max_dim = 1600
-        scale = 1.0
-        if max(h, w) > max_dim:
-            scale = max_dim / max(h, w)
-        elif max(h, w) < 800:
-            scale = min(2.5, 1600 / max(h, w))
-            
-        if scale != 1.0:
-            img_cv = cv2.resize(img_cv, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
-            
-        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-
-        ocr_data = pytesseract.image_to_data(gray, config=r'--tessdata-dir c:\ai_book_reader\tessdata --oem 3 --psm 3 -l tam+eng', output_type=pytesseract.Output.DICT)
-
-        words = []
-        for i in range(len(ocr_data['text'])):
-            word = str(ocr_data['text'][i]).strip()
-            conf = int(ocr_data['conf'][i])
-            if not word or conf <= 0:
-                continue
-            # Scale back to original coordinates
-            words.append({
-                "text": word,
-                "left":   round(ocr_data['left'][i]   / scale / w * 100, 4),
-                "top":    round(ocr_data['top'][i]    / scale / h * 100, 4),
-                "width":  round(ocr_data['width'][i]  / scale / w * 100, 4),
-                "height": round(ocr_data['height'][i] / scale / h * 100, 4),
-            })
-
-        return jsonify({"words": words})
-    except Exception as e:
-        return jsonify({"words": [], "error": str(e)})
 
 
 @app.route("/")
@@ -787,34 +715,41 @@ def stream_audio_sync(async_gen):
 
 @app.route("/book/<int:book_id>")
 def open_book(book_id):
+    import traceback
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
 
-    conn = get_conn()
-    cur = conn.cursor()
+        cur.execute("SELECT name, path, extracted_path FROM books WHERE id = ?", (book_id,))
+        book = cur.fetchone()
+        conn.close()
 
-    cur.execute("SELECT name, path, extracted_path FROM books WHERE id = ?", (book_id,))
-    book = cur.fetchone()
-    conn.close()
+        if not book:
+            return jsonify({"error": "Book not found in database"}), 404
 
-    if not book:
-        return jsonify({"error": "Book not found"})
+        name, file_path, extracted_path = book
+        file_name = os.path.basename(file_path) if file_path else ""
 
-    name, file_path, extracted_path = book
-    file_name = os.path.basename(file_path) if file_path else ""
+        if not extracted_path or not os.path.exists(extracted_path):
+            # Fallback: Extract again if file missing
+            print(f"File missing at {extracted_path}, re-extracting...")
+            html = extract_book_html(file_path)
+            os.makedirs(os.path.dirname(extracted_path), exist_ok=True)
+            with open(extracted_path, "w", encoding="utf-8") as f:
+                f.write(html)
 
-    if not os.path.exists(extracted_path):
-        return jsonify({"error": "Extracted text file not found"})
+        with open(extracted_path, "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read()
 
-    with open(extracted_path, "r", encoding="utf-8", errors="ignore") as f:
-        text = f.read()
+        return jsonify({
+            "name": name,
+            "text": text,
+            "file_name": file_name
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": f"Server Error: {str(e)}"}), 500
 
-    return jsonify({
-        "name": name,
-        "text": text,
-        "file_name": file_name
-    })
-
-
-    return jsonify({"message": "Highlight saved successfully"})
 
 
 @app.route("/save_highlight", methods=["POST"])
@@ -1000,51 +935,29 @@ def translate_text():
                 
             current_chunk.append(text)
             current_len += text_len + len(delimiter)
-            
+                    
         if current_chunk:
             chunks.append(current_chunk)
             
         if not hasattr(app, "translation_cache"):
             app.translation_cache = {}
 
-        def translate_recursive(chunk):
+        # Parallel Translation for High Speed
+        from concurrent.futures import ThreadPoolExecutor
+        
+        def translate_single_chunk(chunk):
             if not chunk: return []
-            if len(chunk) == 1:
-                t = chunk[0].strip()
-                if not t: return chunk
-                cache_key = f"{target_lang}_{t}"
-                if cache_key in app.translation_cache:
-                    return [app.translation_cache[cache_key]]
-                try:
-                    res = translator.translate(t)
-                    app.translation_cache[cache_key] = res
-                    return [res]
-                except Exception:
-                    return chunk
-
             try:
-                batch_str = " ||| ".join(chunk)
-                res = translator.translate(batch_str)
-                parts = [s.strip() for s in re.split(r'\s*\|\s*\|\s*\|\s*', res)]
-                
-                if len(parts) == len(chunk):
-                    return parts
-                else:
-                    # Fallback binary split for ultra fast recovery instead of sequential O(N)
-                    mid = len(chunk) // 2
-                    return translate_recursive(chunk[:mid]) + translate_recursive(chunk[mid:])
-            except Exception:
-                mid = len(chunk) // 2
-                return translate_recursive(chunk[:mid]) + translate_recursive(chunk[mid:])
+                clean_chunk = [str(s).strip() if s and str(s).strip() else "..." for s in chunk]
+                return translator.translate_batch(clean_chunk)
+            except Exception as e:
+                print(f"Batch translation error: {e}")
+                return [translator.translate(s) if s else "" for s in chunk]
 
-        def process_chunk(chunk):
-            return translate_recursive(chunk)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
-            results = list(executor.map(process_chunk, chunks))
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            translated_chunks = list(executor.map(translate_single_chunk, chunks))
             
-        for r in results:
-            translated_texts.extend(r)
+        translated_texts = [item for sublist in translated_chunks for item in sublist]
 
         # Force identical array lengths
         if len(translated_texts) != len(texts):
@@ -1127,7 +1040,226 @@ def summarize_text():
         traceback.print_exc()
         return jsonify({"error": "Summarization failed internally."}), 500
 
+@app.route("/save_note", methods=["POST"])
+def save_note():
+    data = request.get_json()
+    book_id = data.get("book_id")
+    content = data.get("content")
+    if not book_id or not content:
+        return jsonify({"error": "Missing data"}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO notes(book_id, content) VALUES (?, ?)", (book_id, content))
+    conn.commit()
+    conn.close()
+    return jsonify({"message": "Note saved!"})
+
+@app.route("/notes/<int:book_id>")
+def get_notes(book_id):
+    lang = request.args.get("lang", "en") # Current UI language
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id, content FROM notes WHERE book_id = ? ORDER BY created_at DESC", (book_id,))
+    rows = cur.fetchall()
+    conn.close()
+
+    notes = []
+    for row in rows:
+        note_id, content = row
+        # Auto-translate if not in original/english
+        if lang and lang != 'en' and lang != 'orig':
+            try:
+                from deep_translator import GoogleTranslator
+                content = GoogleTranslator(source='auto', target=lang).translate(content)
+            except:
+                pass # Fallback to original if translation fails
+        notes.append({"id": note_id, "content": content})
+        
+    return jsonify(notes)
+
+@app.route("/update_note", methods=["POST"])
+def update_note():
+    data = request.get_json()
+    note_id = data.get("note_id")
+    content = data.get("content")
+    if not note_id or content is None:
+        return jsonify({"error": "Missing data"}), 400
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE notes SET content = ? WHERE id = ?", (content, note_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"message": "Note updated!"})
+
+@app.route("/delete_note/<int:note_id>", methods=["POST"])
+def delete_note_endpoint(note_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"message": "Note deleted!"})
+
+@app.route("/download_notes/<int:book_id>")
+def download_notes(book_id):
+    format_type = request.args.get("format", "txt").lower()
+    
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT name FROM books WHERE id = ?", (book_id,))
+    book_row = cur.fetchone()
+    if not book_row:
+        conn.close()
+        return "Book not found", 404
+        
+    book_name = book_row[0]
+    cur.execute("SELECT content FROM notes WHERE book_id = ?", (book_id,))
+    notes = [row[0] for row in cur.fetchall()]
+    conn.close()
+
+    
+    if not notes:
+        return "No notes found to download.", 400
+
+    from io import BytesIO, StringIO
+    
+    if format_type == "docx":
+        from docx import Document
+        doc = Document()
+        doc.add_heading(f'Study Notes: {book_name}', 0)
+        doc.add_paragraph('Collected using AI Book Reader').italic = True
+        
+        for i, note in enumerate(notes):
+            doc.add_heading(f'Snippet {i+1}', level=1)
+            doc.add_paragraph(note)
+            
+        target = BytesIO()
+        doc.save(target)
+        target.seek(0)
+        return send_file(target, as_attachment=True, download_name=f"Notes_{book_name}.docx", mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+    elif format_type == "pdf":
+        from fpdf import FPDF
+        class PDF(FPDF):
+            def header(self):
+                self.set_font('helvetica', 'B', 15)
+                self.cell(0, 10, f'Study Notes: {book_name}', border=True, ln=True, align='C')
+                self.ln(5)
+            def footer(self):
+                self.set_y(-15)
+                self.set_font('helvetica', 'I', 8)
+                self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+
+        pdf = PDF()
+        pdf.add_page()
+        pdf.set_font("helvetica", size=11)
+        
+        for i, note in enumerate(notes):
+            pdf.set_font("helvetica", 'B', 12)
+            pdf.cell(0, 10, f"Snippet {i+1}:", ln=True)
+            pdf.set_font("helvetica", size=10)
+            # Remove characters that may crash basic PDF fonts or use multi_cell safely
+            safe_text = note.encode('latin-1', 'replace').decode('latin-1')
+            pdf.multi_cell(0, 10, safe_text)
+            pdf.ln(5)
+
+        response_bytes = pdf.output()
+        target = BytesIO(response_bytes)
+        return send_file(target, as_attachment=True, download_name=f"Notes_{book_name}.pdf", mimetype="application/pdf")
+
+    else: # Default TXT
+        content = f"STUDY NOTES: {book_name}\n{'='*30}\n\n"
+        for i, note in enumerate(notes):
+            content += f"SNIPPET {i+1}:\n{note}\n\n"
+            content += "-"*20 + "\n\n"
+            
+        target = BytesIO(content.encode('utf-8'))
+        return send_file(target, as_attachment=True, download_name=f"Notes_{book_name}.txt", mimetype="text/plain")
+
+@app.route("/generate_revision", methods=["POST"])
+def generate_revision():
+    import re
+    from collections import defaultdict
+    try:
+        data = request.get_json()
+        book_id = data.get("book_id")
+        
+        if not book_id:
+            return jsonify({"error": "No book selected"}), 400
+            
+        sentences = get_book_sentences(book_id)
+        if not sentences:
+            return jsonify({"error": "No content found in book"}), 404
+            
+        # Full-book scoring 
+        text = " ".join(sentences).lower()
+        stop_words = set(['the', 'is', 'in', 'and', 'to', 'a', 'of', 'for', 'it', 'on', 'with', 'as', 'by', 'that', 'this', 'an', 'are', 'was', 'be', 'or', 'at', 'from', 'their', 'which', 'will', 'have', 'been', 'were', 'about'])
+        words = re.findall(r'\b\w{4,}\b', text)
+        freq = defaultdict(int)
+        for w in words:
+            if w not in stop_words: freq[w] += 1
+            
+        # Score each sentence
+        scores = []
+        for i, s in enumerate(sentences):
+            words_in_s = re.findall(r'\b\w+\b', s.lower())
+            if len(words_in_s) < 12 or len(words_in_s) > 50: continue
+            
+            score = sum(freq[w] for w in words_in_s if w in freq)
+            scores.append((score / len(words_in_s), i, s))
+            
+        # Pick top 25 diverse points
+        top_points = sorted(scores, key=lambda x: x[0], reverse=True)[:30]
+        # Re-sort by book order
+        top_points.sort(key=lambda x: x[1])
+        
+        revision_points = [p[2].strip() for p in top_points]
+        return jsonify({"revision_points": revision_points})
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/download_revision/<book_id>", methods=["GET"])
+def download_revision(book_id):
+    from io import BytesIO
+    import re
+    from collections import defaultdict
+    try:
+        sentences = get_book_sentences(book_id)
+        if not sentences: return "Book not found", 404
+        
+        # Generation Logic (Duplicated for standalone download)
+        text = " ".join(sentences).lower()
+        stop_words = set(['the', 'is', 'in', 'and', 'to', 'a', 'of', 'for', 'it', 'on', 'with', 'as', 'by', 'that', 'this', 'an', 'are', 'was', 'be', 'or', 'at', 'from'])
+        words = re.findall(r'\b\w{4,}\b', text)
+        freq = defaultdict(int)
+        for w in words:
+            if w not in stop_words: freq[w] += 1
+        
+        scores = []
+        for i, s in enumerate(sentences):
+            words_in_s = re.findall(r'\b\w+\b', s.lower())
+            if len(words_in_s) < 12 or len(words_in_s) > 50: continue
+            score = sum(freq[w] for w in words_in_s if w in freq)
+            scores.append((score / len(words_in_s), i, s))
+            
+        top_points = sorted(scores, key=lambda x: x[0], reverse=True)[:35]
+        top_points.sort(key=lambda x: x[1])
+        
+        book_name = next((b['name'] for b in Library.list_books() if b['id'] == book_id), "Book")
+        
+        content = f"REVISION GUIDE: {book_name}\n" + "="*40 + "\n\n"
+        for i, p in enumerate(top_points):
+            content += f"{i+1}. {p[2].strip()}\n\n"
+            
+        return send_file(BytesIO(content.encode('utf-8')), as_attachment=True, download_name=f"Revision_{book_name}.txt", mimetype="text/plain")
+    except Exception as e:
+        return str(e), 500
+
 @app.route("/generate_quiz", methods=["POST"])
+
 def generate_quiz():
     import traceback, random, re
     from collections import defaultdict
@@ -1136,6 +1268,7 @@ def generate_quiz():
         data = request.get_json()
         text = data.get("text", "")
         book_id = data.get("book_id")
+        quiz_type = data.get("type", "mcq") # default to mcq
 
         if book_id and not text:
             sentences = get_book_sentences(book_id)
@@ -1156,54 +1289,124 @@ def generate_quiz():
         
         top_keywords = sorted(freq, key=freq.get, reverse=True)[:50]
         
-        # 3. QUESTION FACTORY
         questions = []
-        # Look for sentences that define concepts (X is Y)
-        candidates = []
-        for s in sentences:
-            if re.search(r'\b(is|was|means|refers to|defined as|called|known as)\b', s, re.I):
-                candidates.append(s)
-        
-        random.shuffle(candidates)
-        
-        for s in candidates[:25]: # Process up to 25 candidates to find 10 good ones
-            # Try to mask a keyword
-            words = re.findall(r'\b\w+\b', s)
-            possible_masks = [w for w in words if w.lower() in top_keywords and len(w) > 3]
-            
-            if not possible_masks: continue
-            
-            mask = random.choice(possible_masks)
-            # Create distractors from other keywords
-            distractors = [k for k in top_keywords if k.lower() != mask.lower()]
-            if len(distractors) < 3: continue
-            
-            options = random.sample(distractors, 3) + [mask]
-            random.shuffle(options)
-            
-            # Format question: Blanket the word
-            q_text = re.sub(r'\b' + re.escape(mask) + r'\b', '__________', s, count=1, flags=re.I)
-            
-            questions.append({
-                "question": q_text,
-                "options": options,
-                "answer": mask
-            })
-            
-            if len(questions) >= 10: break
 
+        if quiz_type == "mcq":
+            # Existing MCQ logic
+            candidates = [s for s in sentences if re.search(r'\b(is|was|means|refers to|defined as|called|known as)\b', s, re.I)]
+            random.shuffle(candidates)
             
+            for s in candidates[:25]:
+                words = re.findall(r'\b\w+\b', s)
+                possible_masks = [w for w in words if w.lower() in top_keywords and len(w) > 3]
+                if not possible_masks: continue
+                mask = random.choice(possible_masks)
+                distractors = [k for k in top_keywords if k.lower() != mask.lower()]
+                if len(distractors) < 3: continue
+                options = random.sample(distractors, 3) + [mask]
+                random.shuffle(options)
+                q_text = re.sub(r'\b' + re.escape(mask) + r'\b', '__________', s, count=1, flags=re.I)
+                questions.append({"question": q_text, "options": options, "answer": mask, "type": "mcq"})
+                if len(questions) >= 10: break
+
+        elif quiz_type in ["short", "long"]:
+            # Standard Academic Question Templates
+            short_temps = [
+                "Define {concept}.", 
+                "What is meant by {concept}?", 
+                "Write a short note on {concept}.", 
+                "State the importance of {concept}.",
+                "What are the primary uses of {concept}?"
+            ]
+            long_temps = [
+                "Explain {concept} in detail based on the text.",
+                "Describe the working or context of {concept}.",
+                "Discuss the concept of {concept} and its implications.",
+                "Elaborate on {concept} with suitable examples from the book.",
+                "Analyze the importance of {concept} in modern applications."
+            ]
+
+            # High-Performance NLP Logic using TextBlob
+            try:
+                from textblob import TextBlob
+                blob = TextBlob(text)
+                # Group noun phrases and filter out junk
+                concepts = [str(np).lower() for np in blob.noun_phrases if len(str(np)) > 3]
+            except:
+                concepts = [k for k in top_keywords if len(str(k)) > 4]
+
+            # Better stopword and diversity filtering
+            hard_stop = {'here', 'there', 'that', 'this', 'with', 'from', 'been', 'were', 'about', 'some', 'than', 'into', 'only', 'very', 'just', 'more', 'also', 'their', 'which'}
+            final_concepts = []
+            for c in concepts:
+                if c not in hard_stop and len(c.split()) < 4 and c not in final_concepts:
+                    final_concepts.append(c)
+            
+            random.shuffle(final_concepts)
+
+            # Scale count based on text depth
+            target_count = min(12, max(5, len(sentences) // 20))
+            if quiz_type == "long": target_count = min(8, max(3, len(sentences) // 40))
+
+            for concept in final_concepts:
+                if len(questions) >= target_count: break
+                
+                # Find the best context for this concept
+                for i, s in enumerate(sentences):
+                    if concept.lower() in s.lower() and 10 < len(s.split()) < 60:
+                        concept_display = concept.title()
+                        if quiz_type == "short":
+                            template = random.choice(short_temps)
+                            questions.append({
+                                "question": template.format(concept=concept_display),
+                                "answer": f"💡 **Core Insight**: {s.strip()}",
+                                "type": "short"
+                            })
+                        else:
+                            # Contextual Multi-Sentence Answer
+                            context = sentences[max(0, i-1):min(len(sentences), i+5)]
+                            template = random.choice(long_temps)
+                            formatted_answer = f"🔍 **Professional Summary: {concept_display}**\n\n"
+                            formatted_answer += f"**Primary Explanation**: {context[0].strip()}\n\n"
+                            formatted_answer += "**Detailed Context**:\n"
+                            for line in context[1:]:
+                                if len(line.strip()) > 10:
+                                    formatted_answer += f"• {line.strip()}\n"
+                            
+                            questions.append({
+                                "question": template.format(concept=concept_display),
+                                "answer": formatted_answer,
+                                "type": "long"
+                            })
+                        break
+
         if not questions:
-            # Fallback: Simple keyword definitions
+            # Fallback
             for k in top_keywords[:5]:
                 questions.append({
                     "question": f"Based on the text, what is a key concept identified as '{k}'?",
-                    "options": random.sample(top_keywords[10:13], 3) + [k],
-                    "answer": k
+                    "options": random.sample(top_keywords[10:13], 3) + [k] if quiz_type == "mcq" else None,
+                    "answer": f"The term '{k}' is used as a significant keyword in this context.",
+                    "type": quiz_type
                 })
-                random.shuffle(questions[-1]["options"])
+                if quiz_type == "mcq": random.shuffle(questions[-1]["options"])
 
-        return jsonify({"questions": questions})
+        # MULTI-LANGUAGE SUPPORT: Translate the full quiz if target_lang provided
+        target_lang = data.get("target_lang", "en")
+        if target_lang and target_lang not in ["en", "orig"]:
+            from deep_translator import GoogleTranslator
+            try:
+                translator = GoogleTranslator(source='auto', target=target_lang)
+                for q in questions:
+                    q["question"] = translator.translate(q["question"])
+                    if q.get("options"):
+                        q["options"] = [translator.translate(opt) for opt in q["options"]]
+                    if q.get("answer"):
+                        q["answer"] = translator.translate(q["answer"])
+            except Exception as e:
+                print(f"Quiz translation error: {e}")
+
+        return jsonify({"questions": questions, "type": quiz_type})
 
     except Exception as e:
         traceback.print_exc()
@@ -1449,7 +1652,8 @@ def explain_image():
     import io
     try:
         data = request.get_json()
-        src = data.get("src", "")
+        # Support both 'src' (legacy/original) and 'image' (new frontend logic)
+        src = data.get("src", "") or data.get("image", "")
         context = data.get("context", "")
         
         if not src:
@@ -1464,8 +1668,8 @@ def explain_image():
             if "," in src:
                 encoded_data = src.split(",", 1)[1]
                 # The frontend might pass URL-encoded data (like %0A for newlines)
-                encoded_data = urllib.parse.unquote(encoded_data)
-                
+                # Fix common URL-encoding issues where '+' becomes ' '
+                encoded_data = encoded_data.replace(' ', '+')
                 # Fix padding if missing
                 encoded_data += "=" * ((4 - len(encoded_data) % 4) % 4)
                 
@@ -1516,8 +1720,18 @@ def explain_image():
         # 1. Run OCR (Tesseract) to find labels/data
         try:
             gray = cv2.cvtColor(img_np, cv2.COLOR_BGR2GRAY)
-            # Use a slightly more aggressive PSM for diagrams (6 = assume a single uniform block of text)
-            ocr_text = pytesseract.image_to_string(gray, config='--oem 3 --psm 6').strip()
+            # Denoise and sharpen for better OCR on small/blurry text
+            gray = cv2.GaussianBlur(gray, (0,0), 3)
+            gray = cv2.addWeighted(gray, 1.5, gray, -0.5, 0)
+            
+            ocr_text_raw = pytesseract.image_to_string(gray, config='--oem 3 --psm 6').strip()
+            
+            # CLEAN OCR: Remove common "garbage" characters detected in low-res or stylized text
+            ocr_text = re.sub(r'[^a-zA-Z0-9\s.,!?:;@&()\"\'-]', '', ocr_text_raw)
+            ocr_text = re.sub(r'\s+', ' ', ocr_text).strip()
+            # If ocr_text became empty after aggressive cleaning, use raw but trimmed if it has alphabets
+            if not ocr_text and re.search(r'[a-zA-Z]{3,}', ocr_text_raw):
+                ocr_text = ocr_text_raw.strip()
         except:
             pass
 
@@ -1530,14 +1744,14 @@ def explain_image():
             
             if not hasattr(app, "image_captioner"):
                 try:
-                    # Force CPU mode (-1) for stability and reduce memory load
-                    app.image_captioner = pipeline("image-to-text", model="Salesforce/blip-image-captioning-base", device=-1)
+                    # USE A LIGHTER MODEL: ViT-GPT2 is ~3x smaller/faster than BLIP on CPU
+                    app.image_captioner = pipeline("image-to-text", model="nlp-connect/vit-gpt2-image-captioning", device=-1)
                 except:
                     app.image_captioner = None
                     
             if app.image_captioner:
-                # Use a smaller max_new_tokens for speed and to avoid timeouts
-                res = app.image_captioner(img_pil, max_new_tokens=35)
+                # Optimized for speed
+                res = app.image_captioner(img_pil, max_new_tokens=25)
                 if res and len(res) > 0 and 'generated_text' in res[0]:
                     ai_caption = res[0]['generated_text'].capitalize().strip()
                 
@@ -1563,7 +1777,7 @@ def explain_image():
             print("AI Captioning failed:", ai_e)
 
         # 3. Analyze and Combine (Detailed Visual Logic)
-        is_diagram = any(kw in (ocr_text + ai_caption).lower() for kw in ["diagram", "chart", "graph", "figure", "fig.", "illustration", "table", "cycle", "process"])
+        is_diagram = any(kw in (ocr_text + ai_caption).lower() for kw in ["diagram", "chart", "graph", "figure", "fig.", "illustration", "table", "cycle", "process", "thank you", "slide", "presentation"])
         
         # Priority 1: Visual Scene Description
         if ai_caption:
@@ -1575,7 +1789,7 @@ def explain_image():
             
             if ocr_text:
                 if is_diagram:
-                    explanation = f"{visual_desc}\n\n🔍 DIAGRAM LABELS: {ocr_text[:180]}..."
+                    explanation = f"{visual_desc}\n\n🔍 KEY DETAILS: The image contains text which points to: \"{ocr_text[:300]}...\""
                 else:
                     explanation = f"{visual_desc}\n\n📝 EMBEDDED TEXT: {ocr_text[:120]}..."
             else:
@@ -1583,9 +1797,12 @@ def explain_image():
                 
         # Priority 2: Text-only images or charts where AI failed
         elif ocr_text:
-            explanation = f"🔍 DOCUMENT SNAPSHOT: I couldn't see the full visual scene, but I found this text:\n\n\"{ocr_text[:300]}...\""
-            if context:
-                explanation += f"\n\nContext match: This likely relates to: '{context[:100]}'."
+            cleaned_context = re.sub(r'[:;{}[]]', '', context[:100]).strip()
+            explanation = f"🔍 DOCUMENT SNAPSHOT: Based on the visual data, this contains text elements including: \"{ocr_text[:400]}...\"\n\n"
+            if cleaned_context:
+                explanation += f"🚀 INTEGRATION: This likely serves as a visual reference for: '{cleaned_context}'."
+            else:
+                explanation += "Note: Vision AI is starting up or unavailable, using high-precision OCR for internal details."
                 
         # Priority 3: Fallback to Context only
         elif context:
