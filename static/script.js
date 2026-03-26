@@ -198,6 +198,7 @@ async function startQuiz(type) {
 function renderQuiz(type) {
     document.getElementById("quizLoading").style.display = "none";
     document.getElementById("quizContent").style.display = "block";
+    document.getElementById("downloadQuizBtn").style.display = "flex";
 
     let body = document.getElementById("quizBody");
     body.innerHTML = "";
@@ -241,6 +242,42 @@ function renderQuiz(type) {
     }
 
     document.getElementById("quizProgressBar").style.width = "10%";
+}
+
+function exportQuizToFile() {
+    if (!currentQuizData || currentQuizData.length === 0) {
+        alert("No quiz data available to download.");
+        return;
+    }
+    
+    let content = `AI BOOK READER - QUIZ EXPORT\n`;
+    content += `==========================\n\n`;
+    content += `Book: ${currentBookName || 'Untitled'}\n`;
+    content += `Generated on: ${new Date().toLocaleString()}\n\n`;
+    
+    currentQuizData.forEach((q, i) => {
+        content += `${i + 1}. ${q.question}\n`;
+        if (q.options) {
+            content += `   Options:\n`;
+            q.options.forEach((opt, idx) => {
+                content += `   [${String.fromCharCode(65 + idx)}] ${opt}\n`;
+            });
+            content += `\n   Answer Key: ${q.answer}\n`;
+        } else {
+            content += `\n   Recommended Answer / Key Points:\n   ${q.answer}\n`;
+        }
+        content += `\n--------------------------\n\n`;
+    });
+    
+    const blob = new Blob([content], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `quiz_study_guide_${Date.now()}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
 }
 
 function toggleQuizAnswer(event, index) {
