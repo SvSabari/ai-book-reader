@@ -1,10 +1,29 @@
-from flask import Flask, render_template, request, jsonify, send_from_directory, send_file
+from flask import Flask, render_template, request, jsonify, send_from_directory, send_file, Response
+from werkzeug.utils import secure_filename
 import os
-from typing import List
+import threading
 import sqlite3
 import time
 import math
 import re
+import base64
+import json
+import traceback
+import io
+import uuid
+import hashlib
+import concurrent.futures
+import asyncio
+import random
+import requests
+import html
+import collections
+from typing import List
+from io import BytesIO, StringIO
+from urllib.parse import quote, unquote, urljoin
+import urllib.request
+
+# Third-party libraries
 import fitz
 import docx
 from ebooklib import epub, ITEM_DOCUMENT, ITEM_IMAGE
@@ -12,17 +31,50 @@ from bs4 import BeautifulSoup
 import cv2
 import pytesseract
 import mammoth
-import base64
 import numpy as np
-import concurrent.futures
 from gtts import gTTS
-import json
+import edge_tts
+from deep_translator import GoogleTranslator
+from fpdf import FPDF
+from textblob import TextBlob
+from PIL import Image
+import pptx
+from pptx.enum.shapes import MSO_SHAPE_TYPE
+from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+import subprocess
+import time
 import requests
-import traceback
-import io
-import pyttsx3
-import uuid
-from werkzeug.utils import secure_filename
+import atexit
+
+# --- GLOBAL CONFIG & TRANSLATION SIDECAR ---
+SIDECAR_PORT = 3001
+sidecar_process = None
+
+def start_translation_sidecar():
+    global sidecar_process
+    try:
+        if os.path.exists("translator_sidecar.js"):
+            print(f"🚀 Launching Translation Sidecar (Port {SIDECAR_PORT})...")
+            # Sidecar handles 100+ parallel translation hits via Node.js Event Loop
+            sidecar_process = subprocess.Popen(["node", "translator_sidecar.js"], 
+                                             stdout=subprocess.DEVNULL, 
+                                             stderr=subprocess.DEVNULL)
+            time.sleep(0.5)
+    except Exception as e:
+        print(f"Sidecar launch failed: {e}. Falling back to internal engine.")
+
+@atexit.register
+def kill_sidecar():
+    if sidecar_process:
+        print("🛑 Shutting down translation sidecar...")
+        sidecar_process.terminate()
+
+try:
+    import transformers
+    from transformers import pipeline
+except ImportError:
+    transformers = None
+    pipeline = None
 
 app = Flask(__name__)
 
@@ -30,8 +82,11 @@ UPLOAD_FOLDER = "uploads"
 EXTRACTED_FOLDER = "extracted"
 DB = "database.db"
 
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(EXTRACTED_FOLDER, exist_ok=True)
+os.makedirs(os.path.join(UPLOAD_FOLDER, "extracted_assets"), exist_ok=True)
 
 # Global cache to store pre-tokenized sentences for the currently active book
 # Structure: { book_id: (timestamp, [sentences]) }
@@ -42,8 +97,10 @@ def get_sentiment_analyzer():
     global _SENTIMENT_ANALYZER
     if _SENTIMENT_ANALYZER is None:
         try:
-            from transformers import pipeline
-            _SENTIMENT_ANALYZER = pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english", device=-1)
+            if pipeline:
+                _SENTIMENT_ANALYZER = pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english", device=-1)
+            else:
+                _SENTIMENT_ANALYZER = "FAILED"
         except Exception as e:
             print(f"Sentiment model pre-load failed: {e}")
             _SENTIMENT_ANALYZER = "FAILED"
@@ -68,6 +125,11 @@ def get_book_sentences(book_id):
             html_content = f.read()
             
         soup = BeautifulSoup(html_content, "html.parser")
+        
+        # Clean up HTML for narration (remove noise)
+        for noise in soup(["script", "style", "nav", "footer", "header", "meta", "link"]):
+            noise.decompose()
+            
         text = soup.get_text(separator=" ")
         
         # Tokenize into sentences
@@ -77,7 +139,7 @@ def get_book_sentences(book_id):
         # Keep only the last 3 books in cache to manage memory
         if len(SENTENCE_CACHE) > 3:
             oldest = min(SENTENCE_CACHE.keys(), key=lambda k: SENTENCE_CACHE[k][0])
-            del SENTENCE_CACHE[oldest]
+            SENTENCE_CACHE.pop(oldest, None)
             
         SENTENCE_CACHE[book_id] = (time.time(), sentences)
         return sentences
@@ -129,107 +191,151 @@ def init_db():
     )
     """)
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS bookmarks(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        book_id INTEGER,
+        page_number INTEGER,
+        scroll_y INTEGER,
+        char_index INTEGER DEFAULT 0,
+        node_index INTEGER DEFAULT -1,
+        node_offset INTEGER DEFAULT 0,
+        label TEXT,
+        lang_code TEXT DEFAULT 'en',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # Migration for char_index and node mapping
+    try:
+        cur.execute("ALTER TABLE bookmarks ADD COLUMN char_index INTEGER DEFAULT 0")
+    except Exception: pass
+    try:
+        cur.execute("ALTER TABLE bookmarks ADD COLUMN node_index INTEGER DEFAULT -1")
+    except Exception: pass
+    try:
+        cur.execute("ALTER TABLE bookmarks ADD COLUMN node_offset INTEGER DEFAULT 0")
+    except Exception: pass
+    try:
+        cur.execute("ALTER TABLE bookmarks ADD COLUMN lang_code TEXT DEFAULT 'en'")
+    except Exception: pass
+
 
     conn.commit()
     conn.close()
 
 
-init_db()
+# Database schema maintenance is handled in the main entry point
 
 
-def extract_image_text(file_path):
-    image = cv2.imread(file_path)
-    if image is None:
-        return ""
+try:
+    # Google Cloud Vision integration has been disabled by user request.
+    from google.cloud import vision
+    def get_vision_client(): return None
+except ImportError:
+    vision = None
+    def get_vision_client(): return None
 
-    h, w = image.shape[:2]
-    
-    # Scale image upwards for better character recognition (Premium resolution)
-    max_dim = 2400
-    scale = 1.0
-    if max(h, w) < 1400:
-        scale = 1400 / max(h, w)
-    elif max(h, w) > max_dim:
-        scale = max_dim / max(h, w)
-        
-    if scale != 1.0:
-        image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LANCZOS4)
-        
-    # Pre-processing for better OCR accuracy
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    
-    # SHARPEN: Enhance character edges before binarization
-    sharpen_kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
-    sharpened = cv2.filter2D(gray, -1, sharpen_kernel)
-    
-    # 1. Pipeline A: Adaptive (Handles uneven paper/lighting)
-    denoised = cv2.bilateralFilter(sharpened, 9, 75, 75)
-    thresh_adaptive = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-    
-    # 2. Pipeline B: Otsu Global (Best for clean digital slides)
-    _, thresh_otsu = cv2.threshold(sharpened, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    
-    # 3. Pipeline C: Inverted Otsu (Crucial for white text on colored backgrounds)
-    _, thresh_inv = cv2.threshold(sharpened, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-    # 4. Pipeline D: Channel-Specific (Best for Red/Maroon text on Orange/Yellow backgrounds)
-    # Standard grayscale averages channels, making red-on-orange disappear.
-    # The green channel provides the highest contrast for red-spectrum text.
-    _, g_chan, _ = cv2.split(image)
-    thresh_green = cv2.adaptiveThreshold(g_chan, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-
-    config = r'--tessdata-dir c:\ai_book_reader\tessdata --oem 3 --psm 3 -l eng+tam'
+def google_vision_ocr(img_cv):
+    """Google Cloud Vision: The gold standard for handwriting recognition."""
+    client = get_vision_client()
+    if not client: return None
     
     try:
-        # Multi-Strategy Pipeline
-        passes = [
-            ("adaptive", thresh_adaptive),
-            ("otsu", thresh_otsu),
-            ("inverted", thresh_inv),
-            ("green_chan", thresh_green),
-            ("raw_gray", gray)
-        ]
+        _, encoded = cv2.imencode(".jpg", img_cv)
+        content = encoded.tobytes()
+        image = vision.Image({"content": content})
+        # DOCUMENT_TEXT_DETECTION is optimized for handwriting and dense pages
+        response = client.document_text_detection(image=image)
+        if response.full_text_annotation:
+            return response.full_text_annotation.text
+    except Exception as e:
+        print(f"Google Vision failed: {e}")
+    return None
+
+
+def extract_image_text(image, fast=True, skip_ocr=False):
+    """Perform a high-fidelity OCR pass. Automatically upgrades to Google Vision for handwriting."""
+    if skip_ocr: return ""
+    try:
+        if image is None: return ""
+        if isinstance(image, str):
+            # Universal Byte Decoding (Safer than imread for non-ASCII paths/WebP)
+            with open(image, "rb") as f:
+                img_bytes = f.read()
+                image = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+            if image is None: return ""
         
-        all_results = []
-        for name, img_pass in passes:
-            res_text = pytesseract.image_to_string(img_pass, config=config).strip()
-            if res_text:
-                # Basic cleaning
-                res_text = re.sub(r'[\x00-\x1F\x7F-\x9F]', '', res_text)
-                all_results.append(res_text)
+        # 1. ATTEMPT GOOGLE CLOUD VISION (PRIORITY: PERFECT ACCURACY & ORDER)
+        # Always use Google Vision if client is available, as it's the gold standard for book layouts.
+        # We only skip if skip_ocr is True.
+        client = get_vision_client()
+        if client:
+            try:
+                google_res = google_vision_ocr(image)
+                if google_res and len(google_res.strip()) > 5:
+                    # Vision already preserves reading order perfectly
+                    return google_res.strip()
+            except Exception as e:
+                print(f"Google Vision fallback to Tesseract: {e}")
+
+        # 2. LOCAL OCR FALLBACK (Optimized for Order and Accuracy)
+        # Avoid multiple passes which cause "soo big" duplicated text.
+        h, w = image.shape[:2]
+        # Rescale for better Tesseract recognition on dense text
+        scale = 1.0
+        if max(h, w) < 1000: scale = 1.5
+        if scale != 1.0:
+            image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
+
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
-        if not all_results: return ""
+        # PRE-PROCESSING: Standardize for OCR
+        # Bilateral filter removes noise while keeping edges sharp (good for books)
+        processed = cv2.bilateralFilter(gray, 9, 75, 75)
+        # Adaptive thresholding works best for uneven lighting on book scans
+        processed = cv2.adaptiveThreshold(processed, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+
+        # OCR: Use PSM 3 (Automatic Page Segmentation) to find lines in order without OSD overhead
+        # Using OEM 3 (Default, combines LSTM and Legacy if needed)
+        config = r'--tessdata-dir c:\ai_book_reader\tessdata --oem 3 --psm 3 -l eng'
         
-        # Strategy: Instead of choosing ONE pass, we aggregate unique lines from ALL successful passes
-        # This catches "HOW TO COMBINE" from pass A AND "TEXT AND IMAGE" from pass B.
-        seen_lines = set()
+        ocr_text = pytesseract.image_to_string(processed, config=config).strip()
+        
+        if not ocr_text: return ""
+
+        # SANITIZE & ORDER PRESERVATION
+        # Filter out obvious OCR noise (single chars, non-alphanumeric junk)
         final_lines = []
-        
-        for block in all_results:
-            for line in block.split('\n'):
-                # Clean line
-                line = re.sub(r'[^a-zA-Z0-9\s.,!?:;@&()\"\'-]', '', line).strip()
-                if len(line) < 3: continue
-                
-                # Heuristic Fixes
-                if line.startswith("FIOW "): line = "HOW " + line[5:]
-                
-                # Deduplication logic (Case-insensitive matching to avoid duplicates like 'How' and 'HOW')
-                norm_line = line.lower().replace(" ", "")
-                if norm_line not in seen_lines:
-                    seen_lines.add(norm_line)
-                    final_lines.append(line)
-        
+        for line in ocr_text.split('\n'):
+            line = line.strip()
+            # Ignore lines that are just symbols or too short to be meaningful book text
+            if len(re.sub(r'[^a-zA-Z0-9]', '', line)) < 2: continue
+            # Basic sanity filter for garbage
+            if re.match(r'^[.|_|\-|\s|?|!|:|;]+$', line): continue
+            final_lines.append(line)
+
         return "\n".join(final_lines)
     except Exception as e:
-        print(f"OCR failed:", e)
+        print("OCR failed:", e)
         return ""
 
 
-def build_clickable_img_wrapper(img_tag_str, img_cv):
-    """Given an OpenCV image tag and image, wrap it in a clickable container for AI explanation."""
-    # We no longer run OCR here as requested.
-    wrapper = f'<div class="img-clickable-wrapper" onclick="explainImage(this)">{img_tag_str}</div>'
+def build_clickable_img_wrapper(img_tag_str, img_cv, fast=True, skip_ocr=True):
+    """Given an OpenCV image tag and image, wrap it in a clickable container for AI explanation.
+    Hidden OCR is embedded for backend search/quiz availability."""
+    # DEFAULT skip_ocr to True for massive book performance; background tasks can fill it later
+    text = extract_image_text(img_cv, fast=fast, skip_ocr=skip_ocr)
+    
+    # Store OCR text in a hidden span so BeautifulSoup/get_text can index it for quizzes/searches
+    # while keeping it invisible and non-interactive for the user to avoid visual clutter.
+    wrapper = f'<div class="img-clickable-wrapper" onclick="explainImage(this)" style="cursor: zoom-in; display: inline-block; position: relative;">{img_tag_str}'
+    if text:
+        # Wrap in a visually hidden layer that narrators CAN read.
+        # This is CRITICAL for scanned books where this is the only text.
+        wrapper += f'<span class="ocr-reading-layer" style="position:absolute; width:1px; height:1px; overflow:hidden; opacity:0; pointer-events:none;">{text}</span>'
+    wrapper += '</div>'
     return wrapper
 
 
@@ -278,134 +384,198 @@ def ocr_embedded_images(html):
     return "".join(parts)
 
 
-def extract_pdf_html(file_path):
-    import base64
-    html_parts = []
-    pdf = fitz.open(file_path)
+def extract_pdf_html(file_path, fast_mode=True):
+    """High-speed parallel PDF processing with watermark filtering and layout stabilization."""
+    abs_path = os.path.abspath(file_path)
+    if not os.path.exists(abs_path):
+        return "<p>Error: PDF source file missing.</p>"
+
+    pdf = fitz.open(abs_path)
+    if pdf.is_encrypted:
+        try: pdf.decrypt("")
+        except: pass
     
-    for page_num in range(len(pdf)):
-        page = pdf[page_num]
-        
-        # Start a sequential Block Container
-        page_html = f'<div id="pdf-page-{page_num}" class="lazy-page-container flex-page" data-original-width="800" style="display: flex; flex-direction: column; margin-bottom: 40px; border-bottom: 2px solid #ddd; padding: 20px 40px; gap: 30px;">'
-        
-        img_html = '<div class="pdf-img-top" style="text-align: center; margin-bottom: 20px; width: 100%; display: block;">'
-        text_html = '<div class="pdf-text-bottom" style="line-height: 1.8; color: var(--text-main); word-break: break-word; text-align: left; padding: 0 10px;">'
-        
-        blocks = page.get_text("dict").get("blocks", [])
-        
-        # Sort blocks by reading order (Top to Bottom, then Left to Right)
-        # b["bbox"] is (x0, y0, x1, y1)
-        blocks.sort(key=lambda b: (b["bbox"][1], b["bbox"][0]))
-        seen_texts = set()
-        page_texts = []
-        page_imgs = []
-        
-        for b in blocks:
-            if b["type"] == 0:
-                # Text node logic
-                block_text = ""
-                for line in b.get("lines", []):
-                    for span in line.get("spans", []):
-                        block_text += span.get("text", "")
-                    block_text += "\n"
-                
-                clean_t = " ".join(block_text.strip().split("\n")).strip()
-                if not clean_t:
-                    continue
-                    
-                # Deduplicate overlapping background/shadow artifacts
-                if clean_t in seen_texts:
-                    continue
-                seen_texts.add(clean_t)
-                
-                page_texts.append(f'<p style="margin-bottom: 1.25em;">{clean_t}</p>')
-                
-            elif b["type"] == 1:
-                # Image node logic
-                x0, y0, x1, y1 = b.get("bbox", (0, 0, 0, 0))
-                w = x1 - x0
-                h = y1 - y0
-                
-                # Allow all images to render natively (many children's books use full-page illustrations!)
-                if not b.get("image"):
-                    continue
-                
-                b64 = base64.b64encode(b["image"]).decode()
-                ext = b.get("ext", "png")
-                
-                # Image flows down centrally, explicitly forcing height to lock the aspect ratio 
-                img_tag = f'<img src="data:image/{ext};base64,{b64}" style="max-width: 100%; height: auto; max-height: 550px; display: inline-block; border-radius: 12px; box-shadow: 0 6px 16px rgba(0,0,0,0.15);" />'
-                page_imgs.append(img_tag)
-        
-        img_html += "".join(page_imgs) + "</div>"
-        text_html += "".join(page_texts) + "</div>"
-        
-        # Sequentially stack: First Images, then Text (as user requested)
-        if not page_texts and not page_imgs:
-            page_html += "</div>"
-        elif not page_texts:
-            page_html += img_html + "</div>"
-        elif not page_imgs:
-            page_html += text_html + "</div>"
-        else:
-            page_html += img_html + text_html + "</div>"
+    total_pages = len(pdf)
+    
+    def process_pdf_page(page_num):
+        try:
+            # We open a NEW copy of the PDF handle per thread to ensure thread-safety in fitz
+            local_pdf = fitz.open(abs_path)
+            page = local_pdf[page_num]
+            page_area = page.rect.width * page.rect.height
             
-        html_parts.append(page_html)
-        
+            # 1. Page Header/Container
+            page_html = f'<div id="pdf-page-{page_num}" class="lazy-page-container flex-page" data-original-width="{int(page.rect.width)}" style="display: flex; flex-direction: column; margin-bottom: 60px; padding: 40px; gap: 20px; background: white; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); min-height: 200px;">'
+            
+            img_html_parts = []
+            text_html_parts = []
+            seen_hashes = set()
+
+            # A. EXTRACT IMAGES (Filter watermarks)
+            page_images = page.get_images(full=True)
+            for img_info in page_images:
+                try:
+                    xref = img_info[0]
+                    img_rects = page.get_image_rects(xref)
+                    if not img_rects: continue
+                    rect = img_rects[0]
+                    
+                    # IGNORE SMALL ASSETS (Skip 'Digitized by Google', tiny icons, separators)
+                    if rect.width * rect.height < (page_area * 0.05): continue
+
+                    pix = page.parent.extract_image(xref)
+                    img_data = pix["image"]
+                    ext = pix["ext"]
+                    img_hash = hashlib.md5(img_data).hexdigest()
+                    if img_hash in seen_hashes: continue
+                    seen_hashes.add(img_hash)
+                    
+                    asset_name = f"assets_{img_hash}.{ext}"
+                    asset_path = os.path.join(UPLOAD_FOLDER, "extracted_assets", asset_name)
+                    if not os.path.exists(asset_path):
+                        os.makedirs(os.path.dirname(asset_path), exist_ok=True)
+                        with open(asset_path, "wb") as f: f.write(img_data)
+                    
+                    img_tag = f'<img src="/uploads/extracted_assets/{asset_name}" style="max-width: 100%; height: auto; display: block; margin: 0 auto; border-radius: 8px;" />'
+                    
+                    try:
+                        img_np = cv2.imdecode(np.frombuffer(img_data, np.uint8), cv2.IMREAD_COLOR)
+                        if img_np is not None:
+                            # Use fast sync OCR only for very large images (potential full-page scans)
+                            do_deep = (rect.width * rect.height > page_area * 0.7)
+                            wrapped = build_clickable_img_wrapper(img_tag, img_np, fast=True, skip_ocr=False if do_deep and not fast_mode else True)
+                            img_html_parts.append(wrapped)
+                        else: img_html_parts.append(img_tag)
+                    except: img_html_parts.append(img_tag)
+                except: pass
+
+            # B. EXTRACT TEXT
+            blocks = page.get_text("dict").get("blocks", [])
+            is_scanned = any(img_info[2]*img_info[3] > page_area * 0.75 for img_info in page_images) if page_images else False
+            
+            seen_texts = set()
+            for b in blocks:
+                if b.get("type", 0) == 0:
+                    lines_text = []
+                    for line in b.get("lines", []):
+                        lines_text.append("".join([s.get("text", "") for s in line.get("spans", [])]))
+                    block_text = " ".join(lines_text).strip()
+                    
+                    if not block_text or len(block_text) < 4: continue
+                    if block_text in seen_texts: continue
+                    l_text = " ".join(["".join([s.get("text", "") for s in line.get("spans", [])]) for line in b.get("lines", [])]).strip()
+                    if not l_text or len(l_text) < 4: continue
+                    if l_text in seen_texts: continue
+                    seen_texts.add(l_text)
+                    
+                    style = 'style="margin-bottom: 1.25em; line-height: 1.8; color: #334155;"'
+                    if is_scanned:
+                        style = 'style="position:absolute; width:1px; height:1px; overflow:hidden; opacity:0; pointer-events:none;"'
+                    text_html_parts.append(f'<p {style}>{l_text}</p>')
+
+            # C. ASSEMBLY
+            if img_html_parts:
+                page_html += '<div class="pdf-img-stack" style="text-align: center; margin-bottom: 20px;">' + "".join(img_html_parts) + '</div>'
+            if text_html_parts:
+                page_html += '<div class="pdf-text-stack" style="width: 100%; font-family: \'Georgia\', serif; font-size: 1.15rem;">' + "".join(text_html_parts) + '</div>'
+            
+            page_html += "</div>"
+            local_pdf.close()
+            return page_html
+        except Exception as e:
+            return f'<div class="error">Page Error: {e}</div>'
+
+    # Process all pages in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        results = list(executor.map(process_pdf_page, range(total_pages)))
+    
     pdf.close()
-    full_html = "".join(html_parts)
-    # Enable OCR for embedded images so they become selectable/readable
-    return ocr_embedded_images(full_html)
+    return "".join(results)
 
 
 def extract_docx_html(file_path):
+    def convert_image(image):
+        with image.open() as image_bytes:
+            encoded_src = base64.b64encode(image_bytes.read()).decode("ascii")
+            ext = image.content_type.split("/")[-1]
+            # Use interactive wrapper for potential handwriting/diagrams
+            img_tag = f'<img src="data:image/{ext};base64,{encoded_src}" />'
+            try:
+                # Re-decode to get CV2 image for OCR
+                image_bytes.seek(0)
+                nparr = np.frombuffer(image_bytes.read(), np.uint8)
+                img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                if img_cv is not None:
+                    return {"src": "", "html": build_clickable_img_wrapper(img_tag, img_cv)}
+            except: pass
+            return {"src": f"data:image/{ext};base64,{encoded_src}"}
+
     with open(file_path, "rb") as docx_file:
-        result = mammoth.convert_to_html(docx_file)
+        result = mammoth.convert_to_html(docx_file, convert_image=mammoth.images.img_element(convert_image))
         html = result.value
-    return f"<div class='book-content-container'>{html}</div>"
+    return f"<div id='docx-page-0' class='lazy-page-container' style='padding: 60px; max-width: 900px; margin: 0 auto; background: var(--bg-paper); border-radius: 4px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); min-height: 800px; color: #333; font-family: \"Georgia\", serif; font-size: 1.15rem;'>{html}</div>"
 
 
 def extract_epub_html(file_path):
     book = epub.read_epub(file_path)
     
-    images = {}
+    # Pre-map ALL images in the archive regardless of folder structure
+    img_map = {}
     for item in book.get_items():
-        if item.get_type() == ITEM_IMAGE:
-            images[item.get_name().split('/')[-1]] = item.get_content()
+        if int(item.get_type()) == ITEM_IMAGE: 
+            i_name = str(item.get_name())
+            name_key = i_name.split('/')[-1]
+            img_map[name_key] = item.get_content()
 
-    html_content = "<div class='book-content-container'>"
+    html_content = ""
+    page_count = 0
+    
     for item in book.get_items():
-        if item.get_type() == ITEM_DOCUMENT:
-            soup = BeautifulSoup(item.get_content(), "html.parser")
+        if int(item.get_type()) == ITEM_DOCUMENT: 
+            content = item.get_content()
+            if not content: continue
             
+            soup = BeautifulSoup(content, "html.parser")
             for img in soup.find_all("img"):
-                src = img.get("src")
+                src = str(img.attrs.get("src", ""))
                 if src:
-                    filename = src.split('/')[-1]
-                    if filename in images:
-                        b64 = base64.b64encode(images[filename]).decode('utf-8')
-                        ext = filename.split('.')[-1].lower() if '.' in filename else 'jpeg'
-                        ext = 'jpeg' if ext == 'jpg' else ext
-                        img['src'] = f"data:image/{ext};base64,{b64}"
+                    name = src.split('/')[-1]
+                    img_data = img_map.get(name)
+                    if img_data is not None:
+                        b64 = base64.b64encode(img_data).decode('utf-8')
+                        ext = name.split('.')[-1].lower() if '.' in name else 'png'
+                        img.attrs['src'] = f"data:image/{ext};base64,{b64}"
+                        # Make it interactive
+                        img_tag_str = str(img)
+                        try:
+                            # Re-wrap in interactive container
+                            img_np = cv2.imdecode(np.frombuffer(img_data, np.uint8), cv2.IMREAD_COLOR)
+                            if img_np is not None:
+                                interactive = build_clickable_img_wrapper(img_tag_str, img_np)
+                                # Replace the img tag with the wrapped version in the soup
+                                new_soup = BeautifulSoup(interactive, "html.parser")
+                                img.replace_with(new_soup)
+                        except Exception:
+                            pass
 
             body = soup.find('body')
             if body:
-                html_content += "".join(str(c) for c in body.contents)
-            else:
-                text = soup.get_text()
-                if text.strip():
-                    html_content += f"<p>{text}</p>"
-    html_content += "</div>"
-    return html_content
+                # Wrap each EPUB document (usually a chapter) in its own lazy container
+                # This fixes the 'one giant page' issue that stalls translation for massive epubs.
+                page_html = f"<div id='epub-page-{page_count}' class='lazy-page-container' style='padding: 60px; max-width: 900px; margin: 0 auto 40px auto; background: var(--bg-paper); border-radius: 4px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); min-height: 800px; color: #333; font-family: \"Georgia\", serif; font-size: 1.15rem; perspective: 1000px;'>"
+                for child in body.children:
+                    page_html += str(child)
+                page_html += "</div>"
+                html_content += page_html
+                page_count += 1
+    
+    return html_content if html_content else "<div class='error'>No readable content found in EPUB.</div>"
 
 
 def extract_pptx_html(file_path):
-    import pptx
-    from pptx.enum.shapes import MSO_SHAPE_TYPE
     try:
         prs = pptx.Presentation(file_path)
-    except:
+    except Exception:
         return "<div class='error'>Failed to load PPTX. Try saving as PDF.</div>"
 
     sw = prs.slide_width
@@ -442,9 +612,8 @@ def extract_pptx_html(file_path):
                     b64 = base64.b64encode(shape.image.blob).decode()
                     ext = shape.image.ext or "png"
                     html += f'<div style="{style} z-index: 1;"><img src="data:image/{ext};base64,{b64}" style="width: 100%; height: 100%; object-fit: contain;" /></div>'
-                except: pass
+                except Exception: pass
             elif hasattr(shape, "text_frame") and shape.text_frame.text.strip():
-                from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
                 # Extract alignment and native font size
                 h_align = "left"
                 v_align = "flex-start"
@@ -489,61 +658,138 @@ def extract_pptx_html(file_path):
 
 def extract_txt_html(file_path):
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-        text = f.read().replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('\n', '<br>')
-        return f"<div class='txt-content-wrapper' style='padding: 40px; font-family: monospace; line-height: 1.5; white-space: pre-wrap;'>{text}</div>"
+        # 1. Clean and Prepare
+        raw_text = f.read().replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+        
+        # 2. VIRTUAL PAGINATION (Crucial for Infinite Scroll and Translation Throughput)
+        # We split the book into chunks of approx 3000 characters to ensure the 
+        # translation engine stays under rate-limit thresholds and provides 
+        # near-instant results for the visible page.
+        paragraphs = raw_text.split('\n')
+        pages = []
+        current_page_text = []
+        current_len = 0
+        MAX_PAGE_CHARS = 3000 # Roughly 3 small paragraphs or 1 large one
+        
+        for p in paragraphs:
+            p = p.strip()
+            if not p:
+                current_page_text.append("<br>")
+                continue
+                
+            current_page_text.append(p)
+            current_len += len(p)
+            
+            if current_len > MAX_PAGE_CHARS:
+                # Close Page
+                page_id = len(pages)
+                html = "<br><br>".join(current_page_text)
+                pages.append(f"<div id='txt-page-{page_id}' class='lazy-page-container' style='padding: 60px; max-width: 900px; margin: 40px auto; background: var(--bg-paper); border-radius: 8px; box-shadow: 0 4px 30px rgba(0,0,0,0.1); min-height: 700px; color: #222; font-family: \"Georgia\", serif; font-size: 1.2rem; line-height: 1.8; position: relative;'>{html}</div>")
+                current_page_text = []
+                current_len = 0
+        
+        # Handle trailing page
+        if current_page_text:
+            page_id = len(pages)
+            html = "<br><br>".join(current_page_text)
+            pages.append(f"<div id='txt-page-{page_id}' class='lazy-page-container' style='padding: 60px; max-width: 900px; margin: 40px auto; background: var(--bg-paper); border-radius: 8px; box-shadow: 0 4px 30px rgba(0,0,0,0.1); min-height: 700px; color: #222; font-family: \"Georgia\", serif; font-size: 1.2rem; line-height: 1.8; position: relative;'>{html}</div>")
+            
+        return "\n".join(pages) if pages else "<div class='lazy-page-container' style='padding:100px; text-align:center;'>Empty Document</div>"
 
 
-def extract_book_html(file_path):
+def extract_book_html(file_path, fast_mode=True):
     ext = os.path.splitext(file_path)[1].lower()
+    
+    # 1. ROBUST EXTENSION DETECTION (MAGIC NUMBERS)
+    # If the extension is missing or potentially wrong, verify against file signature
+    if not ext or ext not in [".pdf", ".docx", ".epub", ".pptx"]:
+        try:
+            with open(file_path, "rb") as f:
+                head = f.read(4)
+                if head == b"%PDF": ext = ".pdf"
+                elif head == b"PK\x03\x04":
+                    # It's a zip-based format (EPUB, DOCX, PPTX)
+                    # We can't immediately tell which, but we can try EBOPUB logic first
+                    ext = ".epub" 
+        except: pass
 
+    # 2. MATCH AND EXTRACT
     if ext == ".pdf":
         html = extract_pdf_html(file_path)
-        return ocr_embedded_images(html)
+        return ocr_embedded_images(html) if not fast_mode else html
     elif ext == ".docx":
         html = extract_docx_html(file_path)
-        return ocr_embedded_images(html)
+        return ocr_embedded_images(html) if not fast_mode else html
     elif ext == ".epub":
-        html = extract_epub_html(file_path)
-        return ocr_embedded_images(html)
-    elif ext in [".txt", ".prn"]:
+        try:
+            html = extract_epub_html(file_path)
+            # If EPUB extraction produced literal nothing, fallback to TXT
+            if not html or len(str(html).strip()) < 10:
+                raise Exception("Empty EPUB")
+            return ocr_embedded_images(html) if not fast_mode else html
+        except Exception:
+            # Fallback to structural TXT extraction as a last resort
+            return extract_txt_html(file_path)
+    elif ext in [".txt", ".prn", ".text", ".md", ".log"]:
         return extract_txt_html(file_path)
+    elif ext in [".html", ".htm", ".xhtml"]:
+        # Direct HTML reading (preserving original layout)
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+                # Wrap in a lazy page container for consistency
+                return f"<div id='html-page-0' class='lazy-page-container' style='padding: 60px; max-width: 900px; margin: 0 auto; background: var(--bg-paper); border-radius: 4px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); color: #333;'>{content}</div>"
+        except:
+            return extract_txt_html(file_path)
     elif ext == ".pptx":
         return extract_pptx_html(file_path)
     elif ext in [".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif", ".tiff", ".svg", ".ico", ".jfif"]:
-        # Professional Standalone Image Processing
+        # Logic for image-to-book (already works)
         filename = os.path.basename(file_path)
-        img_np = cv2.imread(file_path)
+        try:
+            with open(file_path, "rb") as f:
+                img_data = f.read()
+                img_np = cv2.imdecode(np.frombuffer(img_data, np.uint8), cv2.IMREAD_COLOR)
+        except Exception as e:
+            return f"<div style='background: white; padding: 40px; color: red;'>Critical Read Error: {e}</div>"
         
         if img_np is None:
-             return f"<div style='background: white; padding: 40px; color: red;'>Could not read image metadata for {filename}</div>"
+             return f"<div style='background: white; padding: 40px; color: red;'>Corrupt or unsupported image format for {filename}</div>"
 
-        # 1. Build Clickable Wrapper (For AI explanation on click)
-        img_tag = f'<img src="/uploads/{filename}" style="max-width: 100%; height: auto; max-height: 900px; display: inline-block; border-radius: 12px; box-shadow: 0 6px 16px rgba(0,0,0,0.15);" />'
-        clickable_html = build_clickable_img_wrapper(img_tag, img_np)
-        
-        # 2. Extract Plain Text (Restored for Standalone Image Uploads as requested)
-        text = extract_image_text(file_path)
+        img_tag = f'<img src="/uploads/{filename}" style="max-width: 100%; height: auto; max-height: 850px; display: block; margin: 0 auto; border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.12);" />'
+        clickable_html = build_clickable_img_wrapper(img_tag, img_np, fast=False)
+        text = extract_image_text(img_np, fast=False)
         clean_text_html = ""
         for line in text.split("\n"):
             line = line.strip()
             if line:
-                clean_text_html += f'<p style="margin-bottom: 1.25em;">{line}</p>'
-                
-        final_img_area = clickable_html if clickable_html else f'<div style="text-align: center;">{img_tag}</div>'
-
-        html = f"""
-            <div id="pdf-page-0" class="lazy-page-container flex-page" data-original-width="800" style="display: flex; flex-direction: column; margin-bottom: 40px; border-bottom: 2px solid #ddd; padding: 20px 40px; gap: 30px;">
-                <div class="pdf-img-top" style="text-align: center; margin-bottom: 20px; width: 100%; display: block;">
-                    {final_img_area}
-                </div>
-                <div class="pdf-text-bottom" style="line-height: 1.8; color: var(--text-main); word-break: break-word; text-align: left; padding: 0 10px;">
-                    {clean_text_html}
+                clean_text_html += f'<p style="margin-bottom: 1.25em; font-family: \'Georgia\', serif; line-height: 1.8;">{line}</p>'
+        final_img = clickable_html if clickable_html else f'<div style="text-align: center;">{img_tag}</div>'
+        
+        return f"""
+            <div id="img-page-0" class="lazy-page-container flex-page" data-original-width="800" style="display: flex; flex-direction: column; margin-bottom: 40px; padding: 60px; gap: 40px; background: white;">
+                <div class="pdf-img-top" style="text-align: center; width: 100%;">{final_img}</div>
+                <div class="pdf-text-bottom" style="width: 100%; max-width: 850px; margin: 0 auto; color: #1e293b;">
+                    <div style="border-top: 1px solid #eee; padding-top: 30px; margin-top: 10px;">{clean_text_html}</div>
                 </div>
             </div>
         """
-        return html
     else:
-        return "<div style='background: white; padding: 40px; color: red;'>Unsupported file format</div>"
+        # ABSOLUTE FALLBACK: Instead of showing "Unsupported", try to detect content type
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                snippet = f.read(2048).strip().lower()
+                
+            # If the file looks like HTML (starts with tag or doctype), render as HTML
+            if snippet.startswith("<html") or snippet.startswith("<!doctype") or ("<p>" in snippet) or ("<h1>" in snippet):
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                return f"<div id='html-page-0' class='lazy-page-container' style='padding: 60px; max-width: 900px; margin: 0 auto; background: var(--bg-paper); border-radius: 4px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); color: #333;'>{content}</div>"
+            
+            # Otherwise, standard plain text extraction
+            return extract_txt_html(file_path)
+        except:
+            return "<div style='background: white; padding: 40px; color: red; text-align: center;'><h2>🚫 File Not Readable</h2><p>This file format is not supported or the file is corrupted.</p></div>"
 
 
 
@@ -596,25 +842,48 @@ def upload():
     conn.commit()
     conn.close()
 
-    # Run heavy extraction in a background thread — don't block the HTTP response
-    def do_extract(fpath, epath, bid):
+    threading.Thread(target=do_extract_task, args=(filepath, extracted_path, book_id), daemon=True).start()
+    return jsonify({"status": "processing", "message": "Book received! Processing in background..."})
+
+
+def background_ocr_upgrade_task(fpath, epath):
+    """Deep OCR pass in background to upgrade structural extractions."""
+    try:
+        # Perform the heavy-duty OCR now (no fast mode)
+        final_html = extract_book_html(fpath, fast_mode=False)
+        with open(epath, "w", encoding="utf-8") as f:
+            f.write(str(final_html))
+        print(f"Background OCR upgrade complete for {epath}.")
+    except Exception:
+        traceback.print_exc()
+
+def do_extract_task(fpath, epath, bid):
+    """Phase 1: Fast Start (Structural extraction only for instant availability)"""
+    try:
+        # 1. Quickly extract structure and native text, skip heavy OCR for now
+        html = extract_book_html(fpath, fast_mode=True)
+        os.makedirs(os.path.dirname(epath), exist_ok=True)
+        with open(epath, "w", encoding="utf-8") as f:
+            f.write(str(html))
+        
+        # 2. Mark book as ready so user can open it immediately
+        conn2 = get_conn()
+        conn2.execute("UPDATE books SET status='ready' WHERE id=?", (bid,))
+        conn2.commit()
+        conn2.close()
+        print(f"Book {bid} is ready (Fast Mode).")
+
+        # Phase 2: Background Knowledge Mining (Async OCR)
+        threading.Thread(target=background_ocr_upgrade_task, args=(fpath, epath), daemon=True).start()
+
+    except Exception as e:
+        traceback.print_exc()
         try:
-            html = extract_book_html(fpath)
-            with open(epath, "w", encoding="utf-8") as f:
-                f.write(html)
-            conn2 = get_conn()
-            conn2.execute("UPDATE books SET status='ready' WHERE id=?", (bid,))
-            conn2.commit()
-            conn2.close()
-        except Exception as e:
             conn2 = get_conn()
             conn2.execute("UPDATE books SET status='error' WHERE id=?", (bid,))
             conn2.commit()
             conn2.close()
-
-    import threading
-    t = threading.Thread(target=do_extract, args=(filepath, extracted_path, book_id), daemon=True)
-    t.start()
+        except: pass
 
     return jsonify({"status": "processing", "message": "Book received! Processing in background..."})
 
@@ -653,6 +922,11 @@ def tts():
         'gu': { 'female': 'gu-IN-DhwaniNeural', 'male': 'gu-IN-NiranjanNeural' },
         'mr': { 'female': 'mr-IN-AarohiNeural', 'male': 'mr-IN-ManoharNeural' },
         'bn': { 'female': 'bn-IN-TanishaaNeural', 'male': 'bn-IN-BashkarNeural' },
+        'ur': { 'female': 'ur-PK-UzmaNeural', 'male': 'ur-PK-AsadNeural' },
+        'or': { 'female': 'hi-IN-SwaraNeural', 'male': 'hi-IN-MadhurNeural' }, # Odia fallback to Hindi because Edge-TTS lacks native Odia
+        'ko': { 'female': 'ko-KR-SunHiNeural', 'male': 'ko-KR-InJoonNeural' },
+        'ja': { 'female': 'ja-JP-NanamiNeural', 'male': 'ja-JP-KeitaNeural' },
+        'th': { 'female': 'th-TH-PremwadeeNeural', 'male': 'th-TH-NiwatNeural' },
         'fr': { 'female': 'fr-FR-DeniseNeural', 'male': 'fr-FR-HenriNeural' },
         'es': { 'female': 'es-ES-ElviraNeural', 'male': 'es-ES-AlvaroNeural' },
         'de': { 'female': 'de-DE-KatjaNeural', 'male': 'de-DE-ConradNeural' },
@@ -661,13 +935,11 @@ def tts():
     }
     
     # HYBRID ENGINE: Edge Neural for major languages, gTTS for regional fallbacks
-    EDGE_SUPPORTED = ['en','ta','hi','bn','kn','te','ml','gu','mr','fr','es','de','it','zh']
+    EDGE_SUPPORTED = ['en','ta','hi','bn','kn','te','ml','gu','mr','fr','es','de','it','zh','ur','ko','ja','th']
     
-    if l in ['pa', 'or'] or l not in EDGE_SUPPORTED:
-        # PURE FALLBACK FOR PUNJABI & ODIA
+    if l not in EDGE_SUPPORTED:
+        # PURE FALLBACK FOR UNSUPPORTED REGIONS
         try:
-            from gtts import gTTS
-            import io
             tts_obj = gTTS(text=text, lang=l, slow=False)
             fp = io.BytesIO()
             tts_obj.write_to_fp(fp)
@@ -680,42 +952,29 @@ def tts():
         voice = VOICE_MAP.get(l, {}).get(gender, 'en-US-AriaNeural')
 
 
-    import edge_tts
-    from flask import Response
-
-    # HIGH-PERFORMANCE STREAMING GENERATOR
-    async def stream_audio():
+    def generate_streaming_tts():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         communicate = edge_tts.Communicate(text, voice)
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                yield chunk["data"]
-
-    try:
-        # Return a streaming response for zero initial lag
-        return Response(stream_audio_sync(stream_audio()), mimetype="audio/mpeg")
-    except Exception as e:
-        print(f"Streaming TTS failed: {e}")
-        return "TTS Failure", 500
-
-# Helper to bridge async generator to sync Flask
-def stream_audio_sync(async_gen):
-    import asyncio
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
+        async_gen = communicate.stream()
+        
         while True:
             try:
-                # We fetch chunks one by one from the async stream
+                # We pull one chunk at a time from the async iterator
                 chunk = loop.run_until_complete(async_gen.__anext__())
-                yield chunk
+                if chunk["type"] == "audio":
+                    yield chunk["data"]
             except StopAsyncIteration:
                 break
-    finally:
+            except Exception as e:
+                print(f"Streaming Error: {e}")
+                break
         loop.close()
+
+    return Response(generate_streaming_tts(), mimetype="audio/mpeg")
 
 @app.route("/book/<int:book_id>")
 def open_book(book_id):
-    import traceback
     try:
         conn = get_conn()
         cur = conn.cursor()
@@ -730,21 +989,90 @@ def open_book(book_id):
         name, file_path, extracted_path = book
         file_name = os.path.basename(file_path) if file_path else ""
 
-        if not extracted_path or not os.path.exists(extracted_path):
-            # Fallback: Extract again if file missing
-            print(f"File missing at {extracted_path}, re-extracting...")
-            html = extract_book_html(file_path)
-            os.makedirs(os.path.dirname(extracted_path), exist_ok=True)
-            with open(extracted_path, "w", encoding="utf-8") as f:
-                f.write(html)
+        # HEALING LOGIC: Detect if the book was uploaded using the old, slow Base64 method.
+        # If 'data:image' is found in a PDF file's first few thousand characters, we convert it to the new efficient format.
+        needs_migration = False
+        is_pdf = str(file_path or "").lower().endswith(".pdf")
+        
+        if os.path.exists(extracted_path) and is_pdf:
+            st = os.stat(extracted_path)
+            # If the file is > 5MB and it's a PDF, it's almost certainly bloated with Base64 images
+            if st.st_size > 5 * 1024 * 1024:
+                with open(extracted_path, "r", encoding="utf-8", errors="ignore") as f:
+                    sample = f.read(20000)
+                    if 'src="data:image/' in sample:
+                        needs_migration = True
+            
+            # AGGRESSIVE HEALING: If the PDF extraction has NO image tags but we think it should
+            # (or just to be safe if it was extracted before the external asset fix), 
+            # we trigger repair if specific markers are missing.
+            if not needs_migration:
+                try:
+                    with open(extracted_path, "r", encoding="utf-8", errors="ignore") as f:
+                        content_sample = f.read(50000)
+                    # If it's a large PDF but has NO images at all in the first 50k chars, 
+                    # it might be a failed extraction.
+                    if '<img' not in content_sample:
+                        # Check if the PDF actually has images using a fast check
+                        try:
+                            # Use absolute path to ensure fitz can find it
+                            abs_pdf_path = os.path.abspath(file_path)
+                            test_pdf = fitz.open(abs_pdf_path)
+                            if len(test_pdf) > 0 and test_pdf[0].get_images():
+                                needs_migration = True
+                            test_pdf.close()
+                        except Exception: 
+                            pass
+                except Exception:
+                    pass
+
+        if not os.path.exists(extracted_path) or needs_migration:
+            # If the file exists, return it NOW and heal in background.
+            if os.path.exists(extracted_path):
+                print(f"Book needs healing. Sending current version and starting background repair for {file_name}...")
+                with open(extracted_path, "r", encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+                threading.Thread(target=background_ocr_upgrade_task, args=(file_path, extracted_path), daemon=True).start()
+            else:
+                print(f"New book or missing extraction. Creating initial fast version for {file_name}...")
+                text = extract_book_html(file_path, fast_mode=True)
+                os.makedirs(os.path.dirname(extracted_path), exist_ok=True)
+                with open(extracted_path, "w", encoding="utf-8") as f:
+                    f.write(str(text))
+                threading.Thread(target=background_ocr_upgrade_task, args=(file_path, extracted_path), daemon=True).start()
+        else:
+            with open(extracted_path, "r", encoding="utf-8", errors="ignore") as f:
+                text = f.read()
 
         with open(extracted_path, "r", encoding="utf-8", errors="ignore") as f:
-            text = f.read()
+            text = str(f.read())
+
+        # Automatic Language Detection for Regional Support
+        detected_lang = 'en'
+        try:
+            # Sample first 1000 visible characters for faster detection
+            sample_text = re.sub(r'<[^>]+>', '', text[:5000])
+            
+            # Script-based fallback (very robust for Indian languages)
+            if re.search(r'[\u0B80-\u0BFF]', sample_text): detected_lang = 'ta'
+            elif re.search(r'[\u0900-\u097F]', sample_text): detected_lang = 'hi'
+            elif re.search(r'[\u0C00-\u0C7F]', sample_text): detected_lang = 'te'
+            elif re.search(r'[\u0C80-\u0CFF]', sample_text): detected_lang = 'kn'
+            elif re.search(r'[\u0D00-\u0D7F]', sample_text): detected_lang = 'ml'
+            elif re.search(r'[\u0980-\u09FF]', sample_text): detected_lang = 'bn'
+            elif re.search(r'[\u0A00-\u0A7F]', sample_text): detected_lang = 'pa'
+            elif re.search(r'[\u0A80-\u0AFF]', sample_text): detected_lang = 'gu'
+            elif re.search(r'[\u0D80-\u0DFF]', sample_text): detected_lang = 'si'
+            elif re.search(r'[\u3040-\u309F\u30A0-\u30FF]', sample_text): detected_lang = 'ja'
+            elif re.search(r'[\u4E00-\u9FFF]', sample_text): detected_lang = 'zh'
+        except Exception:
+            pass
 
         return jsonify({
             "name": name,
             "text": text,
-            "file_name": file_name
+            "file_name": file_name,
+            "detected_lang": detected_lang
         })
     except Exception as e:
         traceback.print_exc()
@@ -847,7 +1175,6 @@ def delete_book(book_id):
 
 @app.route("/download/<int:book_id>")
 def download_book(book_id):
-    from urllib.parse import quote
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT path, name FROM books WHERE id = ?", (book_id,))
@@ -895,83 +1222,185 @@ def original_book(book_id):
 
 @app.route("/translate_text", methods=["POST"])
 def translate_text():
-    from deep_translator import GoogleTranslator
-    import traceback
-    import re
     try:
         data = request.get_json()
         texts = data.get("texts", [])
         target_lang = data.get("target_lang", "en")
+        source_lang = data.get("source_lang", "auto")
         
         if not texts:
             return jsonify([])
             
+        # TRY SIDECAR (High-Speed Node.js Proxy)
+        try:
+            sidecar_url = f"http://localhost:{SIDECAR_PORT}/translate"
+            # Increase reliability for massive documents
+            res = requests.post(sidecar_url, json={"texts": texts, "target_lang": target_lang, "source_lang": source_lang}, timeout=30)
+            if res.ok:
+                results = res.json()
+                # Ensure ALL results were successfully translated (not null fallback in sidecar)
+                if results and len(results) == len(texts) and all(r is not None for r in results):
+                    return jsonify(results)
+                else:
+                    print(f"Sidecar health check failed: {len(results) if results else 0}/{len(texts)} translated.")
+            else:
+                print(f"Sidecar responded with error: {res.status_code}")
+        except Exception as e:
+            print(f"Sidecar Bridge Failure: {e}. Falling back to internal Python engine.")
+
+        # FALLBACK: Using a specialized Batch Translator for maximum reliability vs manual string joining
         translator = GoogleTranslator(source='auto', target=target_lang)
         
-        # We join strings to drastically reduce Google Translate API hits and avoid IP limits
-        delimiter = " ||| "
-        translated_texts = []
-        
-        chunks = []
-        current_chunk = []
-        current_len = 0
-        
-        for text in texts:
-            text_len = len(text)
+        # PARTITIONED BATCHING: Prevents URI overflow and provides faster individual feedback
+        batches = []
+        current_batch = []
+        for t in texts:
+            if len(current_batch) >= 25: 
+                batches.append(current_batch)
+                current_batch = []
+            current_batch.append(str(t))
+        if current_batch:
+            batches.append(current_batch)
             
-            # Massive single block handler
-            if text_len > 4000:
-                if current_chunk:
-                    chunks.append(current_chunk)
-                    current_chunk = []
-                    current_len = 0
-                chunks.append([text[:4500]]) # Safe cutoff
-                continue
-                
-            if current_len + text_len > 4000:
-                chunks.append(current_chunk)
-                current_chunk = []
-                current_len = 0
-                
-            current_chunk.append(text)
-            current_len += text_len + len(delimiter)
-                    
-        if current_chunk:
-            chunks.append(current_chunk)
+        print(f"Backend translating {len(texts)} text nodes in {len(batches)} batches...")
             
-        if not hasattr(app, "translation_cache"):
-            app.translation_cache = {}
-
-        # Parallel Translation for High Speed
-        from concurrent.futures import ThreadPoolExecutor
-        
-        def translate_single_chunk(chunk):
-            if not chunk: return []
+        def translate_single_batch(batch):
+            if not batch: return []
             try:
-                clean_chunk = [str(s).strip() if s and str(s).strip() else "..." for s in chunk]
-                return translator.translate_batch(clean_chunk)
+                # 1. Use the library's native batch translator (handles mapping internally)
+                # This is VASTLY more reliable than manual delimiter joining for short text.
+                return translator.translate_batch(batch)
             except Exception as e:
-                print(f"Batch translation error: {e}")
-                return [translator.translate(s) if s else "" for s in chunk]
+                print(f"Batch translation failed ({e}). Attempting granular recovery...")
+                results = []
+                # 2. INDIVIDUAL FALLBACK: Ensure one bad node doesn't kill the whole batch
+                for s in batch:
+                    # Clean input (strip whitespace but remember it for return)
+                    clean_s = s.strip()
+                    if not clean_s:
+                        results.append(s)
+                        continue
+                        
+                    # Individual Retry with small backoff
+                    success = False
+                    for attempt in range(2):
+                        try:
+                            time.sleep(attempt * 0.5) 
+                            translated = translator.translate(clean_s)
+                            if translated:
+                                # Preserve original casing/spacing style where possible
+                                results.append(translated)
+                                success = True
+                                break
+                        except:
+                            continue
+                    if not success:
+                        results.append(s) # Safety: Return original if even individual fail
+                return results
 
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            translated_chunks = list(executor.map(translate_single_chunk, chunks))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+            batch_results = list(executor.map(translate_single_batch, batches))
             
-        translated_texts = [item for sublist in translated_chunks for item in sublist]
+        translated_texts = [item for sublist in batch_results for item in sublist]
 
-        # Force identical array lengths
+        # Force identical array lengths to ensure DOM mapping doesn't break
         if len(translated_texts) != len(texts):
-            print("CRITICAL LENGTH MISMATCH", len(translated_texts), len(texts))
-            return jsonify(texts) # Return original English rather than breaking the DOM mapping
+            print(f"CRITICAL MISMATCH after fallback: {len(translated_texts)} vs {len(texts)}")
+            return jsonify(texts)
 
         return jsonify(translated_texts)
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
-@app.route("/summarize", methods=["POST"])
-def summarize_text():
-    import traceback
+
+# --- BOOKMARK SYSTEM ---
+
+@app.route("/save_bookmark", methods=["POST"])
+def save_bookmark():
+    try:
+        data = request.get_json()
+        book_id = data.get("book_id")
+        page_num = data.get("page_number", 1)
+        scroll_y = data.get("scroll_y", 0)
+        char_index = data.get("char_index", 0)
+        node_index = data.get("node_index", -1)
+        node_offset = data.get("node_offset", 0)
+        lang_code = data.get("lang_code", "en")
+        label = data.get("label", f"Page {page_num}")
+        force_replace = data.get("replace", False)
+
+        if not book_id:
+            return jsonify({"error": "No book selected"}), 400
+
+        conn = get_conn()
+        cur = conn.cursor()
+        
+        # Check for existing bookmark to enforce single-bookmark-per-book
+        cur.execute("SELECT id FROM bookmarks WHERE book_id = ?", (book_id,))
+        existing = cur.fetchone()
+        
+        if existing and not force_replace:
+            conn.close()
+            return jsonify({"status": "exists", "message": "A bookmark already exists for this book. Replace it?"})
+        
+        if existing:
+            # Update current bookmark
+            cur.execute(
+                "UPDATE bookmarks SET page_number = ?, scroll_y = ?, char_index = ?, node_index = ?, node_offset = ?, label = ?, lang_code = ?, created_at = CURRENT_TIMESTAMP WHERE book_id = ?",
+                (page_num, scroll_y, char_index, node_index, node_offset, label, lang_code, book_id)
+            )
+        else:
+            # Insert new one
+            cur.execute(
+                "INSERT INTO bookmarks(book_id, page_number, scroll_y, char_index, node_index, node_offset, label, lang_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (book_id, page_num, scroll_y, char_index, node_index, node_offset, label, lang_code)
+            )
+            
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "success", "message": "Bookmark updated!"})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/bookmarks/<int:book_id>", methods=["GET"])
+def get_bookmarks(book_id):
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT id, page_number, scroll_y, char_index, node_index, node_offset, label, lang_code, created_at FROM bookmarks WHERE book_id = ? ORDER BY created_at DESC",
+            (book_id,)
+        )
+        bookmarks = [
+            {
+                "id": r[0], "page_number": r[1], "scroll_y": r[2], "char_index": r[3], 
+                "node_index": r[4], "node_offset": r[5], "label": r[6], "lang_code": r[7], "created_at": r[8]
+            }
+            for r in cur.fetchall()
+        ]
+        conn.close()
+        return jsonify(bookmarks)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/delete_bookmark/<int:bookmark_id>", methods=["POST"])
+def delete_bookmark(bookmark_id):
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM bookmarks WHERE id = ?", (bookmark_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "success"})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/summarize', methods=['POST'])
+def summarize():
     try:
         data = request.get_json()
         text = data.get("text", "")
@@ -987,8 +1416,6 @@ def summarize_text():
             return jsonify({"summary": "Text is too short to summarize. Please highlight a larger section."})
 
         # Pure Python Extractive Summarization (Fallback/Offline mode without heavy NLP dependencies)
-        import re
-        from collections import defaultdict
         
         # 1. Clean and tokenize sentences
         sentences = re.split(r'(?<=[.!?])\s+', text.strip())
@@ -998,30 +1425,33 @@ def summarize_text():
         # 2. Word frequency calculation (ignore common stop words)
         stop_words = set(['the', 'is', 'in', 'and', 'to', 'a', 'of', 'for', 'it', 'on', 'with', 'as', 'by', 'that', 'this', 'an', 'are', 'was', 'be', 'or', 'at', 'from'])
         words = re.findall(r'\w+', text.lower())
-        freq_table = defaultdict(int)
+        freq_table = {}
         for word in words:
             if word not in stop_words:
-                freq_table[word] += 1
+                freq_table[word] = freq_table.get(word, 0) + 1
                 
         # 3. Score sentences based on word frequency
-        sentence_scores = defaultdict(int)
+        sentence_scores = {}
         for i, sentence in enumerate(sentences):
             words_in_sentence = re.findall(r'\w+', sentence.lower())
             
             sentence_score = 0
             for word in words_in_sentence:
                 if word in freq_table:
-                    sentence_score += freq_table[word]
+                    sentence_score = int(sentence_score) + int(freq_table.get(word, 0))
             
             # Normalize score by sentence length to prevent unfairly weighting extremely long run-ons
             if len(words_in_sentence) > 0:
-                sentence_scores[i] = sentence_score / len(words_in_sentence)
+                sentence_scores[i] = float(sentence_score) / float(len(words_in_sentence))
 
         # 4. Extract top sentences (aim for ~30% compression, max 6 bullet points)
         target_length = max(2, min(6, int(len(sentences) * 0.35)))
         
         # Get the indices of the highest-scoring sentences
-        top_sentence_indices = sorted(sentence_scores, key=sentence_scores.get, reverse=True)[:target_length]
+        all_indices = sorted(sentence_scores.keys(), key=lambda k: float(sentence_scores[k]), reverse=True)
+        top_sentence_indices = []
+        for i in range(min(len(all_indices), target_length)):
+            top_sentence_indices.append(all_indices[i])
         
         # 5. Re-sort chronologically so the summary reads in the correct order
         top_sentence_indices.sort()
@@ -1070,9 +1500,8 @@ def get_notes(book_id):
         # Auto-translate if not in original/english
         if lang and lang != 'en' and lang != 'orig':
             try:
-                from deep_translator import GoogleTranslator
                 content = GoogleTranslator(source='auto', target=lang).translate(content)
-            except:
+            except Exception:
                 pass # Fallback to original if translation fails
         notes.append({"id": note_id, "content": content})
         
@@ -1123,11 +1552,8 @@ def download_notes(book_id):
     if not notes:
         return "No notes found to download.", 400
 
-    from io import BytesIO, StringIO
-    
     if format_type == "docx":
-        from docx import Document
-        doc = Document()
+        doc = docx.Document()
         doc.add_heading(f'Study Notes: {book_name}', 0)
         doc.add_paragraph('Collected using AI Book Reader').italic = True
         
@@ -1141,7 +1567,6 @@ def download_notes(book_id):
         return send_file(target, as_attachment=True, download_name=f"Notes_{book_name}.docx", mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
     elif format_type == "pdf":
-        from fpdf import FPDF
         class PDF(FPDF):
             def header(self):
                 self.set_font('helvetica', 'B', 15)
@@ -1180,11 +1605,11 @@ def download_notes(book_id):
 
 @app.route("/generate_revision", methods=["POST"])
 def generate_revision():
-    import re
-    from collections import defaultdict
     try:
         data = request.get_json()
         book_id = data.get("book_id")
+        
+        target_lang = data.get("target_lang", "en")
         
         if not book_id:
             return jsonify({"error": "No book selected"}), 400
@@ -1197,9 +1622,9 @@ def generate_revision():
         text = " ".join(sentences).lower()
         stop_words = set(['the', 'is', 'in', 'and', 'to', 'a', 'of', 'for', 'it', 'on', 'with', 'as', 'by', 'that', 'this', 'an', 'are', 'was', 'be', 'or', 'at', 'from', 'their', 'which', 'will', 'have', 'been', 'were', 'about'])
         words = re.findall(r'\b\w{4,}\b', text)
-        freq = defaultdict(int)
+        freq = {}
         for w in words:
-            if w not in stop_words: freq[w] += 1
+            freq[w] = freq.get(w, 0) + 1
             
         # Score each sentence
         scores = []
@@ -1211,11 +1636,19 @@ def generate_revision():
             scores.append((score / len(words_in_s), i, s))
             
         # Pick top 25 diverse points
-        top_points = sorted(scores, key=lambda x: x[0], reverse=True)[:30]
+        top_points = sorted(scores, key=lambda x: float(x[0]), reverse=True)[:30]
         # Re-sort by book order
         top_points.sort(key=lambda x: x[1])
         
         revision_points = [p[2].strip() for p in top_points]
+        
+        if target_lang != 'en' and target_lang != 'orig':
+            try:
+                translator = GoogleTranslator(source='auto', target=target_lang)
+                revision_points = [translator.translate(pt) for pt in revision_points]
+            except Exception as e:
+                print(f"Revision Translation Error: {e}")
+                
         return jsonify({"revision_points": revision_points})
         
     except Exception as e:
@@ -1223,32 +1656,48 @@ def generate_revision():
 
 @app.route("/download_revision/<book_id>", methods=["GET"])
 def download_revision(book_id):
-    from io import BytesIO
-    import re
-    from collections import defaultdict
     try:
+        target_lang = request.args.get("target_lang", "en")
+        
         sentences = get_book_sentences(book_id)
         if not sentences: return "Book not found", 404
         
         # Generation Logic (Duplicated for standalone download)
-        text = " ".join(sentences).lower()
+        text = str(" ".join(sentences).lower())
         stop_words = set(['the', 'is', 'in', 'and', 'to', 'a', 'of', 'for', 'it', 'on', 'with', 'as', 'by', 'that', 'this', 'an', 'are', 'was', 'be', 'or', 'at', 'from'])
         words = re.findall(r'\b\w{4,}\b', text)
-        freq = defaultdict(int)
+        freq = {}
         for w in words:
-            if w not in stop_words: freq[w] += 1
+            freq[w] = int(freq.get(w, 0)) + 1
         
         scores = []
         for i, s in enumerate(sentences):
             words_in_s = re.findall(r'\b\w+\b', s.lower())
             if len(words_in_s) < 12 or len(words_in_s) > 50: continue
-            score = sum(freq[w] for w in words_in_s if w in freq)
-            scores.append((score / len(words_in_s), i, s))
+            score = float(sum(freq[w] for w in words_in_s if w in freq))
+            scores.append((score / float(len(words_in_s)), i, s))
             
-        top_points = sorted(scores, key=lambda x: x[0], reverse=True)[:35]
-        top_points.sort(key=lambda x: x[1])
+        all_top = sorted(scores, key=lambda x: float(str(x[0])), reverse=True)
+        top_points = []
+        for i in range(min(len(all_top), 35)):
+            top_points.append(all_top[i])
+        top_points.sort(key=lambda x: int(x[1]))
         
-        book_name = next((b['name'] for b in Library.list_books() if b['id'] == book_id), "Book")
+        revision_points = [p[2].strip() for p in top_points]
+        
+        if target_lang != 'en' and target_lang != 'orig':
+            try:
+                translator = GoogleTranslator(source='auto', target=target_lang)
+                revision_points = [translator.translate(pt) for pt in revision_points]
+            except Exception as e:
+                print(f"Revision Content Translation Error: {e}")
+        
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM books WHERE id = ?", (book_id,))
+        row = cur.fetchone()
+        conn.close()
+        book_name = row[0] if row else "Book"
         
         content = f"REVISION GUIDE: {book_name}\n" + "="*40 + "\n\n"
         for i, p in enumerate(top_points):
@@ -1258,12 +1707,69 @@ def download_revision(book_id):
     except Exception as e:
         return str(e), 500
 
+def translate_batch_fast(texts, target_lang):
+    """High-concurrency batch translation with Sidecar support and reliable fallback."""
+    if not texts or not target_lang or target_lang in ["en", "orig"]:
+        return texts
+    
+    # Pre-clean: strip and filter out empty strings to avoid translation hits
+    to_translate = []
+    mapping = [] # Map index from texts to to_translate index
+    
+    for i, t in enumerate(texts):
+        if t and t.strip():
+            mapping.append(len(to_translate))
+            to_translate.append(str(t).strip())
+        else:
+            mapping.append(-1)
+            
+    if not to_translate:
+        return texts
+
+    translated_pool = []
+    
+    # 1. ATTEMPT SIDECAR (Preferred for Speed/Concurrency)
+    try:
+        sidecar_url = f"http://localhost:{SIDECAR_PORT}/translate"
+        # Increased timeout to 120s (sidecar is now faster with concurrent batches, but reliability is key)
+        res = requests.post(sidecar_url, json={"texts": to_translate, "target_lang": target_lang}, timeout=120)
+        if res.ok:
+            data = res.json()
+            if data and len(data) == len(to_translate) and all(d is not None for d in data):
+                translated_pool = data
+    except Exception as e:
+        print(f"Quiz Sidecar Bridge Failure: {e}")
+
+    # 2. FALLBACK to Python Library (Batching for safety)
+    if not translated_pool:
+        try:
+            translator = GoogleTranslator(source='auto', target=target_lang)
+            batch_size = 15 # conservative for deep_translator stability
+            for i in range(0, len(to_translate), batch_size):
+                batch = to_translate[i : i + batch_size]
+                try:
+                    translated_pool.extend(translator.translate_batch(batch))
+                except Exception as e:
+                    # Individual retry fallback
+                    for item in batch:
+                        try: translated_pool.append(translator.translate(item))
+                        except: translated_pool.append(item)
+        except Exception as e:
+            print(f"Quiz Fallback Failed: {e}")
+            return texts
+            
+    # 3. REASSEMBLE
+    results = []
+    for i, idx in enumerate(mapping):
+        if idx == -1:
+            results.append(texts[i])
+        else:
+            results.append(translated_pool[idx] if idx < len(translated_pool) else texts[i])
+            
+    return results
+
 @app.route("/generate_quiz", methods=["POST"])
-
 def generate_quiz():
-    import traceback, random, re
-    from collections import defaultdict
-
     try:
         data = request.get_json()
         text = data.get("text", "")
@@ -1272,10 +1778,16 @@ def generate_quiz():
 
         if book_id and not text:
             sentences = get_book_sentences(book_id)
-            text = " ".join(sentences)
+            # Randomized window ensure quiz covers various parts and prevents 500+ page parsing hangs
+            random.shuffle(sentences)
+            text = " ".join(sentences[:500])
+        elif text and len(text) > 150000:
+            # Massive selections (20+ pages) also need clamping for server safety
+            text = text[:150000]
 
-        if not text or len(text.strip()) < 100:
-            return jsonify({"error": "Content too sparse to generate a quality quiz."}), 400
+
+        if not text or len(text.strip()) < 40:
+            return jsonify({"error": "Selection is too short. Please highlight a larger section or a full paragraph to generate a quiz."}), 400
 
         # 1. CLEAN & TOKENIZE
         sentences = re.split(r'(?<=[.!?])\s+', text.strip())
@@ -1283,12 +1795,29 @@ def generate_quiz():
         
         # 2. KEYWORDS EXTRACTION (Frequent nouns/concepts)
         stop_words = set(['the', 'and', 'that', 'with', 'from', 'this', 'their', 'which', 'will', 'have', 'been', 'were', 'about'])
-        freq = defaultdict(int)
+        freq = {}
         for w in all_words:
-            if w not in stop_words: freq[w] += 1
+            if w not in stop_words:
+                freq[w] = int(freq.get(w, 0)) + 1
         
-        top_keywords = sorted(freq, key=freq.get, reverse=True)[:50]
+        raw_keywords = sorted(freq.keys(), key=lambda k: float(freq[k]), reverse=True)
+        top_keywords = []
+        for i in range(min(len(raw_keywords), 100)):
+            top_keywords.append(str(raw_keywords[i]))
         
+        # Scaling logic: More text = More questions (up to 50 for massive books in English)
+        mcq_limit = min(50, max(10, len(sentences) // 15))
+        short_limit = min(40, max(8, len(sentences) // 25))
+        long_limit = min(20, max(5, len(sentences) // 40))
+
+        # TIGHTEN LIMITS FOR TRANSLATED QUIZZES: 
+        # Translation hits (Sidecar) take significantly longer; keep it fast!
+        target_lang = data.get("target_lang", "en")
+        if target_lang and target_lang not in ["en", "orig"]:
+            mcq_limit = min(15, mcq_limit)
+            short_limit = min(10, short_limit)
+            long_limit = min(5, long_limit)
+
         questions = []
 
         if quiz_type == "mcq":
@@ -1296,7 +1825,7 @@ def generate_quiz():
             candidates = [s for s in sentences if re.search(r'\b(is|was|means|refers to|defined as|called|known as)\b', s, re.I)]
             random.shuffle(candidates)
             
-            for s in candidates[:25]:
+            for s in candidates[:max(mcq_limit * 2, 50)]:
                 words = re.findall(r'\b\w+\b', s)
                 possible_masks = [w for w in words if w.lower() in top_keywords and len(w) > 3]
                 if not possible_masks: continue
@@ -1305,12 +1834,13 @@ def generate_quiz():
                 if len(distractors) < 3: continue
                 options = random.sample(distractors, 3) + [mask]
                 random.shuffle(options)
-                q_text = re.sub(r'\b' + re.escape(mask) + r'\b', '__________', s, count=1, flags=re.I)
+                q_text = re.sub(r'\b' + re.escape(mask) + r'\b', '__________', str(s), count=1, flags=re.I)
                 questions.append({"question": q_text, "options": options, "answer": mask, "type": "mcq"})
-                if len(questions) >= 10: break
+                if len(questions) >= mcq_limit: break
 
         elif quiz_type in ["short", "long"]:
             # Standard Academic Question Templates
+            # ... (temps logic)
             short_temps = [
                 "Define {concept}.", 
                 "What is meant by {concept}?", 
@@ -1328,11 +1858,10 @@ def generate_quiz():
 
             # High-Performance NLP Logic using TextBlob
             try:
-                from textblob import TextBlob
                 blob = TextBlob(text)
                 # Group noun phrases and filter out junk
                 concepts = [str(np).lower() for np in blob.noun_phrases if len(str(np)) > 3]
-            except:
+            except Exception:
                 concepts = [k for k in top_keywords if len(str(k)) > 4]
 
             # Better stopword and diversity filtering
@@ -1344,9 +1873,7 @@ def generate_quiz():
             
             random.shuffle(final_concepts)
 
-            # Scale count based on text depth
-            target_count = min(12, max(5, len(sentences) // 20))
-            if quiz_type == "long": target_count = min(8, max(3, len(sentences) // 40))
+            target_count = short_limit if quiz_type == "short" else long_limit
 
             for concept in final_concepts:
                 if len(questions) >= target_count: break
@@ -1364,14 +1891,19 @@ def generate_quiz():
                             })
                         else:
                             # Contextual Multi-Sentence Answer
-                            context = sentences[max(0, i-1):min(len(sentences), i+5)]
+                            ctx_start = max(0, i-1)
+                            ctx_end = min(len(sentences), i+5)
+                            context = []
+                            for idx in range(ctx_start, ctx_end):
+                                context.append(sentences[idx])
+                            
                             template = random.choice(long_temps)
                             formatted_answer = f"🔍 **Professional Summary: {concept_display}**\n\n"
-                            formatted_answer += f"**Primary Explanation**: {context[0].strip()}\n\n"
+                            formatted_answer += f"**Primary Explanation**: {str(context[0]).strip()}\n\n"
                             formatted_answer += "**Detailed Context**:\n"
                             for line in context[1:]:
-                                if len(line.strip()) > 10:
-                                    formatted_answer += f"• {line.strip()}\n"
+                                if len(str(line).strip()) > 10:
+                                    formatted_answer += f"• {str(line).strip()}\n"
                             
                             questions.append({
                                 "question": template.format(concept=concept_display),
@@ -1391,20 +1923,44 @@ def generate_quiz():
                 })
                 if quiz_type == "mcq": random.shuffle(questions[-1]["options"])
 
-        # MULTI-LANGUAGE SUPPORT: Translate the full quiz if target_lang provided
+        # --- NEW: High-Speed Batch Translation Pass ---
         target_lang = data.get("target_lang", "en")
         if target_lang and target_lang not in ["en", "orig"]:
-            from deep_translator import GoogleTranslator
             try:
-                translator = GoogleTranslator(source='auto', target=target_lang)
-                for q in questions:
-                    q["question"] = translator.translate(q["question"])
+                # 1. Flatten all strings to translate (Questions + Options + Answers)
+                pool = []
+                structure = [] # Map: (question_index, field_name, option_index)
+                for i, q in enumerate(questions):
+                    # Question Text
+                    structure.append((i, "question", None))
+                    pool.append(q["question"])
+                    # Options (if MCQ)
                     if q.get("options"):
-                        q["options"] = [translator.translate(opt) for opt in q["options"]]
+                        for j, opt in enumerate(q["options"]):
+                            structure.append((i, "options", j))
+                            pool.append(opt)
+                    # Answer
                     if q.get("answer"):
-                        q["answer"] = translator.translate(q["answer"])
+                        structure.append((i, "answer", None))
+                        pool.append(q["answer"])
+
+                # 2. PERFORM BATCH HIT
+                translated_pool = translate_batch_fast(pool, target_lang)
+
+                # 3. RE-INJECT
+                if len(translated_pool) == len(pool):
+                    for idx, (q_idx, field, opt_idx) in enumerate(structure):
+                        if field == "question":
+                            questions[q_idx]["question"] = translated_pool[idx]
+                        elif field == "options":
+                            questions[q_idx]["options"][opt_idx] = translated_pool[idx]
+                        elif field == "answer":
+                            questions[q_idx]["answer"] = translated_pool[idx]
+                else: 
+                     print(f"Quiz translation count mismatch: {len(translated_pool)} vs {len(pool)}")
             except Exception as e:
-                print(f"Quiz translation error: {e}")
+                print(f"Quiz translation pipeline failed: {e}")
+                traceback.print_exc()
 
         return jsonify({"questions": questions, "type": quiz_type})
 
@@ -1413,9 +1969,7 @@ def generate_quiz():
         return jsonify({"error": "Quiz generation failed."}), 500
 
 @app.route("/ask", methods=["POST"])
-
 def ask_question():
-    import traceback
     try:
         data = request.get_json()
         question = data.get("question", "")
@@ -1429,7 +1983,6 @@ def ask_question():
         if book_id:
             sentences = get_book_sentences(book_id)
         elif text:
-            import re
             sentences = re.split(r'(?<=[.!?])\s+', text)
         else:
             return jsonify({"answer": "Ensure a book is open."})
@@ -1446,12 +1999,12 @@ def ask_question():
             question_words = [w.lower() for w in re.findall(r'\w+', question)]
             
         # 3. Calculate Inverse Document Frequency (IDF) for question words
-        word_doc_count = defaultdict(int)
+        word_doc_count = {}
         for sentence in sentences:
             sentence_words = set(re.findall(r'\w+', sentence.lower()))
             for qw in question_words:
                 if qw in sentence_words:
-                    word_doc_count[qw] += 1
+                    word_doc_count[qw] = int(word_doc_count.get(qw, 0)) + 1
                     
         num_sentences = len(sentences)
         idf = {}
@@ -1474,14 +2027,17 @@ def ask_question():
             
             if score > 0:
                 # Add slight penalty for extremely long sentences to prefer concise answers
-                length_penalty = math.log(max(10, len(sentence_words)))
-                sentence_scores[i] = score / length_penalty
+                length_penalty = math.log(float(max(10, len(sentence_words))))
+                sentence_scores[i] = float(score) / float(length_penalty)
                 
         if not sentence_scores:
             return jsonify({"answer": "I couldn't find an answer to that in the current book."})
             
         # 5. Extract top 2 most relevant sentences
-        best_indices = sorted(sentence_scores, key=sentence_scores.get, reverse=True)[:2]
+        all_searched = sorted(sentence_scores.keys(), key=lambda k: float(sentence_scores[k]), reverse=True)
+        best_indices = []
+        for i in range(min(len(all_searched), 2)):
+            best_indices.append(all_searched[i])
         best_indices.sort() # keep chronological
         
         answer = " ".join([sentences[idx].strip() for idx in best_indices])
@@ -1539,7 +2095,10 @@ def define_word():
                     definition_sentences.append(s)
         
         if definition_sentences:
-            return jsonify({"answer": " ".join(definition_sentences[:2])})
+            combined_def = ""
+            for i in range(min(len(definition_sentences), 2)):
+                combined_def += str(definition_sentences[i]) + " "
+            return jsonify({"answer": combined_def.strip()})
             
         # 2. Try Dictionary Definitions first (High signal)
         try:
@@ -1554,7 +2113,11 @@ def define_word():
                         if len(entry) > 1 and entry[1]:
                             for subentry in entry[1]:
                                 if subentry[0]: defs.append(subentry[0])
-                    if defs: return jsonify({"answer": " 📖 Definition: " + "; ".join(defs[:2])})
+                    if defs: 
+                        combined_dict_def = ""
+                        for i in range(min(len(defs), 2)):
+                            combined_dict_def += str(defs[i]) + "; "
+                        return jsonify({"answer": " 📖 Definition: " + combined_dict_def.strip("; ")})
 
             # Second try: Transliterated/English fallback
             if lang != 'en':
@@ -1573,7 +2136,16 @@ def define_word():
                                 joined_en = "; ".join(en_defs[:2])
                                 final_res = requests.get(f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl={lang}&dt=t&q={joined_en}", timeout=3)
                                 if final_res.ok:
-                                    trans_back = "".join([p[0] for p in final_res.json()[0] if p[0]])
+                                    back_parts = []
+                                    raw_parts = final_res.json()[0]
+                                    for p in raw_parts:
+                                        if p[0]: back_parts.append(str(p[0]))
+                                    trans_back = "".join(back_parts)
+                                    
+                                    # Fallback slice removal
+                                    limit_defs = []
+                                    for i in range(min(len(en_defs), 2)): limit_defs.append(en_defs[i])
+                                    
                                     return jsonify({"answer": f" 📖 Definition ({english_word}): " + trans_back})
         except Exception as e:
             print("Advanced Dict Fallback Error:", e)
@@ -1647,9 +2219,6 @@ def ask_assistant():
 
 @app.route("/explain_image", methods=["POST"])
 def explain_image():
-    import traceback
-    import urllib.parse
-    import io
     try:
         data = request.get_json()
         # Support both 'src' (legacy/original) and 'image' (new frontend logic)
@@ -1663,7 +2232,6 @@ def explain_image():
         img_np = None
         
         if src.startswith("data:image"):
-            import base64
             # Extract base64 part safely
             if "," in src:
                 encoded_data = src.split(",", 1)[1]
@@ -1681,7 +2249,6 @@ def explain_image():
                     
                     # Fallback to PIL (handles more formats like GIF, some JPX, TIFF)
                     if img_np is None:
-                        from PIL import Image
                         pil_img = Image.open(io.BytesIO(raw)).convert("RGB")
                         img_np = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
                 except Exception as e:
@@ -1690,11 +2257,10 @@ def explain_image():
         elif "/uploads/" in src:
             filename = src.split("/uploads/")[-1]
             filename = filename.split("?")[0].split("#")[0]
-            filepath = os.path.join(UPLOAD_FOLDER, urllib.parse.unquote(filename))
+            filepath = os.path.join(UPLOAD_FOLDER, unquote(filename))
             img_np = cv2.imread(filepath)
             
         elif src.startswith("http"):
-            import urllib.request
             try:
                 req = urllib.request.Request(src, headers={'User-Agent': 'Mozilla/5.0'})
                 with urllib.request.urlopen(req, timeout=5) as resp:
@@ -1702,7 +2268,6 @@ def explain_image():
                     nparr = np.frombuffer(raw, np.uint8)
                     img_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                     if img_np is None:
-                        from PIL import Image
                         pil_img = Image.open(io.BytesIO(raw)).convert("RGB")
                         img_np = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
             except Exception as e:
@@ -1716,37 +2281,33 @@ def explain_image():
         # --- Hybrid Explanation Strategy ---
         explanation = ""
         ocr_text = ""
+        ai_caption = ""
+        faces = []
         
         # 1. Run OCR (Tesseract) to find labels/data
         try:
             gray = cv2.cvtColor(img_np, cv2.COLOR_BGR2GRAY)
-            # Denoise and sharpen for better OCR on small/blurry text
+            # Denoise and sharpen for better OCR
             gray = cv2.GaussianBlur(gray, (0,0), 3)
             gray = cv2.addWeighted(gray, 1.5, gray, -0.5, 0)
             
             ocr_text_raw = pytesseract.image_to_string(gray, config='--oem 3 --psm 6').strip()
-            
-            # CLEAN OCR: Remove common "garbage" characters detected in low-res or stylized text
             ocr_text = re.sub(r'[^a-zA-Z0-9\s.,!?:;@&()\"\'-]', '', ocr_text_raw)
-            ocr_text = re.sub(r'\s+', ' ', ocr_text).strip()
-            # If ocr_text became empty after aggressive cleaning, use raw but trimmed if it has alphabets
             if not ocr_text and re.search(r'[a-zA-Z]{3,}', ocr_text_raw):
                 ocr_text = ocr_text_raw.strip()
-        except:
+        except Exception:
             pass
 
-        # 2. Run AI Captioning
-        ai_caption = ""
         try:
-            from transformers import pipeline
-            from PIL import Image
             img_pil = Image.fromarray(cv2.cvtColor(img_np, cv2.COLOR_BGR2RGB))
             
             if not hasattr(app, "image_captioner"):
                 try:
-                    # USE A LIGHTER MODEL: ViT-GPT2 is ~3x smaller/faster than BLIP on CPU
-                    app.image_captioner = pipeline("image-to-text", model="nlp-connect/vit-gpt2-image-captioning", device=-1)
-                except:
+                    if pipeline:
+                        app.image_captioner = pipeline("image-to-text", model="nlp-connect/vit-gpt2-image-captioning", device=-1)
+                    else:
+                        app.image_captioner = None
+                except Exception:
                     app.image_captioner = None
                     
             if app.image_captioner:
@@ -1758,23 +2319,37 @@ def explain_image():
             # --- Fallback: Advanced Heuristics if AI fails ---
             if not ai_caption:
                 # 1. Face Detection (Detect if it's a person/baby)
-                gray = cv2.cvtColor(img_np, cv2.COLOR_BGR2GRAY)
-                face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-                faces = face_cascade.detectMultiScale(gray, 1.3, 5)
-                if len(faces) > 0:
-                    ai_caption = "A close-up of a person's face"
-                    if "BABY" in (context or "").upper() or "LITTLE" in (context or "").upper():
-                        ai_caption = "A visual of a small baby"
+                try:
+                    gray = cv2.cvtColor(img_np, cv2.COLOR_BGR2GRAY)
+                    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+                    detected_faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+                    faces = detected_faces if detected_faces is not None else []
+                    if len(faces) > 0:
+                        ai_caption = "A close-up of a person's face"
+                        if "BABY" in (context or "").upper() or "LITTLE" in (context or "").upper():
+                            ai_caption = "A visual of a small baby"
+                except Exception:
+                    faces = []
                 
                 # 2. Contextual Inference based on OCR keywords
-                if "HARRY POTTER" in ocr_text.upper() or "WHO LIVED" in ocr_text.upper():
-                    if len(faces) > 0 or "BABY" in (context or "").upper():
-                        ai_caption = "An illustration of baby Harry Potter (The Boy Who Lived)"
-                    else:
-                        ai_caption = "An illustration for the Harry Potter series"
-
+                if len(ocr_text) > 3:
+                    u_ocr = ocr_text.upper()
+                    u_ctx = (context or "").upper()
+                    if "HARRY POTTER" in u_ocr or "WHO LIVED" in u_ocr or "HARRY POTTER" in u_ctx or "WHO LIVED" in u_ctx:
+                        if len(faces) > 0 or "BABY" in u_ctx:
+                            ai_caption = "An illustration of baby Harry Potter (The Boy Who Lived)"
+                        else:
+                            ai_caption = "An illustration for the Harry Potter series"
+                    elif "BABY" in u_ctx:
+                         ai_caption = "A visual depiction of a small baby"
+                elif "BABY" in (context or "").upper():
+                     ai_caption = "An illustration of a baby"
         except Exception as ai_e:
             print("AI Captioning failed:", ai_e)
+        
+        # FINAL SANITY: Remove noise OCR (single letters) from the final output comparison
+        if len(ocr_text) < 4:
+            ocr_text = ""
 
         # 3. Analyze and Combine (Detailed Visual Logic)
         is_diagram = any(kw in (ocr_text + ai_caption).lower() for kw in ["diagram", "chart", "graph", "figure", "fig.", "illustration", "table", "cycle", "process", "thank you", "slide", "presentation"])
@@ -1804,10 +2379,6 @@ def explain_image():
             else:
                 explanation += "Note: Vision AI is starting up or unavailable, using high-precision OCR for internal details."
                 
-        # Priority 3: Fallback to Context only
-        elif context:
-            explanation = f"🔍 CONTEXTUAL CLUE: I can't identify the visual details clearly, but based on the book context nearby, this image illustrates concepts relevant to: \"{context[:200]}...\""
-            
         else:
             explanation = "This image appears to be an illustration or decorative element. Try highlighting surrounding text to help me understand its theme!"
 
@@ -1817,7 +2388,6 @@ def explain_image():
         traceback.print_exc()
         return jsonify({"error": "Failed to analyze the image."}), 500
 
-
 @app.route("/analyze_emotion", methods=["POST"])
 def analyze_emotion():
     try:
@@ -1826,39 +2396,292 @@ def analyze_emotion():
         if not text:
             return jsonify({"emotion": "neutral"})
 
-        # 1. Rule-based Fast Emotion Mapping (Very stable and instant)
+        # 1. Rule-based Fast Emotion Mapping
         emotion_rules = {
             "happy": ["happy", "joy", "wonderful", "delighted", "smile", "laugh", "cheerful", "magic", "sunshine", "hope", "love", "friend", "proud", "achieved"],
             "sad": ["sad", "cried", "tear", "unhappy", "lost", "death", "lonely", "darkness", "misery", "sorrow", "alone", "grave", "hurt", "pain", "hopeless"],
             "angry": ["angry", "rage", "hate", "fight", "shout", "mad", "fury", "annoyed", "bitter", "punch", "strike", "vengeance"],
             "fear": ["fear", "scared", "terrified", "ghost", "dark", "shadow", "unknown", "scary", "shiver", "beast", "creepy", "dangerous", "nervous"],
-            "excited": ["excited", "amazing", "wow", "unbelievable", "can't wait", "next", "incredible", "thrilled", "shocked", "surprised"],
-            "peaceful": ["peaceful", "calm", "relax", "quiet", "still", "serene", "comfort", "harmony", "rest", "tired"]
         }
-
-        found_counts = {emotion: sum(1 for word in words if word in text) for emotion, words in emotion_rules.items()}
-        max_emotion = max(found_counts, key=found_counts.get)
         
-        if found_counts[max_emotion] > 0:
+        words = text.split()
+        found_counts = {emotion: sum(1 for word in words if word in keywords) for emotion, keywords in emotion_rules.items()}
+        
+        # Safe max with lambda
+        max_emotion = "neutral"
+        max_val = -1
+        for em, val in found_counts.items():
+            if val > max_val:
+                max_val = val
+                max_emotion = em
+        
+        if max_val > 0:
             return jsonify({"emotion": max_emotion})
 
-        # 2. AI Fallback (using Transformers if internet/memory allows)
-        try:
-            analyzer = get_sentiment_analyzer()
-            if analyzer:
-                res = analyzer(text[:512])[0]
-                if res['label'] == 'POSITIVE':
-                    return jsonify({"emotion": "happy"})
-                else:
-                    return jsonify({"emotion": "fear"}) # Fear/Suspense is a good "negative" mood for books
-            return jsonify({"emotion": "neutral"})
-        except:
-            return jsonify({"emotion": "neutral"})
-
+        # 2. AI Fallback
+        analyzer = get_sentiment_analyzer()
+        if analyzer:
+            res = analyzer(text[:512])[0]
+            if res['label'] == 'POSITIVE':
+                return jsonify({"emotion": "happy"})
+            else:
+                return jsonify({"emotion": "fear"})
+        return jsonify({"emotion": "neutral"})
     except Exception as e:
-        print("Emotion analysis error:", e)
+        print(f"Emotion analysis error: {e}")
         return jsonify({"emotion": "neutral"})
 
+@app.route("/get_recommendations", methods=["POST"])
+def get_recommendations():
+    try:
+        data = request.json
+        book_id = data.get("book_id")
+        
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM books WHERE id = ?", (book_id,))
+        row = cur.fetchone()
+        conn.close()
+        
+        current_book_name = str(os.path.basename(row[0])) if row else ""
+        
+        # 1. Smarter Keyword Extraction
+        clean_name = re.sub(r'(\.pdf|\.epub|\.docx|\.txt)', '', current_book_name, flags=re.IGNORECASE)
+        clean_name = re.sub(r'(_|-)', ' ', clean_name)
+        stop_words = {'the', 'and', 'a', 'of', 'to', 'in', 'is', 'it', 'for', 'with', 'on'}
+        words = [w for w in clean_name.lower().split() if w not in stop_words and len(w) > 2]
+        
+        search_query = '+'.join(words[:2]) if words else "adventure"
+        
+        # SEED-BASED DIVERSIFICATION: Add a random genre if the title is generic
+        genres = ["mystery", "magic", "ghost", "nautical", "detective", "fantasy", "scifi", "science", "travel", "history"]
+        random_genre = random.choice(genres)
+        
+        all_recs = {} # Dedup by title
+
+        def add_to_recs(book_list):
+            for b in book_list:
+                title_key = b['title'].strip().lower()
+                if title_key not in all_recs:
+                    all_recs[title_key] = b
+
+        # 2. Attempt Cross-API Discovery
+        try:
+            # SEARCH A: Primary Keyword Search (OpenLibrary)
+            res1 = requests.get(f"https://openlibrary.org/search.json?q={search_query}&limit=5", timeout=6)
+            if res1.status_code == 200:
+                docs = res1.json().get('docs', [])
+                add_to_recs([{
+                    "title": d.get('title'),
+                    "author": d.get('author_name', ['Unknown'])[0],
+                    "id": f"ol-{d.get('key', '').split('/')[-1]}",
+                    "cover": f"https://covers.openlibrary.org/b/id/{d.get('cover_i')}-M.jpg" if d.get('cover_i') else None,
+                    "url": f"https://openlibrary.org{d.get('key')}", "is_local": False
+                } for d in docs if d.get('title')])
+        except: pass
+
+        try:
+            # SEARCH B: Genre Discovery (Gutenberg)
+            res2 = requests.get(f"https://gutendex.com/books/?topic={random_genre}", timeout=6)
+            if res2.status_code == 200:
+                results = res2.json().get('results', [])
+                add_to_recs([{
+                    "title": r.get('title'),
+                    "author": r.get('authors', [{'name': 'Unknown'}])[0].get('name'),
+                    "id": r.get('id'),
+                    "cover": r.get('formats', {}).get('image/jpeg'),
+                    "url": r.get('formats', {}).get('text/html') or r.get('formats', {}).get('text/plain; charset=utf-8'),
+                    "is_local": False
+                } for r in results if r.get('title')])
+        except: pass
+
+        # 3. MASSIVE MASTERPIECE VAULT (50+ Shuffled Classics)
+        # We use this to fill gaps and ensure variety even when APIs are slow.
+        if len(all_recs) < 8:
+            vault = [
+                (11, "Alice's Adventures in Wonderland", "Lewis Carroll"),
+                (1661, "The Adventures of Sherlock Holmes", "Arthur Conan Doyle"),
+                (84, "Frankenstein", "Mary Shelley"),
+                (1342, "Pride and Prejudice", "Jane Austen"),
+                (35, "The Time Machine", "H.G. Wells"),
+                (120, "Treasure Island", "R.L. Stevenson"),
+                (236, "The Jungle Book", "Rudyard Kipling"),
+                (345, "Dracula", "Bram Stoker"),
+                (730, "Oliver Twist", "Charles Dickens"),
+                (1727, "The Odyssey", "Homer"),
+                (2591, "Grimm's Fairy Tales", "The Brothers Grimm"),
+                (158, "Emma", "Jane Austen"),
+                (2701, "Moby Dick", "Herman Melville"),
+                (36, "The War of the Worlds", "H.G. Wells"),
+                (219, "Heart of Darkness", "Joseph Conrad"),
+                (3207, "The Island of Doctor Moreau", "H.G. Wells"),
+                (768, "Wuthering Heights", "Emily Bronte"),
+                (98, "A Tale of Two Cities", "Charles Dickens"),
+                (16328, "Beowulf", "Unknown"),
+                (514, "Little Women", "Louisa May Alcott")
+            ]
+            random.shuffle(vault)
+            for vid, vtitle, vauthor in vault:
+                if len(all_recs) >= 20: break
+                add_to_recs([{
+                    "title": vtitle, "author": vauthor, "id": vid,
+                    "cover": f"https://www.gutenberg.org/cache/epub/{vid}/pg{vid}.cover.medium.jpg",
+                    "url": f"https://www.gutenberg.org/ebooks/{vid}.html.images", "is_local": False
+                }])
+
+        # Take the final set, shuffle, and return
+        final_list = list(all_recs.values())
+        random.shuffle(final_list)
+        return jsonify({"recommendations": final_list[:4]})
+        
+    except Exception as e:
+        print(f"Discovery Error: {e}")
+        return jsonify({"recommendations": []})
+
+@app.route("/download_external", methods=["POST"])
+def download_external():
+    data = request.json
+    title = data.get("title")
+    source_url = data.get("url") # Now we receive a real URL
+    
+    if not source_url or not title:
+        return jsonify({"error": "Missing Source Information"}), 400
+        
+    try:
+        # Increase timeout for guaranteed ingestion of large classics
+        print(f"Downloading high-fidelity illustrated book from {source_url}...")
+        res = requests.get(source_url, timeout=25)
+        # Handle encoding properly
+        res.encoding = res.apparent_encoding
+        book_content = res.text
+        
+        # Determine if it's likely HTML
+        is_html = "text/html" in source_url or "<html" in book_content[:2000].lower() or "<div" in book_content[:1000].lower()
+        
+        pages = []
+        if is_html:
+            soup = BeautifulSoup(book_content, "html.parser")
+            
+            # 1. Fix relative URLs for images and links
+            for tag in soup.find_all(['img', 'a']):
+                attr = 'src' if tag.name == 'img' else 'href'
+                val = tag.get(attr)
+                if val and not val.startswith(('http', 'data:', '#', 'mailto:')):
+                    tag[attr] = urljoin(source_url, val)
+            
+            # 2. Extract title if better one found
+            t_tag = soup.find('title')
+            if t_tag: 
+                new_title = t_tag.get_text().strip()
+                if new_title and len(new_title) > 3: title = new_title
+
+            # 3. Clean up boilerplate (optional but makes it feel more premium)
+            # Remove giant Gutenberg header/footer blocks if they are distinct
+            for noise in soup.find_all(['style', 'script']):
+                noise.decompose()
+
+            # 4. Safe Split into Pages
+            # We iterate through blocks and group them
+            body = soup.find('body') or soup
+            current_page = []
+            current_len = 0
+            
+            # We want roughly 3000-4000 chars per page
+            for elem in body.children:
+                elem_html = str(elem)
+                # Skip whitespace nodes
+                if not elem_html.strip(): continue
+                
+                if current_len + len(elem_html) > 4000 and current_page:
+                    pages.append("".join(current_page))
+                    current_page = [elem_html]
+                    current_len = len(elem_html)
+                else:
+                    current_page.append(elem_html)
+                    current_len += len(elem_html)
+            
+            if current_page:
+                pages.append("".join(current_page))
+        else:
+            # Plain Text handling
+            # Escape HTML and split by paragraphs
+            safe_text = html.escape(book_content)
+            # Split by double newlines (paragraphs)
+            paragraphs = safe_text.split('\n\n')
+            current_page = []
+            current_len = 0
+            for p in paragraphs:
+                p_html = f"<p style='margin-bottom: 1.5em; line-height: 1.6;'>{p.strip()}</p>"
+                if current_len + len(p_html) > 3000 and current_page:
+                    pages.append("".join(current_page))
+                    current_page = [p_html]
+                    current_len = len(p_html)
+                else:
+                    current_page.append(p_html)
+                    current_len += len(p_html)
+            if current_page:
+                pages.append("".join(current_page))
+
+        # 5. Build final content with proper page IDs for the frontend splitter
+        final_html = ""
+        if not pages:
+            # Fallback
+            final_html = f"<div id='pdf-page-0' class='lazy-page-container' style='padding: 60px; max-width: 900px; margin: 0 auto; background: white;'>{book_content}</div>"
+        else:
+            for i, p_content in enumerate(pages):
+                # We use the marker <div id="pdf-page- which the frontend looks for
+                final_html += f'<div id="pdf-page-{i}" class="lazy-page-container" style="padding: 60px; max-width: 900px; margin: 0 auto 40px auto; background: var(--bg-paper); border-radius: 4px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); min-height: 800px; color: #333; font-family: \'Georgia\', serif; font-size: 1.15rem;">\n'
+                if i == 0:
+                    final_html += f'<h1 style="text-align: center; margin-bottom: 50px; color: #2c3e50;">{title}</h1>\n'
+                final_html += p_content
+                final_html += '\n</div>'
+
+        safe_name = secure_filename(title) + ".html"
+        filepath = os.path.join(UPLOAD_FOLDER, safe_name)
+        extracted_path = os.path.join(EXTRACTED_FOLDER, safe_name + ".html")
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(final_html)
+            
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO books(name, path, extracted_path, status) VALUES (?, ?, ?, ?)",
+            (title, filepath, extracted_path, "processing")
+        )
+        book_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+
+        def do_extract_external(fpath, epath, bid):
+            try:
+                # We don't need heavy extraction for Gutenberg as we've already formatted it
+                # But we copy it to extracted_path for consistency
+                with open(fpath, "r", encoding="utf-8") as f:
+                    html_data = f.read()
+                with open(epath, "w", encoding="utf-8") as f:
+                    f.write(html_data)
+                
+                conn2 = get_conn()
+                conn2.execute("UPDATE books SET status='ready' WHERE id=?", (bid,))
+                conn2.commit()
+                conn2.close()
+            except Exception as e:
+                print(f"External Full-Text Ingestion Error: {e}")
+                conn2 = get_conn()
+                conn2.execute("UPDATE books SET status='error' WHERE id=?", (bid,))
+                conn2.commit()
+                conn2.close()
+
+        t = threading.Thread(target=do_extract_external, args=(filepath, extracted_path, book_id), daemon=True)
+        t.start()
+            
+        return jsonify({"status": "success", "id": book_id})
+    except Exception as e:
+        print(f"Full-Text Download failed: {e}")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    init_db()
+    start_translation_sidecar()
+    app.run(debug=True, host="0.0.0.0", port=5000)

@@ -1,8 +1,54 @@
 let currentBookId = null;
+let currentBookName = "";
 let currentBookText = "";
 let currentBookDetectedLangCode = "en";
 let activeBooksList = [];
 let currentSpeed = 1.0;
+let studyStartTime = null;
+let studyTimerInterval = null;
+
+function startStudyTimer() {
+    studyStartTime = Date.now();
+    const timerEl = document.getElementById("studyTimer");
+    if (timerEl) {
+        timerEl.style.display = "inline";
+        updateStudyTimer(); // initial update
+        if (studyTimerInterval) clearInterval(studyTimerInterval);
+        studyTimerInterval = setInterval(updateStudyTimer, 1000);
+    }
+}
+
+function updateStudyTimer() {
+    if (!studyStartTime) return;
+    const elapsed = Math.floor((Date.now() - studyStartTime) / 1000);
+    const hrs = Math.floor(elapsed / 3600);
+    const mins = Math.floor((elapsed % 3600) / 60);
+    const secs = elapsed % 60;
+    
+    const timeStr = [hrs, mins, secs].map(v => v < 10 ? "0" + v : v).join(":");
+    const timerEl = document.getElementById("studyTimer");
+    if (timerEl) {
+        timerEl.innerText = `| ${timeStr} Studying`;
+    }
+}
+
+function stopStudyTimer() {
+    if (studyTimerInterval) clearInterval(studyTimerInterval);
+    studyTimerInterval = null;
+    studyStartTime = null;
+    const timerEl = document.getElementById("studyTimer");
+    if (timerEl) {
+        timerEl.style.display = "none";
+    }
+}
+
+// Translation State Tracking
+window.activeTranslationObserver = null;
+window.activeTranslationJob = 0;
+window.currentTargetLang = 'orig';
+window.currentReadingNode = null;
+window.currentReadingOffsetInNode = 0;
+window.speechSyncNext = false;
 
 let isEmotionModeActive = true;
 // REAL-TIME Narrator Control
@@ -15,6 +61,7 @@ function toggleStudyHub() {
     dropdown.style.display = isVisible ? 'none' : 'flex';
 }
 
+// --- Settings & Vision Setup UI ---
 // Global listener to close dropdowns when clicking outside
 window.addEventListener('click', function(e) {
     const hubContainer = document.querySelector('.study-hub-container');
@@ -49,6 +96,89 @@ async function saveAsNote() {
             window.getSelection().removeAllRanges();
         }
     } catch (e) { console.error(e); }
+}
+
+async function loadRecommendations() {
+    if (!currentBookId) return;
+    const hub = document.getElementById("discoveryHub");
+    const grid = document.getElementById("recommendationGrid");
+    const status = document.getElementById("discoveryStatus");
+    
+    // Clear previous results and show searching status
+    if (status) {
+        status.style.display = "block";
+        status.innerHTML = "🔍 AI is searching for similar books...";
+    }
+    
+    // Clear only children that are book cards
+    const cards = grid.querySelectorAll('.external-rec');
+    cards.forEach(c => c.remove());
+    
+    try {
+        let res = await fetch("/get_recommendations", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ book_id: currentBookId })
+        });
+        let data = await res.json();
+        
+        if (data.recommendations && data.recommendations.length > 0) {
+            if (status) status.style.display = "none";
+            
+            data.recommendations.forEach(book => {
+                const card = document.createElement("div");
+                card.className = "book-card external-rec";
+                card.style.cssText = "background: var(--bg-header); border: 1px solid var(--border); padding: 15px; border-radius: 18px; position: relative; margin-bottom: 20px; transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);";
+                card.onmouseover = () => card.style.transform = "translateY(-5px)";
+                card.onmouseout = () => card.style.transform = "translateY(0)";
+
+                card.innerHTML = `
+                    <div style="position: absolute; top: 12px; right: 12px; background: var(--primary); color: white; font-size: 0.65rem; padding: 2px 10px; border-radius: 20px; font-weight: 700; text-transform: uppercase; box-shadow: 0 4px 10px rgba(0,0,0,0.2);">Discover</div>
+                    <img src="${book.cover || 'https://via.placeholder.com/150x220?text=No+Cover'}" style="width: 100%; height: auto; max-height: 190px; min-height: 160px; object-fit: cover; border-radius: 12px; margin-bottom: 12px; border: 1px solid var(--border); background: #2d3748;">
+                    <h4 style="color: var(--text-white); font-size: 0.85rem; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600;" title="${book.title}">${book.title}</h4>
+                    <p style="color: var(--text-light); font-size: 0.72rem; margin-bottom: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${book.author}</p>
+                    <button onclick="downloadExternalBook('${book.id}', '${encodeURIComponent(book.title)}', '${book.url}')" class="btn-primary" style="width: 100%; padding: 10px; font-size: 0.82rem; border-radius: 10px; font-weight: 600; letter-spacing: 0.3px;">
+                        📥 Add to Library
+                    </button>
+                `;
+                grid.appendChild(card);
+            });
+        } else {
+            if (status) status.innerHTML = "✨ No similar books found for this title.";
+        }
+    } catch (e) {
+        console.error("Discovery error:", e);
+        if (status) status.innerHTML = "❌ Could not connect to OpenLibrary.";
+    }
+}
+
+async function downloadExternalBook(id, encodedTitle, sourceUrl) {
+    const title = decodeURIComponent(encodedTitle);
+    const btn = event.target.closest('button');
+    const originalText = btn.innerHTML;
+    
+    btn.disabled = true;
+    btn.innerHTML = "⌛ Downloading...";
+    
+    try {
+        let res = await fetch("/download_external", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: id, title: title, url: sourceUrl })
+        });
+        
+        if (res.ok) {
+            btn.innerHTML = "✅ Added!";
+            setTimeout(() => {
+                loadBooks(); // Reload main library
+            }, 1000);
+        } else {
+            throw new Error("Download failed");
+        }
+    } catch (e) {
+        btn.innerHTML = "❌ Failed";
+        setTimeout(() => { btn.disabled = false; btn.innerHTML = originalText; }, 2000);
+    }
 }
 
 async function openNotebook() {
@@ -158,17 +288,31 @@ async function generateQuiz() {
     
     // Reset View to Selection
     modal.style.display = "flex";
+    document.getElementById("quizBackBtn").style.display = "none";
     document.getElementById("quizTypeSelection").style.display = "block";
     document.getElementById("quizLoading").style.display = "none";
     document.getElementById("quizContent").style.display = "none";
     document.getElementById("quizResult").style.display = "none";
     document.getElementById("quizSubmitBtn").style.display = "none";
+    document.getElementById("downloadQuizBtn").style.display = "none";
+    
+    // Hide footer status initially
+    const statusEl = document.getElementById("quizStatus");
+    if (statusEl) statusEl.style.display = "none";
+}
+
+function backToQuizSelection() {
+    generateQuiz();
+    // Re-hide the progress bar top indicator
+    const pbContainer = document.getElementById("quizProgressBarContainer");
+    if (pbContainer) pbContainer.style.display = "none";
 }
 
 async function startQuiz(type) {
     let selection = window.getSelection();
     let selectedText = selection.toString().trim();
 
+    document.getElementById("quizBackBtn").style.display = "flex";
     document.getElementById("quizTypeSelection").style.display = "none";
     document.getElementById("quizLoading").style.display = "block";
 
@@ -185,7 +329,11 @@ async function startQuiz(type) {
             })
         });
 
-        if (!res.ok) throw new Error("Quiz generation failed.");
+        if (!res.ok) {
+            let errData = await res.json().catch(() => ({}));
+            throw new Error(errData.error || "Quiz generation failed.");
+        }
+        
         let data = await res.json();
         currentQuizData = data.questions;
         renderQuiz(type);
@@ -199,6 +347,9 @@ function renderQuiz(type) {
     document.getElementById("quizLoading").style.display = "none";
     document.getElementById("quizContent").style.display = "block";
     document.getElementById("downloadQuizBtn").style.display = "flex";
+    
+    const statusEl = document.getElementById("quizStatus");
+    if (statusEl) statusEl.style.display = (type === 'mcq') ? "block" : "none";
 
     let body = document.getElementById("quizBody");
     body.innerHTML = "";
@@ -208,13 +359,19 @@ function renderQuiz(type) {
         currentQuizData.forEach((q, i) => {
             let qDiv = document.createElement("div");
             qDiv.className = "quiz-question";
+            qDiv.id = `q-container-${i}`;
             qDiv.style.marginBottom = "24px";
+            qDiv.style.padding = "20px";
+            qDiv.style.borderRadius = "15px";
+            qDiv.style.border = "1px solid transparent"; // Placeholder for error highlight
+            qDiv.style.transition = "all 0.3s ease";
+            
             qDiv.innerHTML = `
                 <p style="font-weight: 600; margin-bottom: 12px; color: var(--text-white); font-size: 1.1rem;">${i + 1}. ${q.question}</p>
                 <div class="quiz-options" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
                     ${q.options.map(opt => `
                         <label style="background: var(--glass); padding: 12px 18px; border-radius: 12px; cursor: pointer; border: 1px solid var(--glass-border); transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); display: flex; align-items: center; gap: 10px; font-weight: 500; color: var(--text-white);">
-                            <input type="radio" name="q${i}" value="${opt}" style="accent-color: var(--primary); width: 18px; height: 18px;">
+                            <input type="radio" name="q${i}" value="${opt}" onchange="clearQuizError(${i})" style="accent-color: var(--primary); width: 18px; height: 18px;">
                             <span>${opt}</span>
                         </label>
                     `).join('')}
@@ -241,7 +398,7 @@ function renderQuiz(type) {
         });
     }
 
-    document.getElementById("quizProgressBar").style.width = "10%";
+    updateQuizProgress();
 }
 
 function exportQuizToFile() {
@@ -294,17 +451,95 @@ function toggleQuizAnswer(event, index) {
     }
 }
 
+function clearQuizError(index) {
+    const qDiv = document.getElementById(`q-container-${index}`);
+    if (qDiv) {
+        qDiv.style.border = "1px solid transparent";
+        qDiv.style.background = "transparent";
+    }
+    updateQuizProgress();
+}
+
+function updateQuizProgress() {
+    if (!currentQuizData) return;
+    let total = currentQuizData.length;
+    let attended = 0;
+    for (let i = 0; i < total; i++) {
+        if (document.querySelector(`input[name="q${i}"]:checked`)) {
+            attended++;
+        }
+    }
+    const attendedEl = document.getElementById("quizAttendedCount");
+    const remainingEl = document.getElementById("quizRemainingCount");
+    const statusEl = document.getElementById("quizStatus");
+    
+    if (attendedEl) attendedEl.innerText = attended;
+    if (remainingEl) remainingEl.innerText = total - attended;
+    
+    // Only show the footer status if the current quiz is MCQ
+    if (statusEl) {
+        const isMCQ = document.querySelector('input[type="radio"]') !== null;
+        statusEl.style.display = isMCQ ? "block" : "none";
+    }
+    
+    // Also update the Sticky Progress Bar
+    const pbContainer = document.getElementById("quizProgressBarContainer");
+    const pb = document.getElementById("quizProgressBar");
+    
+    if (pbContainer) pbContainer.style.display = "block";
+    if (pb && total > 0) {
+        let percent = Math.round((attended / total) * 100);
+        pb.style.width = Math.max(5, percent) + "%"; // Keep at least 5% visible at start
+    }
+}
+
 function submitQuiz() {
     let score = 0;
     let total = currentQuizData.length;
+    let answeredCount = 0;
+
+    // First Pass: Check if everything is answered
+    let missingAt = [];
+    for (let i = 0; i < total; i++) {
+        const selected = document.querySelector(`input[name="q${i}"]:checked`);
+        if (selected) {
+            answeredCount++;
+        } else {
+            missingAt.push(i);
+        }
+    }
+
+    if (answeredCount < total) {
+        showUploadToast("🚫 Please attend all the questions before submitting!", "error");
+        
+        // VISIVE FEEDBACK: Highlight the first missing question and scroll to it
+        const allQuestions = document.querySelectorAll('.quiz-question');
+        missingAt.forEach(idx => {
+            if (allQuestions[idx]) {
+                allQuestions[idx].style.border = "1px dashed #ef4444";
+                allQuestions[idx].style.background = "rgba(239, 68, 68, 0.05)";
+                allQuestions[idx].style.borderRadius = "12px";
+            }
+        });
+        const firstMissing = allQuestions[missingAt[0]];
+        if (firstMissing) firstMissing.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return;
+    }
+    
+    // Hide progress during results
+    const statusEl = document.getElementById("quizStatus");
+    if (statusEl) statusEl.style.display = "none";
 
     currentQuizData.forEach((q, i) => {
         let selected = document.querySelector(`input[name="q${i}"]:checked`);
-        let labels = document.querySelectorAll(`input[name="q${i}"]`);
+        let radios = document.querySelectorAll(`input[name="q${i}"]`);
 
-        labels.forEach(input => {
+        radios.forEach(input => {
             let label = input.parentElement;
             let span = label.querySelector('span');
+
+            // Disable further selection
+            input.disabled = true;
 
             // Highlight Correct Answer
             if (input.value === q.answer) {
@@ -362,11 +597,13 @@ async function generateRevision() {
     list.style.display = "none";
     list.innerHTML = "";
 
+    const targetLang = document.getElementById('langSelect').value;
+
     try {
         const res = await fetch("/generate_revision", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ book_id: currentBookId })
+            body: JSON.stringify({ book_id: currentBookId, target_lang: targetLang })
         });
 
         if (!res.ok) throw new Error("Revision distillation failed.");
@@ -423,7 +660,8 @@ function renderRevision(points) {
 
 function downloadRevision() {
     if (!currentBookId) return;
-    window.open(`/download_revision/${currentBookId}`, "_blank");
+    const targetLang = document.getElementById('langSelect').value;
+    window.open(`/download_revision/${currentBookId}?target_lang=${targetLang}`, "_blank");
 }
 
 function closeRevisionModal() {
@@ -459,7 +697,8 @@ function changeSpeed(delta) {
             // Re-check state before resuming
             setTimeout(() => {
                 if (isReadingAloud && !isPaused) {
-                    resumeReadingFromIndex(resumeAt, false, true);
+                    // USE SAFE BACKTRACK: This ensures we don't start in the middle of a word at the new speed.
+                    resumeReadingFromIndex(resumeAt, false, false);
                 }
             }, 100);
         }, 250); // 250ms debounce
@@ -519,19 +758,12 @@ function getSafeResumeIndex(text, index) {
 
     let i = index;
 
-    // If we're already at a space or the start of a word, just skip any leading spaces
-    // and start exactly there. This fixes "skipping words" when clicking or restarting.
-    const isAtStart = (i === 0 || /\s/.test(text[i - 1]));
-    const isAtSpace = /\s/.test(text[i]);
-
-    if (isAtStart || isAtSpace) {
-        while (i < text.length && /\s/.test(text[i])) i++;
-        return i;
-    }
-
-    // Only if we're in the MIDDLE of a word do we leap-frog to the next word
-    // to prevent stuttering/re-reading the same word partially.
-    while (i < text.length && /\S/.test(text[i])) i++;
+    // BACKTRACK: Instead of skipping to the next word, we backtrack to the beginning of the CURRENT word.
+    // This ensures that if the user pauses mid-word, the entire word is re-read for context,
+    // which is the expected and most reliable behavior for users.
+    while (i > 0 && /\S/.test(text[i - 1])) i--;
+    
+    // Skip any leading whitespace at the jump point
     while (i < text.length && /\s/.test(text[i])) i++;
 
     return i;
@@ -605,10 +837,7 @@ function setNarratorGender(gender) {
 
     // INSTANT SWITCH: If reading is active, pivot narrator immediately
     if (isReadingAloud && !isPaused) {
-        if (window._restartTimeout) clearTimeout(window._restartTimeout);
-        window._restartTimeout = setTimeout(() => {
-            restartNarrator();
-        }, 50); // Minimal buffer to let the click registers then swap
+        restartNarrator();
     }
 }
 
@@ -711,10 +940,12 @@ function getAudioContext() {
 // High-Performance Custom Highlight API (Zero DOM impact)
 const readingHighlight = (typeof Highlight !== 'undefined') ? new Highlight() : null;
 const sentenceHighlight = (typeof Highlight !== 'undefined') ? new Highlight() : null;
+const bookmarkHighlight = (typeof Highlight !== 'undefined') ? new Highlight() : null;
 
 if (typeof CSS !== 'undefined' && CSS.highlights) {
     if (readingHighlight) CSS.highlights.set('reading-word', readingHighlight);
     if (sentenceHighlight) CSS.highlights.set('reading-sentence', sentenceHighlight);
+    if (bookmarkHighlight) CSS.highlights.set('bookmark-highlight', bookmarkHighlight);
 }
 
 
@@ -928,7 +1159,9 @@ function showLoader(msg) {
     const loaderText = document.getElementById("loaderText");
     const bookState = document.getElementById("loaderBookState");
     const transState = document.getElementById("loaderTranslateState");
+    const thankYou = document.getElementById("thankYouState");
 
+    if (thankYou) thankYou.style.display = "none";
     if (loaderText) loaderText.innerText = msg || "Loading book...";
     if (loader) loader.style.display = "flex";
     
@@ -949,7 +1182,7 @@ function showTranslationLoader(msg) {
     const bookState = document.getElementById("loaderBookState");
     const transState = document.getElementById("loaderTranslateState");
 
-    if (loaderText) loaderText.innerText = msg || "Translating language...";
+    if (loaderText) loaderText.innerText = msg || "Translating...";
     if (loader) loader.style.display = "flex";
 
     // Show Neural Translation state
@@ -1051,12 +1284,15 @@ function openBook(bookId) {
     if (oldBookId !== bookId) {
         resetReadingSession();
     }
+    currentBookId = bookId; // Ensure ID is set before loading recs
+    loadRecommendations();
     proceedToOpenBook(bookId);
 }
 
 
 function proceedToOpenBook(bookId) {
     showLoader();
+    window._pendingBookmarkResume = null; // Clear old book's residue
     fetch("/book/" + bookId)
         .then(res => res.json())
         .then(async data => {
@@ -1067,20 +1303,54 @@ function proceedToOpenBook(bookId) {
             }
 
             currentBookId = bookId;
+            currentBookName = data.name || "Untitled";
             currentBookText = data.text || "";
+            currentBookDetectedLangCode = data.detected_lang || "en";
 
             // Update Floating Badge and reveal it
             const bookTitleEl = document.getElementById("bookTitle");
             const bookBadgeEl = document.getElementById("bookBadge");
             if (bookTitleEl) bookTitleEl.innerText = data.name;
             if (bookBadgeEl) bookBadgeEl.classList.add('visible');
+            startStudyTimer();
+
+            // 🔖 Auto-Resume Logic (Server-side stored bookmarks)
+            // MUST await this to prevent race condition where rendering finishes before fetch returns
+            try {
+                const bmRes = await fetch(`/bookmarks/${bookId}`);
+                const list = await bmRes.json();
+                if (list && list.length > 0) {
+                    const bm = list[0];
+                    window._pendingBookmarkResume = {
+                        charIndex: bm.char_index,
+                        page: bm.page_number,
+                        scrollY: bm.scroll_y
+                    };
+                }
+            } catch (e) {
+                console.log("Bookmark check bypassed.", e);
+            }
 
             // Clear progress on new book
             const progEl = document.getElementById("readingProgress");
             if (progEl) progEl.innerText = "| 0% Read";
 
+            // TRANSLATION RESET: Critical for preventing "language bleeding" between book loads
+            window.currentTargetLang = 'orig'; 
+            window.activeTranslationJob = Date.now(); // Instantly kills any stale background jobs
+            if (window.activeTranslationObserver) {
+                window.activeTranslationObserver.disconnect();
+                window.activeTranslationObserver = null;
+            }
 
             let reader = document.getElementById("reader");
+            if (reader) {
+                reader.innerHTML = data.text;
+                // Clear any leftover attributes from older DOM if they somehow persisted
+                reader.querySelectorAll('.lazy-page-container').forEach(p => {
+                    delete p.dataset.translated;
+                });
+            }
             let detectedLang = "Original Language";
 
             let langSelectBtn = document.getElementById("langSelect");
@@ -1153,15 +1423,22 @@ function proceedToOpenBook(bookId) {
                 }
                 langSelectBtn.selectedIndex = 0;
                 langSelectBtn.value = "orig";
+                window.currentTargetLang = "orig"; 
+                window.originalBookContent = null;
+                window.activeTranslationJob = Date.now(); // Cancel any stale background translation jobs
             }
 
-            reader = document.getElementById("reader");
-
-            // Use a slight timeout to let the loader render
-            await new Promise(r => setTimeout(r, 50));
-
-            // Clear reader, reset scroll position immediately, and prepare container
-            reader.innerHTML = '<div class="book-content-container"></div>';
+            // 1. FORCE THE CLEAN SLATE
+            if (reader) {
+                // Ensure no attributes or leftover content from previous book can "haunt" the next session
+                reader.querySelectorAll('[data-translated]').forEach(el => {
+                    delete el.dataset.translated;
+                    delete el.dataset.translatedContent;
+                });
+                reader.innerHTML = '<div class="book-content-container"></div>';
+                reader.scrollTop = 0;
+                reader.scrollLeft = 0;
+            }
             reader.scrollTop = 0;
             reader.scrollLeft = 0;
             let container = reader.querySelector('.book-content-container');
@@ -1210,7 +1487,7 @@ function proceedToOpenBook(bookId) {
                         const tempDiv = document.createElement('div');
                         tempDiv.innerHTML = currentBookText;
                         // Look for common slide/page markers
-                        const blocks = tempDiv.querySelectorAll('.lazy-page-container, .pptx-slide, div[style*="aspect-ratio: 16/9"], div[id*="page-"], div[class*="slide-"]');
+                        const blocks = tempDiv.querySelectorAll('.lazy-page-container, .reader-page, .pptx-slide, div[style*="aspect-ratio: 16/9"], div[id*="page-"], div[class*="slide-"]');
                         if (blocks.length > 0) {
                             blocks.forEach((b, i) => {
                                 b.id = `pdf-page-${i}`;
@@ -1255,6 +1532,11 @@ function proceedToOpenBook(bookId) {
                     temp.innerHTML = pageChunks[i];
                     let pageWrapper = temp.firstChild;
                     container.appendChild(pageWrapper);
+                    
+                    // DYNAMIC TRANSLATION HOOK: Ensure lazy-rendered pages are observed for translation
+                    if (window.activeTranslationObserver) {
+                        window.activeTranslationObserver.observe(pageWrapper);
+                    }
 
                     // Apply scaling immediately to the new page
                     // Match both ID formats: 'page-N' or 'pdf-page-N'
@@ -1317,10 +1599,19 @@ function proceedToOpenBook(bookId) {
                 } else {
                     // Final pass once everything is rendered
                     applyExistingHighlights();
+                    renderBookmarkIcons();
 
-                    // Pre-calculate the reading node map so 'Read Full' starts INSTANTLY
-                    // We do this AFTER normalization to ensure offsets are correct.
-                    // Re-calculating in the 1000ms block below.
+                    // Check for pending bookmark resumes once everything is in the DOM
+                    if (window._pendingBookmarkResume) {
+                        const pb = window._pendingBookmarkResume;
+                        setTimeout(() => {
+                            // Only jump if we still have the resume data (prevents race conditions)
+                            if (pb) {
+                                jumpToBookmark(pb.page, pb.scrollY, true, pb.charIndex);
+                            }
+                            window._pendingBookmarkResume = null;
+                        }, 500); // Increased timeout for DOM stability
+                    }
                 }
             }
 
@@ -1367,6 +1658,7 @@ function proceedToOpenBook(bookId) {
             }, isPlainDoc ? 50 : 1000);
 
             loadHighlights(bookId);
+            setTimeout(renderBookmarkIcons, 1500); // Wait for initial render and normalization
         })
         .catch(err => {
             console.error("Reader Fetch Error:", err);
@@ -1445,18 +1737,17 @@ function saveHighlight() {
     // TOGGLE LOGIC: Check if this range intersects with or matches an existing highlight
     let existingIndex = currentHighlights.findIndex(h => {
         let jh = typeof h === 'string' ? JSON.parse(h) : h;
-        // Robust intersection check: If selection overlaps significantly with an existing highlight
-        // or if the selection is entirely within an existing highlight.
+        // Robust intersection check: If selection overlaps with an existing highlight
         const isOverlap = (rangeData.startChar < jh.endChar && rangeData.endChar > jh.startChar);
         if (!isOverlap) return false;
 
         // Ensure we aren't accidentally toggling off a highlight just because we brushed past it
-        // Check if the intersection is meaningful (e.g. either close proximity of offsets OR substantial overlap)
+        // Check if the intersection is meaningful
         const startDiff = Math.abs(jh.startChar - rangeData.startChar);
         const endDiff = Math.abs(jh.endChar - rangeData.endChar);
 
-        // Match if offsets are very close OR if selection is clearly targeting this highlight
-        return (startDiff < 8 && endDiff < 8) || (rangeData.startChar >= jh.startChar && rangeData.endChar <= jh.endChar);
+        // Match if offsets are very close OR if selection is completely inside the existing highlight (Sub-selection for un-highlighting)
+        return (startDiff < 15 && endDiff < 15) || (rangeData.startChar >= jh.startChar && rangeData.endChar <= jh.endChar);
     });
 
     // --- Precision Un-highlighting (Punch-Hole Logic) ---
@@ -1513,9 +1804,12 @@ function saveHighlight() {
         // Refresh UI
         clearManualHighlights();
         applyExistingHighlights();
+        // ALSO RESTORE BOOKMARKS & TTS BOUNDS: Toggling a highlight splits DOM nodes.
+        renderBookmarkIcons(); 
+        rebuildReadingNodeMap();
 
         if (toolbar) toolbar.style.display = "none";
-        selection.removeAllRanges();
+        if (selection) selection.removeAllRanges();
         return;
     }
 
@@ -1542,12 +1836,17 @@ function saveHighlight() {
             highlighted_text: JSON.stringify(rangeData)
         })
     }).then(res => {
-        if (res.ok) console.log("Highlight saved to server");
+        if (res.ok) {
+            console.log("Highlight saved to server");
+            // CRITICAL: Re-render bookmarks because highlightAbsoluteRange splits text nodes,
+            // which can displace or remove existing bookmark symbols and highlight layers.
+            renderBookmarkIcons();
+        }
     }).catch(err => console.error("Error saving highlight:", err));
 
     // Cleanup
     if (toolbar) toolbar.style.display = "none";
-    selection.removeAllRanges();
+    if (selection) selection.removeAllRanges();
 }
 
 function getAbsoluteSelectionRange(providedRange) {
@@ -1840,8 +2139,25 @@ function getNodesAndText(root) {
 
     while (walker.nextNode()) {
         let node = walker.currentNode;
-        if (node.parentNode.classList.contains('empty-state') || node.parentNode.id === 'thankYouState') continue;
-        if (node.parentNode.classList.contains('ocr-fallback-text')) continue;
+        
+        // Fast Ancestor Check: Skip hidden/UI subtrees efficiently
+        let isVisible = true;
+        let curr = node.parentNode;
+        while (curr && curr !== root) {
+            // IGNORE Reading Marks (🔖) - Critical to prevent character drift!
+            // IGNORE Hidden Metadata/OCR Layers
+            if (curr.classList.contains('reading-mark') || 
+                curr.classList.contains('bookmark-label') || 
+                curr.classList.contains('bookmark-symbol') || 
+                curr.classList.contains('ocr-hidden') || 
+                curr.classList.contains('junk-metadata-layer') ||
+                curr.classList.contains('scanned-junk-hidden')) {
+                isVisible = false;
+                break;
+            }
+            curr = curr.parentNode;
+        }
+        if (!isVisible) continue;
 
         // SPACE INJECTION: Crucial for drift-free highlighting
         // If we jump between elements, the browser/narrator implies a space.
@@ -1856,7 +2172,12 @@ function getNodesAndText(root) {
             }
         }
 
-        let val = node.nodeValue.replace(/\u00A0/g, ' '); // Map non-breaking spaces to standard spaces
+        let val = node.nodeValue
+            .replace(/\u00AD/g, '')  // REMOVE soft-hyphens (matches normalizeBookDOM)
+            .replace(/\u00A0/g, ' ') // MAP non-breaking spaces to standard spaces
+            .replace(/\u200B/g, '')  // REMOVE zero-width spaces
+            .replace(/\r/g, '');     // REMOVE carriage returns
+
         nodes.push(node);
         offsets.push(currentLen);
         parts.push(val);
@@ -1993,11 +2314,22 @@ async function resumeReadingFromIndex(index, startPaused = false, forceExactPosi
     }
 
     window.speechSynthesis.cancel();
+    if (currentFallbackAudio) {
+        currentFallbackAudio.pause();
+        currentFallbackAudio.src = ""; // Force stop network stream
+        currentFallbackAudio = null;
+    }
+    currentNarrationJobId++; // Invalidate any pending callbacks from previous sessions
     removeReadingMarks();
+    window.lastAutoScrollTime = 0; // RE-ENABLE IMMEDIATE SCROLLING ON START
 
     isReadingAloud = true;
     isPaused = startPaused;
+    window.forceResumeScroll = true; // FORCE JUMP TO THE STARTING POINT
     currentAbsoluteCharIndex = index;
+    
+    // INSTANT JUMP: Don't wait for audio engine to start; reveal current reading point now.
+    highlightReadingWord(index, 5);
 
     let playPauseBtn = document.getElementById("playPauseBtn");
     if (playPauseBtn) playPauseBtn.innerText = startPaused ? "Resume ▶" : "Pause ⏸";
@@ -2014,11 +2346,12 @@ async function resumeReadingFromIndex(index, startPaused = false, forceExactPosi
     let chunks = [];
     let lastSplit = 0;
 
-    // Fast boundary splitter
+    // Fast boundary splitter for international support (includes Hindi/Japanese/Chinese full stops)
+    const splitterRegex = /[.!?\n।。\?]/;
     for (let i = 0; i < remainingText.length; i++) {
-        let isBoundary = /[.!?\n]/.test(remainingText[i]);
+        let isBoundary = splitterRegex.test(remainingText[i]);
         let nextChar = remainingText[i + 1];
-        if (isBoundary && (!nextChar || !/[.!?\n]/.test(nextChar))) {
+        if (isBoundary && (!nextChar || !splitterRegex.test(nextChar))) {
             chunks.push(remainingText.substring(lastSplit, i + 1));
             lastSplit = i + 1;
         } else if (i - lastSplit > 200 && /\s/.test(remainingText[i])) {
@@ -2191,6 +2524,20 @@ async function resetReadingSession() {
     currentAbsoluteCharIndex = 0;
     lastHighlightPos = -1;
     lastMarkedNodeIndex = 0;
+    
+    // TRANSLATION RESET: Prevent stale jobs from "bleeding" into new book contents
+    window.activeTranslationJob = Date.now(); // Instantly invalidates previous background jobs
+    window.originalBookContent = null; 
+    window.currentTargetLang = 'orig'; // Reset logic state
+    
+    // UI SYNC: Ensure language selector reflects the reset
+    const langSelect = document.getElementById('langSelect');
+    if (langSelect) langSelect.value = 'orig';
+    
+    if (window.activeTranslationObserver) {
+        window.activeTranslationObserver.disconnect();
+        window.activeTranslationObserver = null;
+    }
 }
 
 async function togglePlayPause() {
@@ -2202,67 +2549,41 @@ async function togglePlayPause() {
     }
 
     if (!isReadingAloud) {
+        // Explicitly resume AudioContext on user gesture to allow regional TTS playback
+        const ctx = getAudioContext();
+        if (ctx.state === 'suspended') ctx.resume();
+
         // INSTANT UI RESPONSE
         if (playPauseBtn) playPauseBtn.innerText = "Pause ⏸";
         currentNarrationJobId++; // Start a clean narration session with no stale callbacks
         isReadingAloud = true;
         isPaused = false;
+        window.forceResumeScroll = true; // ENSURE WE SCROLL TO STARTING POINT
 
-        // PDF SYNC: Only jump to the visible page if we are starting fresh (offset 0)
-        let reader = document.getElementById("reader");
-        if (currentAbsoluteCharIndex === 0 && reader && reader.scrollTop > 300) {
-            if (!globalTextNodes || globalTextNodes.length === 0) rebuildReadingNodeMap();
-            let pages = document.querySelectorAll('[id^="pdf-page-"]');
-            let readerRect = reader.getBoundingClientRect();
-            for (let page of pages) {
-                let rect = page.getBoundingClientRect();
-                if (rect.bottom > readerRect.top + 50) {
-                    for (let i = 0; i < globalTextNodes.length; i++) {
-                        if (page.contains(globalTextNodes[i])) {
-                            currentAbsoluteCharIndex = globalNodeOffsets[i];
-                            break;
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-        await resumeReadingFromIndex(currentAbsoluteCharIndex, false, true);
+        // ALWAYS START FROM BEGINNING when using "Read Full", unless already in a session.
+        let r = document.getElementById("reader");
+        // USE 'auto' for instant jump to avoid interference/throttling during start
+        if (r) r.scrollTo({ top: 0, behavior: 'auto' });
+        
+        await resumeReadingFromIndex(0, false, true);
     } else {
         if (isPaused) {
             // RESUME
             isPaused = false;
-            // Enhanced Resume
-            if (isEmotionModeActive) {
-                window.speechSynthesis.cancel();
-                if (currentFallbackAudio) { currentFallbackAudio.pause(); currentFallbackAudio = null; }
-                playNextFallback(false, true); // Clean restart for sync
-            } else if (currentFallbackAudio) {
-                currentFallbackAudio.play();
-            } else {
-                window.speechSynthesis.resume();
-            }
+            // By calling resumeReadingFromIndex, we ensure the queue is freshly generated 
+            // from the current index, and any stale callbacks are invalidated.
+            window.forceResumeScroll = true; // FORCE JUMP BACK TO PAUSE POINT
+            await resumeReadingFromIndex(currentAbsoluteCharIndex, false, true);
             if (playPauseBtn) playPauseBtn.innerText = "Pause ⏸";
         } else {
             // PAUSE
             isPaused = true;
-            if (isEmotionModeActive) {
-                window.speechSynthesis.pause();
-                if (currentFallbackAudio) currentFallbackAudio.pause();
+            window.speechSynthesis.pause();
+            if (currentFallbackAudio) currentFallbackAudio.pause();
 
-                // TRACK PROGRESS: Save the exact spot where we were paused
-                if (lastEmotionItem && typeof lastEmotionItemProgress !== 'undefined' && lastEmotionItemProgress > 0) {
-                    console.log("Saving resume point at offset:", lastEmotionItemProgress);
-                    lastEmotionItem.text = lastEmotionItem.text.substring(lastEmotionItemProgress).trim();
-                    lastEmotionItem.offset += lastEmotionItemProgress;
-                    lastEmotionItemProgress = 0; // Reset for next use
-                }
-                window.speechSynthesis.cancel(); // Necessary for clean restart later
-            } else if (currentFallbackAudio) {
-                currentFallbackAudio.pause();
-            } else {
-                window.speechSynthesis.pause();
-            }
+            // TRACK PROGRESS: currentAbsoluteCharIndex is updated live by syncHighlight/onboundary event listeners.
+            // We cancel the speech to free resources and prepare for a clean restart.
+            window.speechSynthesis.cancel();
             if (playPauseBtn) playPauseBtn.innerText = "Resume ▶";
         }
     }
@@ -2370,7 +2691,17 @@ function initializeReader() {
                 }
             }
             
-            if (!targetNode || targetNode.nodeType !== 3) return;
+            // FALLBACK: If we missed the text node (e.g., clicked margin or end of line), find the closest text inside the clicked element
+            if (!targetNode || targetNode.nodeType !== 3) {
+                let walker = document.createTreeWalker(e.target, NodeFilter.SHOW_TEXT, null, false);
+                let firstText = walker.nextNode();
+                if (firstText) {
+                    targetNode = firstText;
+                    offset = 0;
+                } else {
+                    return;
+                }
+            }
 
             let absoluteIndex = -1;
             const nodeIdx = globalTextNodes.indexOf(targetNode);
@@ -2412,6 +2743,18 @@ function initializeReader() {
                 }
             }
         });
+
+        // AUTO-PAUSE ON MANUAL SCROLL
+        function pauseReadingOnUserScroll() {
+            if (isReadingAloud && !isPaused) {
+                // If the last auto-scroll was VERY recent, ignore it to prevent false positives
+                if (Date.now() - (window.lastAutoScrollTime || 0) < 500) return;
+                togglePlayPause();
+                showUploadToast("Reading paused (manual scroll)", "info");
+            }
+        }
+        reader.addEventListener('wheel', pauseReadingOnUserScroll, { passive: true });
+        reader.addEventListener('touchmove', pauseReadingOnUserScroll, { passive: true });
 
         reader.addEventListener('scroll', () => {
             if (totalPages <= 0) return;
@@ -2877,7 +3220,7 @@ function getSelectedLanguage() {
 
     // Use the auto-detected language if 'Original' is selected
     if (lang === 'orig') {
-        lang = currentBookDetectedLangCode || 'en';
+        lang = window.currentBookDetectedLangCode || 'en';
     }
 
     // Map standard codes to standard BCP-47 Speech Synthesis tags for the reader
@@ -2907,6 +3250,138 @@ function getSelectedLanguage() {
     return langMap[lang] || lang;
 }
 
+let mapRebuildTimeout = null;
+function debouncedRebuildMap() {
+    if (mapRebuildTimeout) clearTimeout(mapRebuildTimeout);
+    mapRebuildTimeout = setTimeout(() => {
+        rebuildReadingNodeMap();
+        
+        // FLUID SYNC: Instead of stopping the audio (which causes 4s silence),
+        // we signal the narrator to refresh its queue as soon as the current sentence ends.
+        if (isReadingAloud && window.currentTargetLang !== 'orig') {
+            window.speechSyncNext = true; 
+        }
+        
+        currentBookText = document.getElementById("reader")?.innerHTML || "";
+    }, 800);
+}
+
+async function translateNodeList(nodes, lang, job) {
+    if (!nodes.length || (job && window.activeTranslationJob !== job)) return;
+    const texts = nodes.map(n => n.nodeValue);
+    try {
+        const res = await fetch("/translate_text", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            // FORCED AUTO: We now use 'auto' regardless of server-side detection,
+            // as Google's auto-detect is 100x more accurate for mixed-content books.
+            body: JSON.stringify({ texts, target_lang: lang, source_lang: 'auto' })
+        });
+        const translated = await res.json();
+        if (Array.isArray(translated) && translated.length === nodes.length) {
+            nodes.forEach((node, i) => {
+                let orig = node.nodeValue;
+                let lead = orig.match(/^\s*/)[0] || "";
+                let trail = orig.match(/\s*$/)[0] || "";
+                node.nodeValue = lead + (translated[i] || "").trim() + trail;
+            });
+            // If narrator is running, we MUST rebuild the map to avoid offset drift
+            // Rebuilding ensures the globalReadingText is updated to the new language.
+            if (isReadingAloud) debouncedRebuildMap();
+            return true;
+        } else {
+            console.warn(`Translation mismatch: Expected ${nodes.length}, got ${translated ? translated.length : 'null'}`);
+            return false;
+        }
+    } catch (e) { 
+        console.error("Lazy translation failed", e); 
+        return false;
+    }
+}
+
+// DOM NORMALIZER: Merges fragmented text nodes that often break translation in DOCX/PDF
+function normalizePageTextNodes(root) {
+    // We walk through all elements and call normalize() which is a native browser function
+    // that merges adjacent text nodes and removes empty ones.
+    if (root.normalize) root.normalize();
+}
+
+async function translatePage(pageEl, targetLang, job) {
+    if (!pageEl || pageEl.dataset.translated === targetLang || (job && window.activeTranslationJob !== job)) return;
+    
+    // 1. NORMALIZE: Merges siblings like <span>H</span><span>e</span><span>l</span><span>l</span><span>o</span>
+    // which previously broke translation engine split-logic and quality.
+    normalizePageTextNodes(pageEl);
+
+    // 1b. HARD SPLIT: For files like "Frankenstein" (TXTs) that might have 
+    // exceptionally long paragraphs or no newlines, we must split huge nodes 
+    // into 3,000-character chunks or they will fail the translation API limit.
+    const MAX_NODE_TEXT = 3000;
+    let textNodesToSplit = [];
+    let splitWalker = document.createTreeWalker(pageEl, NodeFilter.SHOW_TEXT, null, false);
+    while (splitWalker.nextNode()) {
+        if (splitWalker.currentNode.nodeValue.length > MAX_NODE_TEXT) {
+            textNodesToSplit.push(splitWalker.currentNode);
+        }
+    }
+    
+    textNodesToSplit.forEach(node => {
+        let val = node.nodeValue;
+        let parent = node.parentNode;
+        if (!parent) return;
+        
+        let lastNode = node;
+        for (let i = MAX_NODE_TEXT; i < val.length; i += MAX_NODE_TEXT) {
+            let nextPart = val.substring(i, i + MAX_NODE_TEXT);
+            let newNode = document.createTextNode(nextPart);
+            parent.insertBefore(newNode, lastNode.nextSibling);
+            lastNode = newNode;
+        }
+        node.nodeValue = val.substring(0, MAX_NODE_TEXT);
+    });
+
+    // 2. TARGET READABLE TEXT: We include ocr-reading-layers explicitly 
+    let walker = document.createTreeWalker(pageEl, NodeFilter.SHOW_TEXT, null, false);
+    let nodes = [];
+    while (walker.nextNode()) {
+        if (walker.currentNode.nodeValue.trim().length > 0) nodes.push(walker.currentNode);
+    }
+    
+    if (nodes.length === 0) {
+        // Handle "Blank" pages (common in images before background OCR finishes)
+        // We check if there are images. If so, we might need to wait or refresh
+        const images = pageEl.querySelectorAll('img');
+        if (images.length > 0) {
+             console.warn("Translation: Page has images but no readable text nodes yet. OCR may be in progress.");
+        }
+        pageEl.dataset.translated = targetLang;
+        return;
+    }
+
+    // CONCURRENCY & BATCHING: Optimized for massive documents
+    const CONCURRENCY_LIMIT = 2; 
+    const BATCH_SIZE = 80; 
+    const batches = [];
+    for (let i = 0; i < nodes.length; i += BATCH_SIZE) {
+        batches.push(nodes.slice(i, i + BATCH_SIZE));
+    }
+
+    let allSuccessful = true;
+    for (let i = 0; i < batches.length; i += CONCURRENCY_LIMIT) {
+        if (job && window.activeTranslationJob !== job) break;
+        const currentParallelSet = batches.slice(i, i + CONCURRENCY_LIMIT);
+        const results = await Promise.all(currentParallelSet.map(batch => translateNodeList(batch, targetLang, job)));
+        if (results.some(r => r === false)) allSuccessful = false;
+        
+        // Anti-Throttling: Breathable gap between massive batches
+        if (i + CONCURRENCY_LIMIT < batches.length) await new Promise(r => setTimeout(r, 100));
+    }
+
+    if (allSuccessful) {
+        pageEl.dataset.translated = targetLang;
+    }
+}
+
 async function translateBook() {
     let targetLang = document.getElementById('langSelect').value;
     let reader = document.getElementById("reader");
@@ -2915,193 +3390,115 @@ async function translateBook() {
 
     if (!reader || !currentBookText) return;
 
+    // Restore Original?
     if (targetLang === 'orig') {
-        titleEl.innerText = "Restoring original... Please wait...";
-        showTranslationLoader("Restoring Language...");
+        showTranslationLoader("Restoring original...");
+        window.currentTargetLang = 'orig';
+        if (window.activeTranslationObserver) window.activeTranslationObserver.disconnect();
+        window.activeTranslationObserver = null;
+        
         try {
             let res = await fetch("/book/" + currentBookId);
             let data = await res.json();
             if (data && data.text) {
                 reader.innerHTML = data.text;
                 currentBookText = data.text;
+                // CLEAR TRANSLATION STATE: allow pages to be re-translated
+                document.querySelectorAll('.lazy-page-container').forEach(p => {
+                    delete p.dataset.translated;
+                });
             }
-            if (currentBookId) loadHighlights(currentBookId);
-            resetReadingSession();
-            let playPauseBtn = document.getElementById("playPauseBtn");
-            if (playPauseBtn) playPauseBtn.innerText = "Read Full ▶";
             hideLoader();
+            setTimeout(() => rebuildReadingNodeMap(), 50);
         } catch (e) {
-            console.error("Failed to restore English text", e);
             hideLoader();
         }
-        titleEl.innerText = originalTitle;
         return;
     }
 
-    titleEl.innerText = "Translating book... Please wait...";
-    showTranslationLoader("Initializing AI Translation Engine...");
+    // SOURCE LOCK: Cache original English version for seamless language toggling
+    // Note: If the book is still rendering, this might be incomplete, but 
+    // translatePage works on DOM nodes directly, so it's safer than re-rendering.
+    if (!window.originalBookContent) {
+        window.originalBookContent = reader.innerHTML;
+    } 
 
-    reader.normalize(); // Merge adjacent text nodes to prevent "First Letter Only" translation bugs
-    let walker = document.createTreeWalker(reader, NodeFilter.SHOW_TEXT, null, false);
-    let nodes = [];
-    while (walker.nextNode()) {
-        let node = walker.currentNode;
-        // Aggressive capture: even nodes in OCR fallbacks should be translated for a complete book experience
-        if (node.nodeValue.trim().length > 0) {
-            nodes.push(node);
-        }
-    }
+    window.speechSynthesis.cancel();
+    isReadingAloud = false;
 
-    if (nodes.length === 0) {
-        titleEl.innerText = originalTitle;
-        hideLoader();
-        return;
-    }
+    showTranslationLoader("Initializing High-Speed engine...");
+    window.activeTranslationJob = Date.now();
+    window.currentTargetLang = targetLang;
 
-    titleEl.innerText = "Translating...";
-    showTranslationLoader("AI processing contents instantly...");
-
-    let currentJob = Date.now();
-    window.activeTranslationJob = currentJob;
-
-    showUploadToast("🌍 Connecting to AI Translation Engine...", "info");
-
-    resetReadingSession();
-    let playPauseBtn = document.getElementById("playPauseBtn");
-    if (playPauseBtn) playPauseBtn.innerText = "Read Full ▶";
-
-    let BATCH_CHAR_LIMIT = 600;
-    let chunks = [];
-    let currentChunk = [];
-    let currentLen = 0;
-
-    for (let i = 0; i < nodes.length; i++) {
-        let textLen = nodes[i].nodeValue.length;
-        if (currentLen + textLen > BATCH_CHAR_LIMIT && currentChunk.length > 0) {
-            chunks.push(currentChunk);
-            currentChunk = [];
-            currentLen = 0;
-        }
-        currentChunk.push(nodes[i]);
-        currentLen += textLen + 7;
-    }
-    if (currentChunk.length > 0) chunks.push(currentChunk);
-
-    let processedCount = 0;
-
-    // VERY FAST START: Only wait for first 2 chunks to arrive before enabling UI/Read Full
-    let initialChunks = chunks.slice(0, 2);
-    let backgroundChunks = chunks.slice(2);
-
-    let translateRecursive = async (batchNodes, retryCount = 0) => {
-        if (batchNodes.length === 0 || window.activeTranslationJob !== currentJob) return;
-
-        let batchTexts = batchNodes.map(n => n.nodeValue);
-
-        try {
-            let res = await fetch("/translate_text", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    texts: batchTexts,
-                    target_lang: targetLang
-                })
-            });
-
-            if (res.ok && window.activeTranslationJob === currentJob) {
-                let translatedTexts = await res.json();
-                
-                if (translatedTexts && translatedTexts.length === batchNodes.length) {
-                    for (let j = 0; j < batchNodes.length; j++) {
-                        let cleanText = translatedTexts[j];
-                        if (batchNodes[j].nodeValue.match(/\s$/) && !cleanText.match(/\s$/)) cleanText += " ";
-                        batchNodes[j].nodeValue = cleanText;
-                    }
-                }
-            } else if (res.status === 429 && retryCount < 2) {
-                await new Promise(r => setTimeout(r, 2000));
-                await translateRecursive(batchNodes, retryCount + 1);
+    // --- PROACTIVE FULL-BOOK TRANSLATION ENGINE ---
+    // Instead of waiting for scroll, we proactively translate the whole book in priority order.
+    
+    // Create/Refresh the Observer (as a backup for ultra-fast scrolling)
+    if (window.activeTranslationObserver) window.activeTranslationObserver.disconnect();
+    window.activeTranslationObserver = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (entry.isIntersecting) {
+                translatePage(entry.target, window.currentTargetLang, window.activeTranslationJob);
             }
-        } catch (e) {
-            console.error("Translation Batch Error:", e);
-        }
-    };
+        });
+    }, { root: reader, threshold: 0.1 });
 
-    let processChunk = async (batchNodes) => {
-        if (window.activeTranslationJob !== currentJob) return;
-        await translateRecursive(batchNodes);
-        processedCount += batchNodes.length;
-    };
+    const pages = Array.from(document.querySelectorAll('.lazy-page-container'));
+    pages.forEach(p => window.activeTranslationObserver.observe(p));
 
-    // Await ONLY the head of the book
-    await Promise.all(initialChunks.map(processChunk));
-
-    // INSTANT FEEDBACK: Reveal UX as soon as the first few paragraphs are ready
-    if (window.activeTranslationJob === currentJob) {
-        currentBookText = reader.innerHTML;
-        titleEl.innerText = originalTitle;
-        hideLoader();
-        setTimeout(() => rebuildReadingNodeMap(), 50); // Important: Map the new translated structure
+    const currentPageInput = document.getElementById('currentPageInput');
+    const startPageIdx = Math.max(0, (parseInt(currentPageInput?.value || 1) - 1));
+    
+    showTranslationLoader(`Translating Current Page (${startPageIdx + 1})...`);
+    
+    // PHASE 1: Priority Spread (Current + Next 2)
+    const priorityPages = pages.slice(startPageIdx, startPageIdx + 3);
+    for (const p of priorityPages) {
+        await translatePage(p, window.currentTargetLang, window.activeTranslationJob);
     }
 
-    // Proper background task pool for maximum throughput
+    // CRITICAL: Rebuild map immediately so user can read the current section
+    rebuildReadingNodeMap();
+    currentBookText = reader.innerHTML;
+    titleEl.innerText = originalTitle;
+    hideLoader();
+
+    // PHASE 2: Background Proactive Translation (First to Last)
+    // We launch this without "awaiting" it so the UI is free, but it finishes the whole book.
     (async () => {
-        const CONCURRENCY_LIMIT = 8;
-        let queue = [...backgroundChunks];
-        let active = 0;
-
-        async function next() {
-            if (queue.length === 0 || window.activeTranslationJob !== currentJob) {
-                if (active === 0 && queue.length === 0 && window.activeTranslationJob === currentJob) {
-                    // All tasks finished! Final sync and re-normalize
-                    titleEl.innerText = originalTitle;
-                    hideLoader();
-
-                    // Critical: Re-normalize and rebuild map after full translation 
-                    // to ensure highlighting and TTS stay in sync in the new language
-                    setTimeout(async () => {
-                        await normalizeBookDOM(reader);
-                        rebuildReadingNodeMap();
-                        currentBookText = reader.innerHTML; // Sync final translated state
-                        if (currentBookId) loadHighlights(currentBookId);
-                    }, 500);
-                }
-                return;
-            }
-            active++;
-            let chunk = queue.shift();
+        const jobId = window.activeTranslationJob;
+        const totalPages = pages.length;
+        
+        // SPEED BOOST: Group into larger blocks (4 pages) to maximize sidecar throughput
+        for (let i = 0; i < totalPages; i += 4) {
+            // Cancellation Check: Stop if language changed or book switched
+            if (window.activeTranslationJob !== jobId || window.currentTargetLang === 'orig') break;
+            
+            const segment = pages.slice(i, i + 4);
             try {
-                await processChunk(chunk);
-            } finally {
-                active--;
-                next();
+                // Parallelize within the segment; if one page fails, the rest continue
+                await Promise.all(segment.map(p => translatePage(p, window.currentTargetLang, jobId).catch(e => console.error("Page BG Error:", e))));
+            } catch (e) {
+                console.error("Batch Job Fatal Error:", e);
+                // Continue to next batch instead of crashing
             }
+            
+            // Proactive narration re-mapping: Update every 8 pages
+            if (i % 8 === 0 && window.activeTranslationJob === jobId) {
+                rebuildReadingNodeMap();
+            }
+
+            // Minimal yield to keep UI smooth during background crunching
+            await new Promise(r => setTimeout(r, 20));
         }
-
-        // Start initial workers
-        for (let i = 0; i < Math.min(CONCURRENCY_LIMIT, queue.length); i++) {
-            next();
+        
+        if (window.activeTranslationJob === jobId) {
+            rebuildReadingNodeMap();
+            showUploadToast(`✅ Full Book Translation Complete (${totalPages} pages)`, "success");
         }
-
-        // Wait for workers to finish then remove loader if not caught by next()
-        let checkFinish = setInterval(() => {
-            if (active === 0 && queue.length === 0) {
-                clearInterval(checkFinish);
-                hideLoader();
-                titleEl.innerText = originalTitle;
-            }
-        }, 1000);
-
-        // Periodically sync results to currentBookText
-        let syncInterval = setInterval(() => {
-            if (window.activeTranslationJob !== currentJob) {
-                clearInterval(syncInterval);
-                return;
-            }
-            currentBookText = reader.innerHTML;
-            if (active === 0 && queue.length === 0) clearInterval(syncInterval);
-        }, 5000);
     })();
+
+    showUploadToast("🌍 Translating whole book in background. Read now!", "info");
 }
 
 // Global Audio Fallback implementation for unsupported TTS languages 
@@ -3197,6 +3594,17 @@ function playFallbackAudioQueue(chunks, startOffset, shortLang, startPaused) {
 
     // Start playback immediately for zero-lag experience
     playNextFallback(startPaused);
+    
+    // PRE-FETCH FIRST 3 CHUNKS: Warm up the network cache immediately
+    // This removes the initial 'click-to-start' delay for non-English books.
+    for (let i = 0; i < Math.min(3, fallbackQueue.length); i++) {
+        const item = fallbackQueue[i];
+        if (!item.audioObj) {
+            item.audioObj = new Audio(item.url);
+            item.audioObj.preload = "auto";
+            item.audioObj.load();
+        }
+    }
 }
 
 // Global state to track the LAST touched node for fast hit-testing
@@ -3241,12 +3649,26 @@ function removeReadingMarks() {
 function rebuildReadingNodeMap() {
     let reader = document.getElementById("reader");
     if (!reader) return;
+    
+    // SYNC SNAPSHOT: Capture current position before mapping changes
+    let snapshotNode = window.currentReadingNode;
+    let snapshotOffset = window.currentReadingOffsetInNode;
+
     let { nodes, offsets, text } = getNodesAndText(reader);
-    // SAFEQUARD: Don't overwrite with empty map if extraction failed (keeps user from jumping to start)
     if (nodes.length > 0) {
         globalTextNodes = nodes;
         globalNodeOffsets = offsets;
         globalReadingText = text;
+
+        // POSITION RESCUE: Re-calculate currentAbsoluteCharIndex based on node anchor
+        if (isReadingAloud && snapshotNode && snapshotNode.isConnected) {
+            let nodeIdx = nodes.indexOf(snapshotNode);
+            if (nodeIdx !== -1) {
+                // We've successfully anchored to the exact node being read,
+                // even though its content changed from English to another language.
+                currentAbsoluteCharIndex = offsets[nodeIdx] + snapshotOffset;
+            }
+        }
     } else if (!globalReadingText) {
         // First initialization failed? Fallback to empty but don't clear a working one
         globalTextNodes = [];
@@ -3295,13 +3717,30 @@ function highlightReadingWord(absoluteWordPosition, charLength, sentenceStart = 
             if (nodeEnd > startChar && nodeStart < endChar) {
                 foundAny = true;
                 lastMarkedNodeIndex = i;
+                
+                // TRACK CURRENT NODE for translation-resync (Anchors narrator to semantic position)
+                window.currentReadingNode = node;
+                window.currentReadingOffsetInNode = Math.max(0, startChar - nodeStart);
+
                 try {
                     let range = new Range();
-                    // VISUAL PADDING: Expand the highlight slightly to ensure it fully 'wraps' the word
-                    // even with custom kerning or italic fonts.
-                    range.setStart(node, Math.max(0, startChar - nodeStart));
-                    range.setEnd(node, Math.min(nodeLen, endChar - nodeStart));
+                    
+                    // SMART BOUNDARY CORRECTION:
+                    // Browser TTS often reports offsets slightly off or truncates suffixes (e.g. 'Secret' instead of 'Secrets').
+                    // We reach forward in the DOM text to find the logical end of the current word.
+                    let localStart = Math.max(0, startChar - nodeStart);
+                    let text = node.nodeValue || "";
+                    let localEnd = Math.min(nodeLen, endChar - nodeStart);
+                    
+                    // Expand localEnd to next non-word character if it looks like we clipped a word
+                    if (localEnd < nodeLen && /\w/.test(text[localEnd - 1]) && /\w/.test(text[localEnd])) {
+                        while (localEnd < nodeLen && /\w/.test(text[localEnd])) {
+                            localEnd++;
+                        }
+                    }
 
+                    range.setStart(node, localStart);
+                    range.setEnd(node, localEnd);
 
                     if (readingHighlight) readingHighlight.add(range);
 
@@ -3312,17 +3751,38 @@ function highlightReadingWord(absoluteWordPosition, charLength, sentenceStart = 
                     }
 
                     // SMOOTH SCROLLING: Keep the active word centered in view
-                    if (!window.lastAutoScrollTime || Date.now() - window.lastAutoScrollTime > 2000) {
+                    let timeSinceLastScroll = Date.now() - (window.lastAutoScrollTime || 0);
+                    if (timeSinceLastScroll > 1500 || window.forceResumeScroll) {
                         let rect = range.getBoundingClientRect();
                         let reader = document.getElementById("reader");
+                        if (!reader) return;
                         let readerRect = reader.getBoundingClientRect();
 
-                        // Check if word is outside the middle 40% of the screen
-                        const threshold = reader.clientHeight * 0.3;
-                        if (rect.top < readerRect.top + threshold || rect.top > readerRect.bottom - threshold) {
-                            let targetY = reader.scrollTop + rect.top - readerRect.top - (reader.clientHeight / 2);
-                            reader.scrollTo({ top: targetY, behavior: 'smooth' });
-                            window.lastAutoScrollTime = Date.now();
+                        // Centered scrolling logic
+                        const threshold = reader.clientHeight * 0.35;
+                        
+                        // DRIFT PROTECTION: If we are reading forward, only auto-scroll if the word 
+                        // is actually FURTHER DOWN than where we already are. 
+                        // This prevents 'previous page jumps' if a background task briefly renders something elsewhere.
+                        const isPhysicallyBehind = rect.bottom < readerRect.top;
+                        const isPhysicallyBeyond = rect.top > readerRect.bottom - threshold;
+                        const isAboveMiddle = rect.top < readerRect.top + threshold;
+
+                        if (isPhysicallyBeyond || (isAboveMiddle && !isPhysicallyBehind) || window.forceResumeScroll) {
+                            const zoom = (typeof currentZoom !== 'undefined') ? currentZoom : 1;
+                            
+                            // IMPROVED SCROLL LOGIC: Target the top 15% of the reader for better reading flow (don't blindly center)
+                            let targetY = reader.scrollTop + (rect.top - readerRect.top) / zoom - (reader.clientHeight / zoom * 0.15);
+                            targetY = Math.max(0, targetY);
+                            
+                            // FORWARD-MOTION ENFORCEMENT: Generally prevent reverse-jumps to avoid 'Scroll Drift',
+                            // but ALWAYS allow the jump if the user just clicked 'Resume' (forceResumeScroll).
+                            if (targetY >= reader.scrollTop - 50 || window.forceResumeScroll) {
+                                // USE 'auto' if forced to ensure instant jump without interference
+                                reader.scrollTo({ top: targetY, behavior: window.forceResumeScroll ? 'auto' : 'smooth' });
+                                window.lastAutoScrollTime = Date.now();
+                                window.forceResumeScroll = false; // Reset after one successful sync
+                            }
                         }
                     }
                 } catch (e) { }
@@ -3349,15 +3809,29 @@ function playNextFallback(startPaused = false, isRetry = false) {
 
     if (!isReadingAloud || isPaused) return;
 
+    // SEAMLESS QUEUE RE-SYNC: If a translation occurred, rebuild the queue from the current place
+    // WITHOUT stopping playback. This removes the 4-second silence gap.
+    if (window.speechSyncNext) {
+        window.speechSyncNext = false;
+        // SILENT RE-CHUNK: Recalculate remaining chunks from the new globalReadingText
+        rebuildRemainingFallbackQueue();
+    }
+
     if (fallbackQueue.length === 0 && !window.speechSynthesis.speaking && !isRetry) {
-        if (currentAbsoluteCharIndex < globalReadingText.length - 10) {
-            // LOAD NEXT CHUNK: Continues the stream seamlessly
-            console.log("Queue low, loading next segment from:", currentAbsoluteCharIndex);
+        // DRIFT RESCUE: If queue is empty but we haven't reached the true end of the book, 
+        // the translation likely shifted some text. Force a map rebuild and try to resume.
+        let remainingTextLength = (globalReadingText.substring(currentAbsoluteCharIndex) || "").trim().length;
+        if (remainingTextLength > 15) {
+            console.warn("Narration queue depleted unexpectedly. Re-calculating book map...");
+            rebuildReadingNodeMap();
+            // Re-sync progress against new text 
             resumeReadingFromIndex(currentAbsoluteCharIndex, false, true);
+            return;
         } else {
+            console.log("True end of text reached.");
             stopReading(true);
+            return;
         }
-        return;
     }
 
 
@@ -3366,272 +3840,259 @@ function playNextFallback(startPaused = false, isRetry = false) {
 
     if (!item) return;
 
+    // USE PRE-FETCHED OBJECT: If background pre-fetching already started this request,
+    // we use the existing DOM object to skip the initial connection handshake.
+    let audio = item.audioObj || new Audio(item.url);
+    currentFallbackAudio = audio;
+
     currentAbsoluteCharIndex = item.offset;
     removeReadingMarks();
 
     window.speechSynthesis.cancel();
     const jobId = entryJobId;
 
-    // JIT EMOTION: Fetch emotion only when we are about to play this chunk to cut initial lag
+    // JIT EMOTION: Fetch emotion without blocking the start of playback
+    let emotion = 'neutral';
     let ePromise = item.getEmotion ? item.getEmotion() : (item.emotionPromise || Promise.resolve('neutral'));
 
-    ePromise.then(res => {
+    function applyEmotionToUI(res) {
         if (jobId !== currentNarrationJobId || !isReadingAloud) return;
+        const em = (typeof res === 'string') ? res : (res.emotion || 'neutral');
+        updateReaderMood(em);
+        
+        // If it's fallback audio (Edge TTS), we can live-adjust the rate
+        if (currentFallbackAudio && !window.speechSynthesis.speaking) {
+            if (em === 'happy') currentFallbackAudio.playbackRate = 1.05 * currentSpeed;
+            else if (em === 'excited') currentFallbackAudio.playbackRate = 1.15 * currentSpeed;
+            else if (em === 'sad') currentFallbackAudio.playbackRate = 0.85 * currentSpeed;
+            else if (em === 'angry') currentFallbackAudio.playbackRate = 1.1 * currentSpeed;
+            else if (em === 'fear') currentFallbackAudio.playbackRate = 0.9 * currentSpeed;
+            else if (em === 'peaceful') currentFallbackAudio.playbackRate = 0.8 * currentSpeed;
+            else currentFallbackAudio.playbackRate = 1.0 * currentSpeed;
+        }
+    }
 
-        const emotion = (typeof res === 'string') ? res : (res.emotion || 'neutral');
-        updateReaderMood(emotion);
+    // Update UI when ready, but don't wait for it to start audio
+    ePromise.then(applyEmotionToUI);
 
-        // SEQUENTIAL PRE-FETCH: Fetch the next chunk's emotion while current one plays
-        if (fallbackQueue.length > 0) {
-            const nextItem = fallbackQueue[0];
-            if (!nextItem.emotionPromise && nextItem.getEmotion) {
-                nextItem.emotionPromise = nextItem.getEmotion();
-            }
+    // Get current best emotion if already cached for immediate pitch setting
+    if (item.text && emotionCache.has(item.text)) {
+        let cachedData = emotionCache.get(item.text);
+        if (typeof cachedData === 'string') emotion = cachedData;
+    }
+
+    // SEQUENTIAL PRE-FETCH: Fetch the next chunk's emotion while current one plays
+    if (fallbackQueue.length > 0) {
+        const nextItem = fallbackQueue[0];
+        if (!nextItem.emotionPromise && nextItem.getEmotion) {
+            nextItem.emotionPromise = nextItem.getEmotion();
+        }
+    }
+
+    const targetLang = getSelectedLanguage() || 'en-US';
+    const shortLang = targetLang.split("-")[0].toLowerCase();
+    const voices = window.speechSynthesis.getVoices();
+    let nativeVoice = getBestVoice(voices, targetLang);
+
+    // CRITICAL FIX: Only use native window.speechSynthesis for English.
+    // For all other languages, we MUST use the server-side Neural TTS engine (Edge/gTTS) 
+    // as it is 100x more reliable and high-quality across all devices.
+    if (nativeVoice && shortLang === 'en') {
+        let utterance = new SpeechSynthesisUtterance(item.text);
+        currentEmotionUtterance = utterance;
+        utterance.lang = nativeVoice.lang;
+        utterance.voice = nativeVoice;
+
+        let basePitch = 1.0;
+        if (currentNarratorGender === 'male') {
+            basePitch = isVoiceActuallyMale(nativeVoice) ? 0.82 : 0.72;
+        } else {
+            basePitch = isVoiceActuallyMale(nativeVoice) ? 1.08 : 1.0;
         }
 
-        const targetLang = getSelectedLanguage() || 'en-US';
-        const shortLang = targetLang.split("-")[0].toLowerCase();
-        const voices = window.speechSynthesis.getVoices();
-        let nativeVoice = getBestVoice(voices, targetLang);
-
-        if (nativeVoice) {
-            let utterance = new SpeechSynthesisUtterance(item.text);
-            currentEmotionUtterance = utterance;
-            utterance.lang = nativeVoice.lang;
-            utterance.voice = nativeVoice;
-
-            let basePitch = 1.0;
-            if (currentNarratorGender === 'male') {
-                basePitch = isVoiceActuallyMale(nativeVoice) ? 0.82 : 0.72;
-            } else {
-                basePitch = isVoiceActuallyMale(nativeVoice) ? 1.08 : 1.0;
-            }
-
-            if (emotion === 'happy') {
-                utterance.pitch = basePitch * 1.08;
-                utterance.rate = 1.05 * currentSpeed;
-            } else if (emotion === 'excited') {
-                utterance.pitch = basePitch * 1.15;
-                utterance.rate = 1.10 * currentSpeed;
-            } else if (emotion === 'sad') {
-                utterance.pitch = basePitch * 0.85;
-                utterance.rate = 0.90 * currentSpeed;
-            } else if (emotion === 'angry') {
-                utterance.pitch = basePitch * 0.92;
-                utterance.rate = 1.05 * currentSpeed;
-            } else if (emotion === 'fear') {
-                utterance.pitch = basePitch * 1.10;
-                utterance.rate = 0.95 * currentSpeed;
-            } else if (emotion === 'peaceful') {
-                utterance.pitch = basePitch * 0.95;
-                utterance.rate = 0.85 * currentSpeed;
-            } else {
-                utterance.pitch = basePitch;
-                utterance.rate = 1.0 * currentSpeed;
-            }
-
-            let utteranceStartTime = Date.now();
-            const progEl = document.getElementById("readingProgress");
-
-            let boundaryReceived = false;
-            utterance.onboundary = (event) => {
-                if (jobId !== currentNarrationJobId) return;
-                boundaryReceived = true; // Signal that native events are working
-                
-                currentAbsoluteCharIndex = item.offset + event.charIndex;
-                highlightReadingWord(item.offset + event.charIndex, event.charLength || 5);
-                
-                if (progEl) {
-                    const prog = Math.round((currentAbsoluteCharIndex / globalReadingText.length) * 100);
-                    progEl.innerText = `| ${prog}% Read`;
-                }
-            };
-
-            utterance.onstart = () => {
-                if (jobId !== currentNarrationJobId) return;
-                utteranceStartTime = Date.now();
-
-                let words = [];
-                let regex = /[\p{L}\p{N}\p{M}]+/gu;
-                let match;
-                while ((match = regex.exec(item.text)) !== null) {
-                    words.push({
-                        startOffset: item.offset + match.index,
-                        length: match[0].length
-                    });
-                }
-                if (words.length === 0 && item.text.length > 0) {
-                    words.push({ startOffset: item.offset, length: item.text.length });
-                }
-
-                // HIGH-PRECISION ESTIMATION LOOP: SILENT FALLBACK
-                const totalChars = item.text.length;
-                const speedEstimate = (15 * (utterance.rate || 1.0)) / 1000; 
-
-                let hIn = setInterval(() => {
-                    // Only run if Job is valid AND no native boundary events have arrived yet
-                    if (jobId !== currentNarrationJobId || boundaryReceived || !isReadingAloud || isPaused) {
-                        clearInterval(hIn);
-                        return;
-                    }
-
-                    let elapsed = Date.now() - utteranceStartTime;
-                    const estimatedPos = Math.min(totalChars, elapsed * speedEstimate);
-                    let bestWord = words[0];
-                    for (let w of words) {
-                        if (w.startOffset - item.offset <= estimatedPos) bestWord = w;
-                        else break;
-                    }
-
-                    if (bestWord) {
-                        currentAbsoluteCharIndex = bestWord.startOffset;
-                        highlightReadingWord(bestWord.startOffset, bestWord.length);
-                    }
-                    if (estimatedPos >= totalChars) clearInterval(hIn);
-                }, 100); // 100ms is enough for estimation fallback
-            };
-
-            utterance.onend = () => {
-                if (jobId !== currentNarrationJobId) return;
-                removeReadingMarks();
-                if (isReadingAloud && !isPaused) {
-                    // CRITICAL FIX: Advance the global pointer to the end of what we just finished reading
-                    currentAbsoluteCharIndex = item.offset + item.text.length;
-                    playNextFallback();
-                }
-            };
-
-            utterance.onerror = () => {
-                if (jobId === currentNarrationJobId) {
-                    setTimeout(() => playNextFallback(false, false), 500);
-                }
-            };
-
-            window.speechSynthesis.speak(utterance);
+        // Apply emotion parameters if we got them from cache
+        if (emotion === 'happy') {
+            utterance.pitch = basePitch * 1.08;
+            utterance.rate = 1.05 * currentSpeed;
+        } else if (emotion === 'excited') {
+            utterance.pitch = basePitch * 1.15;
+            utterance.rate = 1.10 * currentSpeed;
+        } else if (emotion === 'sad') {
+            utterance.pitch = basePitch * 0.85;
+            utterance.rate = 0.90 * currentSpeed;
+        } else if (emotion === 'angry') {
+            utterance.pitch = basePitch * 0.92;
+            utterance.rate = 1.05 * currentSpeed;
+        } else if (emotion === 'fear') {
+            utterance.pitch = basePitch * 1.10;
+            utterance.rate = 0.95 * currentSpeed;
+        } else if (emotion === 'peaceful') {
+            utterance.pitch = basePitch * 0.95;
+            utterance.rate = 0.85 * currentSpeed;
         } else {
-            let url = `/tts?lang=${shortLang}&text=${encodeURIComponent(item.text.trim())}&gender=${currentNarratorGender}`;
-            let audio = new Audio(url);
-            currentFallbackAudio = audio;
+            utterance.pitch = basePitch;
+            utterance.rate = 1.0 * currentSpeed;
+        }
 
-            // Ensure AudioContext is resumed on user interaction
-            const ctx = getAudioContext();
-            if (ctx.state === 'suspended') {
-                ctx.resume();
+        let utteranceStartTime = Date.now();
+        const progEl = document.getElementById("readingProgress");
+
+        let boundaryReceived = false;
+        utterance.onboundary = (event) => {
+            if (jobId !== currentNarrationJobId) return;
+            boundaryReceived = true; 
+            currentAbsoluteCharIndex = item.offset + event.charIndex;
+            highlightReadingWord(item.offset + event.charIndex, event.charLength || 5);
+            if (progEl) {
+                const prog = Math.round((currentAbsoluteCharIndex / globalReadingText.length) * 100);
+                progEl.innerText = `| ${prog}% Read`;
             }
+        };
 
-            // HIGH-FIDELITY NEURAL ENGINE: The new Node.js worker provides perfectly mastered voices.
-            // Artificial resonators are disabled to preserve the natural neural clarity.
-            try {
-                const ctx = getAudioContext();
-                const source = ctx.createMediaElementSource(audio);
-                source.connect(ctx.destination);
-            } catch (e) {
-                console.warn("AudioContext already attached or error:", e);
-            }
-
-            if (emotion === 'happy') audio.playbackRate = 1.05 * currentSpeed;
-            else if (emotion === 'excited') audio.playbackRate = 1.15 * currentSpeed;
-            else if (emotion === 'sad') audio.playbackRate = 0.85 * currentSpeed;
-            else if (emotion === 'angry') audio.playbackRate = 1.1 * currentSpeed;
-            else if (emotion === 'fear') audio.playbackRate = 0.9 * currentSpeed;
-            else if (emotion === 'peaceful') audio.playbackRate = 0.8 * currentSpeed;
-            else audio.playbackRate = 1.0 * currentSpeed;
-
-
-            // Prevent audio clipping at high speeds
-            audio.preservesPitch = false;
-
+        utterance.onstart = () => {
+            if (jobId !== currentNarrationJobId) return;
+            utteranceStartTime = Date.now();
             let words = [];
-            // UNICODE TOKENIZER: Captures words for ALL scripts (Hindi, Tamil, Arabic, etc.)
-            // We split by any character that is NOT a word constituent, preserving script boundaries.
             let regex = /[\p{L}\p{N}\p{M}]+/gu;
             let match;
             while ((match = regex.exec(item.text)) !== null) {
-                words.push({
-                    startOffset: item.offset + match.index,
-                    length: match[0].length
-                });
+                words.push({ startOffset: item.offset + match.index, length: match[0].length });
             }
-
-            // SAFETY: In case of empty word list (scripts like Thai/Chinese)
             if (words.length === 0 && item.text.length > 0) {
                 words.push({ startOffset: item.offset, length: item.text.length });
             }
-
-            const totalChunkLength = item.text.length;
-
-            const syncHighlight = () => {
-                if (jobId !== currentNarrationJobId || !isReadingAloud || isPaused || !currentFallbackAudio) {
+            const totalChars = item.text.length;
+            const speedEstimate = (15 * (utterance.rate || 1.0)) / 1000; 
+            let hIn = setInterval(() => {
+                if (jobId !== currentNarrationJobId || boundaryReceived || !isReadingAloud || isPaused) {
+                    clearInterval(hIn);
                     return;
                 }
-
-                // STREAMING SYNC: Handle cases where duration is not yet known (streaming audio)
-                let duration = audio.duration;
-                // If duration is missing (streaming mode), estimate it using stable "natural" duration 
-                // at 1x speed (approx 14 chars/sec) to ensure progress is strictly based on currentTime/duration.
-                if (isNaN(duration) || duration === Infinity || duration <= 0) {
-                    duration = totalChunkLength / 14; 
+                let elapsed = Date.now() - utteranceStartTime;
+                const estimatedPos = Math.min(totalChars, elapsed * speedEstimate);
+                let bestWord = words[0];
+                for (let w of words) {
+                    if (w.startOffset - item.offset <= estimatedPos) bestWord = w;
+                    else break;
                 }
-
-                if (audio.currentTime > 0) {
-                    let progress = audio.currentTime / duration;
-                    if (progress > 1.0) progress = 1.0;
-                    if (progress >= 0.999) return;
-
-                    let currentPosInChunk = progress * totalChunkLength;
-
-                    let foundWord = words[0];
-                    for (let w of words) {
-                        if (w.startOffset - item.offset <= currentPosInChunk) {
-                            foundWord = w;
-                        } else {
-                            break;
-                        }
-                    }
-
-
-
-                    if (foundWord) {
-                        lastEmotionItemProgress = foundWord.startOffset - item.offset;
-                        currentAbsoluteCharIndex = foundWord.startOffset;
-                        highlightReadingWord(foundWord.startOffset, foundWord.length, item.offset, item.text.length);
-                    }
+                if (bestWord) {
+                    currentAbsoluteCharIndex = bestWord.startOffset;
+                    highlightReadingWord(bestWord.startOffset, bestWord.length);
                 }
+                if (estimatedPos >= totalChars) clearInterval(hIn);
+            }, 100);
+        };
 
-                requestAnimationFrame(syncHighlight);
-            };
+        utterance.onend = () => {
+            if (jobId !== currentNarrationJobId) return;
+            removeReadingMarks();
+            if (isReadingAloud && !isPaused) {
+                currentAbsoluteCharIndex = item.offset + item.text.length;
+                playNextFallback();
+            }
+        };
 
-            audio.onplay = () => {
-                if (jobId !== currentNarrationJobId) return;
-                requestAnimationFrame(syncHighlight);
-            };
+        utterance.onerror = () => {
+            if (jobId === currentNarrationJobId) setTimeout(() => playNextFallback(false, false), 500);
+        };
 
-            audio.onended = () => {
-                if (jobId !== currentNarrationJobId) return;
-                removeReadingMarks();
-                if (isReadingAloud && !isPaused) playNextFallback();
-            };
+        window.speechSynthesis.speak(utterance);
+    } else {
+        currentFallbackAudio = audio;
 
-            audio.onerror = () => {
-                if (jobId === currentNarrationJobId) {
-                    setTimeout(() => playNextFallback(false, false), 500);
+        const ctx = getAudioContext();
+        if (ctx.state === 'suspended') ctx.resume();
+
+        try {
+            const ctx = getAudioContext();
+            const source = ctx.createMediaElementSource(audio);
+            source.connect(ctx.destination);
+        } catch (e) {
+            console.warn("AudioContext already attached or error:", e);
+        }
+
+        // Rate adjustment (async emotion might change this later via applyEmotionToUI)
+        audio.playbackRate = 1.0 * currentSpeed; 
+        audio.preservesPitch = false;
+
+        let words = [];
+        let regex = /[\p{L}\p{N}\p{M}]+/gu;
+        let match;
+        while ((match = regex.exec(item.text)) !== null) {
+            words.push({ startOffset: item.offset + match.index, length: match[0].length });
+        }
+        if (words.length === 0 && item.text.length > 0) {
+            words.push({ startOffset: item.offset, length: item.text.length });
+        }
+
+        const totalChunkLength = item.text.length;
+        const syncHighlight = () => {
+            if (jobId !== currentNarrationJobId || !isReadingAloud || isPaused || !currentFallbackAudio) return;
+            let duration = audio.duration;
+            if (isNaN(duration) || duration === Infinity || duration <= 0) duration = totalChunkLength / 14; 
+            if (audio.currentTime > 0) {
+                let progress = audio.currentTime / duration;
+                if (progress > 1.0) progress = 1.0;
+                if (progress >= 0.999) return;
+                let currentPosInChunk = progress * totalChunkLength;
+                let foundWord = words[0];
+                for (let w of words) {
+                    if (w.startOffset - item.offset <= currentPosInChunk) foundWord = w;
+                    else break;
                 }
-            };
-
-            audio.play().catch(e => {
-                console.error("Playback failed:", e);
-                if (jobId === currentNarrationJobId) {
-                    setTimeout(() => playNextFallback(false, false), 500);
+                if (foundWord) {
+                    lastEmotionItemProgress = foundWord.startOffset - item.offset;
+                    currentAbsoluteCharIndex = foundWord.startOffset;
+                    highlightReadingWord(foundWord.startOffset, foundWord.length, item.offset, item.text.length);
                 }
+            }
+            requestAnimationFrame(syncHighlight);
+        };
+
+        audio.onplay = () => {
+            if (jobId !== currentNarrationJobId) return;
+            requestAnimationFrame(syncHighlight);
+        };
+
+        audio.onended = () => {
+            if (jobId !== currentNarrationJobId) return;
+            removeReadingMarks();
+            if (isReadingAloud && !isPaused) playNextFallback();
+        };
+
+        audio.onerror = () => {
+            if (jobId === currentNarrationJobId) setTimeout(() => playNextFallback(false, false), 500);
+        };
+
+        // PRE-FETCH ENGINE: Fetch next 3 sentences in the background
+        const PREFETCH_LOOKAHEAD = 3;
+        for (let i = 0; i < Math.min(PREFETCH_LOOKAHEAD, fallbackQueue.length); i++) {
+            const nextItem = fallbackQueue[i];
+            if (!nextItem.audioObj) {
+                // Initialize background fetch
+                nextItem.audioObj = new Audio(nextItem.url);
+                nextItem.audioObj.preload = "auto";
+                nextItem.audioObj.load();
+            }
+        }
+
+        audio.play().catch(e => {
+            console.error("Playback failed:", e);
+            if (jobId === currentNarrationJobId) setTimeout(() => playNextFallback(false, false), 500);
+        });
+
+        // GAPLESS PREFETCH: Prime the cache for the next several sentences
+        // This ensures the browser has the data ready BEFORE the current sentence ends.
+        if (fallbackQueue.length > 0) {
+            fallbackQueue.slice(0, 3).forEach(nextItem => {
+                const preload = new Audio();
+                preload.src = nextItem.url;
+                preload.preload = "auto";
+                preload.volume = 0; // Don't play yet
+                preload.load();
             });
         }
-    }).catch(err => {
-        console.error("Main Narration Error:", err);
-        updateReaderMood('neutral');
-        if (isReadingAloud && !isPaused) {
-            setTimeout(() => playNextFallback(false, false), 300);
-        }
-    });
+    }
 }
 
 function updateReaderMood(emotion) {
@@ -3657,7 +4118,7 @@ async function closeBookAction() {
 
     // Ask for bookmark if progress made
     if (currentAbsoluteCharIndex > 0) {
-        showBookmarkModal(
+        showConfirmModal(
             "Save Bookmark?",
             "Would you like to save your reading progress before closing?",
             "Save",
@@ -3696,13 +4157,25 @@ async function executeClosingSequence() {
     if (playPauseBtn) playPauseBtn.innerText = "Read Full ▶";
 
     if (reader) {
+        reader.classList.add('no-spine-shadow');
         reader.style.opacity = "1";
         reader.innerHTML = "";
 
+        // Hide the floating book badge
+        const bookBadgeEl = document.getElementById("bookBadge");
+        if (bookBadgeEl) bookBadgeEl.classList.remove('visible');
+        stopStudyTimer();
+
+        // Show thank you state if it exists (moved to a safe location in HTML)
         let thankYou = document.getElementById("thankYouState");
         if (thankYou) {
             thankYou.style.display = "block";
-            reader.appendChild(thankYou);
+            // Auto-dismiss after 4 seconds
+            setTimeout(() => {
+                if (thankYou.style.display === "block") {
+                    thankYou.style.display = "none";
+                }
+            }, 4000);
         }
         reader.classList.remove('folding-exit');
     }
@@ -3718,17 +4191,45 @@ function scrollToIndex(index) {
     let reader = document.getElementById("reader");
     if (!reader) return;
 
-    let walker = document.createTreeWalker(reader, NodeFilter.SHOW_TEXT, null, false);
-    let currentLength = 0;
+    // Use established extraction logic to ensure exact offset mapping (accounting for virtual spaces)
+    let { nodes, offsets } = getNodesAndText(reader);
+    
+    let targetNode = null;
+    let nodeOffset = 0;
 
-    while (walker.nextNode()) {
-        let node = walker.currentNode;
-        if (currentLength + node.nodeValue.length > index) {
-            // Scroll the parent element of the text node into view
-            node.parentNode.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    for (let i = 0; i < nodes.length; i++) {
+        const start = offsets[i];
+        const end = start + nodes[i].nodeValue.length;
+
+        if (index >= start && index < end) {
+            targetNode = nodes[i];
+            nodeOffset = index - start;
             break;
         }
-        currentLength += node.nodeValue.length;
+    }
+
+    if (targetNode) {
+        try {
+            // Use Range for most precise visual centering (targets the specific character)
+            const range = document.createRange();
+            range.setStart(targetNode, nodeOffset);
+            range.setEnd(targetNode, Math.min(nodeOffset + 1, targetNode.nodeValue.length));
+            
+            const rect = range.getBoundingClientRect();
+            const readerRect = reader.getBoundingClientRect();
+            
+            // Fixed jump-scroll: Target top 15% instead of center
+            const zoom = (typeof currentZoom !== 'undefined') ? currentZoom : 1;
+            const targetY = Math.max(0, reader.scrollTop + (rect.top - readerRect.top) / zoom - (reader.clientHeight / zoom * 0.15));
+            
+            reader.scrollTo({
+                top: targetY,
+                behavior: 'smooth'
+            });
+        } catch (e) {
+            // Fallback to simple scrollIntoView if range fails
+            targetNode.parentNode.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
     }
 }
 
@@ -3910,6 +4411,9 @@ function applyZoom() {
     if (typeof updatePannableState === 'function') {
         setTimeout(updatePannableState, 100);
     }
+    
+    // Maintain visual marker sync after scaling
+    setTimeout(() => renderBookmarkIcons(), 150);
 }
 
 
@@ -4209,8 +4713,8 @@ async function processVoiceCommand(command) {
 
     // 1. HELP / CAPABILITIES
     if (command.includes("what can you do") || command.includes("help")) {
-        feedback.innerText = "I can read, pause, change speed, navigate pages, and switch themes.";
-        speakAIResponse("I can help you read, pause, or change speed. Try saying: 'Go to page 5' or 'Switch to dark mode'.");
+        feedback.innerText = "I can read, pause, change speed, navigate pages, open quizzes, bookmarks, and switch themes.";
+        speakAIResponse("I can help you read, pause, or change speed. I can also open your quiz, bookmarks, or notebook. Try saying: 'Open my quiz' or 'Read faster'.");
         return;
     }
 
@@ -4230,9 +4734,57 @@ async function processVoiceCommand(command) {
         return;
     }
 
-    // 3. SPEED CONTROL
+    // 3. STUDY TOOLS CONTROL (Quiz, Bookmarks, Notebook, Revision)
+    if (command.includes("quiz")) {
+        feedback.innerText = "Opening Quiz...";
+        if (typeof generateQuiz === 'function') {
+            generateQuiz();
+            speakAIResponse("Opening your book quiz.");
+        }
+        return;
+    }
+    if (command.includes("bookmark")) {
+        feedback.innerText = "Opening Bookmarks...";
+        if (typeof openBookmarks === 'function') {
+            openBookmarks();
+            speakAIResponse("Opening your saved bookmarks.");
+        }
+        return;
+    }
+    if (command.includes("notebook") || command.includes("notes")) {
+        feedback.innerText = "Opening Notebook...";
+        if (typeof openNotebook === 'function') {
+            openNotebook();
+            speakAIResponse("Opening your study notebook.");
+        }
+        return;
+    }
+    if (command.includes("revision") || command.includes("key points")) {
+        feedback.innerText = "Generating Revision...";
+        if (typeof generateRevision === 'function') {
+            generateRevision();
+            speakAIResponse("Generating the revision guide for this book.");
+        }
+        return;
+    }
+
+    // 4. ZOOM / TEXT SIZE CONTROL
+    if (command.includes("zoom in") || command.includes("increase text") || command.includes("larger text") || command.includes("increase size")) {
+        changeZoom(0.1);
+        feedback.innerText = "Increasing text size...";
+        speakAIResponse("Increasing text size.");
+        return;
+    }
+    if (command.includes("zoom out") || command.includes("decrease text") || command.includes("smaller text") || command.includes("decrease size")) {
+        changeZoom(-0.1);
+        feedback.innerText = "Decreasing text size...";
+        speakAIResponse("Decreasing text size.");
+        return;
+    }
+
+    // 5. SPEED CONTROL
     if (command.includes("speed")) {
-        let match = command.match(/(\d+(\.\d+)?)/);
+        const match = command.match(/speed(?:(?:\s+to)?\s+)?(\d+(?:\.\d+)?)/i);
         if (match && match[1]) {
             let targetSpeed = parseFloat(match[1]);
             let delta = targetSpeed - currentSpeed;
@@ -4240,36 +4792,36 @@ async function processVoiceCommand(command) {
             const speedMsg = `Speed set to ${currentSpeed.toFixed(1)}x.`;
             feedback.innerText = speedMsg;
             speakAIResponse(speedMsg);
-        } else if (command.includes("faster") || command.includes("increase")) {
-            changeSpeed(0.25);
-            const fasterMsg = `Increasing speed to ${currentSpeed.toFixed(1)}x.`;
-            feedback.innerText = fasterMsg;
-            speakAIResponse(fasterMsg);
-        } else if (command.includes("slower") || command.includes("decrease")) {
-            changeSpeed(-0.25);
-            const slowerMsg = `Decreasing speed to ${currentSpeed.toFixed(1)}x.`;
-            feedback.innerText = slowerMsg;
-            speakAIResponse(slowerMsg);
+            return;
         }
+    }
+    
+    if (command.includes("fast") || command.includes("increase speed") || command.includes("faster")) {
+        changeSpeed(0.2);
+        const fasterMsg = `Reading faster at ${currentSpeed.toFixed(1)}x.`;
+        feedback.innerText = fasterMsg;
+        speakAIResponse(fasterMsg);
+        return;
+    } 
+    
+    if (command.includes("slow") || command.includes("decrease speed") || command.includes("slower")) {
+        changeSpeed(-0.2);
+        const slowerMsg = `Reading slower at ${currentSpeed.toFixed(1)}x.`;
+        feedback.innerText = slowerMsg;
+        speakAIResponse(slowerMsg);
         return;
     }
 
-    // 4. SEARCH CONTROL (Find words)
+    // 6. SEARCH CONTROL (Find words)
     if (command.includes("find") || command.includes("search for")) {
-        // Extraction regex for voice commands like "find the word photosynthesis" or "search for engine"
         let wordMatch = command.match(/(?:find the word|find|search for|search)\s+([\w\u0080-\uFFFF]+)/i);
         if (wordMatch && wordMatch[1]) {
             let targetWord = wordMatch[1];
-            
-            // 1. Show the find box and populate the input
             const findBox = document.getElementById("findBox");
             const findInput = document.getElementById("findInput");
             if (findBox) findBox.style.display = "flex";
             if (findInput) findInput.value = targetWord;
-            
-            // 2. Execute the search logic
             executeSearch(targetWord);
-            
             const searchMsg = `Searching for "${targetWord}".`;
             feedback.innerText = searchMsg;
             speakAIResponse(searchMsg);
@@ -4277,15 +4829,13 @@ async function processVoiceCommand(command) {
         }
     }
 
-    // 5. NAVIGATION CONTROL (Go to page X)
+    // 7. NAVIGATION CONTROL (Go to page X)
     if (command.includes("page") || command.includes("scroll to") || command.includes("go to")) {
         let match = command.match(/page\s*(\d+)/) || command.match(/to\s*(\d+)/);
         if (match && match[1]) {
             let pageNum = parseInt(match[1]);
-            // Many docs use 0-indexing for container IDs internally
             const pageId = (pageNum > 100) ? `pdf-page-${pageNum}` : `pdf-page-${pageNum - 1}`;
             let pageEl = document.getElementById(pageId) || document.getElementById(`pdf-page-${pageNum}`);
-            
             if (pageEl) {
                 pageEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
                 const navMsg = `Scrolling to page ${pageNum}.`;
@@ -4299,26 +4849,36 @@ async function processVoiceCommand(command) {
         }
     }
 
-    // 5. NARRATION CONTROL
-    if (command.includes("read") || command.includes("play") || command.includes("start reading") || command.includes("resume")) {
-        feedback.innerText = "Resuming reading...";
+    // 8. NARRATION CONTROL (Start/Stop)
+    if (command.includes("read") || command.includes("play") || command.includes("start") || command.includes("resume")) {
         if (!isReadingAloud || isPaused) {
+            feedback.innerText = "Starting narration...";
             togglePlayPause();
-            speakAIResponse("Resuming.");
+            speakAIResponse("Starting reading.");
+        } else {
+            speakAIResponse("I am already reading the book for you.");
         }
         return;
     } 
     
-    if (command.includes("stop") || command.includes("pause") || command.includes("quiet")) {
-        feedback.innerText = "Paused.";
+    if (command.includes("stop") || command.includes("pause") || command.includes("quiet") || command.includes("shut up")) {
         if (isReadingAloud && !isPaused) {
-            togglePlayPause(); // Pause via toggle
-            speakAIResponse("Narration paused.");
+            feedback.innerText = "Pausing...";
+            togglePlayPause(); 
+            speakAIResponse("Okay, pausing the reading.");
         }
         return;
     }
 
-    // 6. INTENT: Contextual Analysis (Fallback for complex questions)
+    // 9. EXIT CONTROL
+    if (command.includes("close the book") || command.includes("exit book") || command.includes("stop book")) {
+        feedback.innerText = "Closing book...";
+        speakAIResponse("Closing the book.");
+        setTimeout(() => closeBookAction(), 1000);
+        return;
+    }
+
+    // 10. AI QUERY FALLBACK (Meaning, explanation, etc.)
     if (command.includes("meaning") || command.includes("what is") || command.includes("explain") || command.includes("summarize") || command.includes("who is")) {
         handleAIQuery(command, "general");
     } else {
@@ -4368,11 +4928,11 @@ async function handleAIQuery(query, type) {
     }
 
     try {
-        const response = await fetch('/api/ask', {
+        const response = await fetch('/ask', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                query: query,
+                question: query,
                 context: context,
                 book_id: (typeof currentBookId !== 'undefined') ? currentBookId : null
             })
@@ -4407,5 +4967,495 @@ function speakAIResponse(text) {
     };
     window.speechSynthesis.speak(utterance);
 }
+
+
+async function explainImage(element) {
+    const img = element.querySelector('img');
+    if (!img) return;
+    
+    // Show Modal
+    const modal = document.getElementById("imageExplanationModal");
+    const preview = document.getElementById("imageExplanationPreview");
+    const previewContainer = document.getElementById("imageExplanationPreviewContainer");
+    const textOutput = document.getElementById("imageExplanationText");
+    
+    if (modal) modal.style.display = "flex";
+    if (preview) {
+        preview.src = img.src;
+        if (previewContainer) previewContainer.style.display = "block";
+    }
+    if (textOutput) textOutput.innerText = "🔍 AI Vision is analyzing image markers...";
+    
+    // Check if we have OCR reading layer text embedded
+    let ocrText = "";
+    const ocrLayer = element.querySelector('.ocr-reading-layer');
+    if (ocrLayer) ocrText = ocrLayer.innerText;
+    
+    try {
+        const res = await fetch("/explain_image", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                src: img.getAttribute('src'),
+                ocr_text: ocrText,
+                book_id: currentBookId
+            })
+        });
+        
+        const data = await res.json();
+        if (data.explanation && textOutput) {
+            textOutput.innerText = data.explanation;
+        } else if (data.error && textOutput) {
+            textOutput.innerText = "❌ Analysis failed: " + data.error;
+        }
+    } catch (e) {
+        if (textOutput) textOutput.innerText = "❌ Connection to Vision Engine lost.";
+    }
+}
+
+
+async function saveBookmarkManual(forceReplace = false) {
+    if (!currentBookId) {
+        showUploadToast("📚 Open a book to save progress", "info");
+        return;
+    }
+
+    const selection = window.getSelection();
+    let selectedText = selection.toString().trim();
+    let pageNum = parseInt(document.getElementById('currentPageInput')?.value || 1);
+
+    const reader = document.getElementById('reader');
+    let charIndex = 0;
+    let nodeIndex = -1;
+    let nodeOffset = 0;
+    
+    // Precise Cursor / Selection Detection
+    if (selection && selection.rangeCount > 0) {
+        const range = selection.getRangeAt(0);
+        // Calculate charIndex from reader start
+        const { nodes, offsets } = getNodesAndText(reader);
+        
+        let startNode = range.startContainer;
+        let startOffset = range.startOffset;
+        
+        for (let i = 0; i < nodes.length; i++) {
+            if (nodes[i] === startNode) {
+                charIndex = offsets[i] + startOffset;
+                nodeIndex = i;
+                nodeOffset = startOffset;
+                break;
+            }
+        }
+        
+        // Also update page number from selection context if possible
+        const container = range.startContainer.parentElement?.closest('.lazy-page-container');
+        if (container && container.id.includes('pdf-page-')) {
+            pageNum = parseInt(container.id.replace('pdf-page-', '')) + 1;
+        }
+    } else {
+        // Fallback to current reading progress or scroll position
+        charIndex = currentAbsoluteCharIndex || 0;
+        // Find node for charIndex to store for language-switching support
+        if (globalTextNodes && globalTextNodes.length > 0) {
+            for (let i = 0; i < globalNodeOffsets.length; i++) {
+                if (globalNodeOffsets[i] <= charIndex && (i === globalNodeOffsets.length - 1 || globalNodeOffsets[i+1] > charIndex)) {
+                    nodeIndex = i;
+                    nodeOffset = charIndex - globalNodeOffsets[i];
+                    break;
+                }
+            }
+        }
+    }
+
+    const currentLangSelect = document.getElementById('langSelect');
+    const langCode = currentLangSelect ? currentLangSelect.value : 'en';
+
+    const scrollY = reader ? Math.round(reader.scrollTop) : 0;
+    
+    // Auto-Label from context (Premium Identification)
+    let label = selectedText;
+    if (!label) {
+        // If no text selected, try to get the word at currentAbsoluteCharIndex
+        if (currentAbsoluteCharIndex > 0 && globalReadingText) {
+            const contextText = globalReadingText.substring(currentAbsoluteCharIndex, currentAbsoluteCharIndex + 40);
+            const firstWordMatch = contextText.match(/^\s*(\S+)/);
+            label = firstWordMatch ? firstWordMatch[1] : `Bookmark @ ${currentAbsoluteCharIndex}`;
+        } else {
+            label = `Bookmark @ Char ${charIndex}`;
+        }
+    }
+
+    try {
+        const res = await fetch("/save_bookmark", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                book_id: currentBookId,
+                page_number: pageNum,
+                scroll_y: scrollY,
+                char_index: charIndex,
+                node_index: nodeIndex,
+                node_offset: nodeOffset,
+                lang_code: langCode,
+                label: label,
+                replace: forceReplace
+            })
+        });
+
+        const data = await res.json();
+        
+        if (data.status === "exists") {
+            // Use custom modal for confirmation as requested
+            showConfirmModal(
+                "Update Bookmark?",
+                "You already have a bookmark for this book. Would you like to move it to this new location?",
+                "Update Positon",
+                "Keep Old",
+                null,
+                () => saveBookmarkManual(true) // Retry with forceReplace=true
+            );
+            return;
+        }
+
+        if (res.ok) {
+            // Silent Success - No Toast as requested, just visual feedback
+            const toolbar = document.getElementById('selectionToolbar');
+            if (toolbar) toolbar.style.display = 'none';
+            if (selection) selection.removeAllRanges();
+            
+            // Pulse the bookmark icon if visible in any UI
+            console.log("Bookmark updated successfully.");
+            renderBookmarkIcons(); // Show the icon immediately
+        }
+    } catch (e) {
+        console.error("Bookmark save error:", e);
+    }
+}
+
+async function openBookmarks() {
+    if (!currentBookId) return;
+    document.getElementById("bookmarksModal").style.display = "flex";
+    
+        const list = document.getElementById("bookmarksList");
+    list.innerHTML = `<div style="text-align: center; padding: 20px; color: var(--text-light);">Loading bookmarks...</div>`;
+
+    try {
+        const res = await fetch(`/bookmarks/${currentBookId}`);
+        let bookmarks = await res.json();
+        
+        // --- REAL-TIME HUB TRANSLATION ---
+        const currentLang = document.getElementById('langSelect')?.value || 'orig';
+        
+        if (currentLang !== 'orig' && bookmarks.length > 0) {
+            const needsTranslation = bookmarks.filter(bm => bm.lang_code !== currentLang && bm.label && !bm.label.includes('Page '));
+            if (needsTranslation.length > 0) {
+                const labels = needsTranslation.map(bm => bm.label);
+                const tRes = await fetch("/translate_text", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ texts: labels, target_lang: currentLang })
+                });
+                const translatedLabels = await tRes.json();
+                needsTranslation.forEach((bm, i) => {
+                    bm.label = translatedLabels[i];
+                });
+            }
+        }
+
+        document.getElementById("bookmarksCount").innerText = `${bookmarks.length} Saved Locations`;
+        list.innerHTML = "";
+
+        if (bookmarks.length === 0) {
+            list.innerHTML = `<div style="text-align: center; padding: 40px; color: var(--text-light);">No bookmarks found. Click the 🔖 button to save your progress!</div>`;
+            return;
+        }
+
+        bookmarks.forEach(bm => {
+            const div = document.createElement("div");
+            div.className = "bookmark-card";
+            div.style.cssText = "background: var(--bg-panel); border-bottom: 1px solid var(--border); padding: 20px; display: flex; justify-content: space-between; align-items: center; border-radius: 12px; margin-bottom: 10px; transition: all 0.3s;";
+            
+            div.innerHTML = `
+                <div style="flex: 1; cursor: pointer;" onclick="jumpToBookmark(${bm.page_number}, ${bm.scroll_y}, false, ${bm.char_index})">
+                    <h4 style="color: var(--text-white); margin-bottom: 5px;">${bm.label}</h4>
+                    <p style="color: var(--text-light); font-size: 0.85rem;">${bm.char_index > 0 ? 'Exact Location' : 'Page ' + bm.page_number} • ${new Date(bm.created_at).toLocaleDateString()}</p>
+                </div>
+                <button onclick="deleteBookmark(${bm.id})" style="background: none; border: none; color: #ef4444; opacity: 0.5; cursor: pointer; padding: 10px;" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=0.5">✕</button>
+            `;
+            list.appendChild(div);
+        });
+    } catch (err) {
+        list.innerHTML = `<div style="color: #ef4444;">Failed to load bookmarks.</div>`;
+    }
+}
+
+function jumpToBookmark(page, scrollY, isAuto = false, charIndex = 0) {
+    if (isAuto && isReadingAloud) return; // DON'T HIJACK SCREEN ON STARTING BOOK
+    closeBookmarks();
+    
+    // If we have a precise charIndex (non-zero), use it for scrolling
+    if (charIndex > 0) {
+        scrollToIndex(charIndex);
+        if (!isAuto) {
+            showUploadToast(`📍 Resumed @ Exact Location`, "success");
+        }
+        return;
+    }
+
+    // Fallback: Jump to page (sync)
+    jumpToPage(page);
+    
+    // 2. Adjust scrolling
+    setTimeout(() => {
+        const reader = document.getElementById('reader');
+        if (reader) {
+            reader.scrollTo({
+                top: scrollY,
+                behavior: isAuto ? 'auto' : 'smooth'
+            });
+            if (!isAuto) {
+                showUploadToast(`📍 Resumed at Page ${page}`, "success");
+            }
+        }
+    }, isAuto ? 100 : 600);
+}
+
+function renderBookmarkIcons() {
+    const reader = document.getElementById('reader');
+    if (!reader || !currentBookId) return;
+
+    // 1. CLEAR existing icons BEFORE rebuilding the map to ensure character accuracy
+    reader.querySelectorAll('.bookmark-symbol').forEach(el => el.remove());
+    if (bookmarkHighlight) bookmarkHighlight.clear();
+
+    // 2. FORCE REBUILD MAP: Now that icons are gone, the offsets will be perfect
+    rebuildReadingNodeMap();
+
+    fetch(`/bookmarks/${currentBookId}`)
+        .then(r => r.json())
+        .then(bookmarks => {
+            if (!bookmarks || bookmarks.length === 0) return;
+
+            // Use character index for precision symbol placement
+            bookmarks.forEach(bm => {
+                if (bm.char_index >= 0) {
+                    placeSymbolAtIndex(bm.char_index, bm.id, bm.node_index, bm.node_offset);
+                }
+            });
+        });
+}
+
+function placeSymbolAtIndex(charIndex, id, nodeIndex = -1, nodeOffset = 0) {
+    const reader = document.getElementById('reader');
+    if (!reader) return;
+
+    // Use established global map (rebuilt once at the start of renderBookmarkIcons)
+    // No redundant rebuild here! (Huge speed boost for many bookmarks)
+
+    // Prefer absolute charIndex mapping for original language (STABLE even after splits/merges)
+    // We only use node-relative mapping as a rescue for translated docs where offsets shifted.
+    const isTranslated = typeof window.currentTargetLang !== 'undefined' && window.currentTargetLang !== 'orig';
+    
+    if (!isTranslated || nodeIndex < 0 || nodeIndex >= globalTextNodes.length) {
+        // Absolute Mapping: Best for 'orig' language and for recovery
+        let bestIdx = -1;
+        for (let i = 0; i < globalNodeOffsets.length; i++) {
+            if (globalNodeOffsets[i] <= charIndex && (i === globalNodeOffsets.length - 1 || globalNodeOffsets[i+1] > charIndex)) {
+                bestIdx = i;
+                break;
+            }
+        }
+        if (bestIdx !== -1) {
+            node = globalTextNodes[bestIdx];
+            offsetInNode = Math.min(charIndex - globalNodeOffsets[bestIdx], (node.nodeValue || "").length);
+        }
+    } else {
+        // Node-Relative Rescue: Use for translated documents
+        node = globalTextNodes[nodeIndex];
+        offsetInNode = nodeOffset;
+    }
+
+    if (!node || node.nodeType !== 3) return;
+
+    // Find the best relative container
+    const parentContainer = node.parentElement?.closest('.lazy-page-container') || node.parentElement?.closest('.book-content-container') || reader;
+
+    try {
+        const range = document.createRange();
+        let text = node.nodeValue || "";
+
+        // Identify word boundaries around the bookmark index for clear visual identifying
+        let startBound = offsetInNode;
+        let endBound = offsetInNode;
+        
+        // Expand to word boundaries (universal support for all languages: non-whitespace)
+        while (startBound > 0 && /\S/.test(text[startBound - 1])) startBound--;
+        while (endBound < text.length && /\S/.test(text[endBound])) endBound++;
+        
+        // Fallback for single characters if not inside a word
+        if (startBound === endBound && text.length > 0) {
+            endBound = Math.min(text.length, endBound + 1);
+        }
+
+        range.setStart(node, startBound);
+        range.setEnd(node, endBound);
+
+        // 1. Precise Word Highlight (Premium Identification)
+        if (bookmarkHighlight) {
+            bookmarkHighlight.add(range);
+        } else {
+            // No Highlight API support? We don't want to fragment the DOM, 
+            // so we'll rely only on the icon positioning.
+        }
+
+        const rect = range.getBoundingClientRect();
+        const contRect = parentContainer.getBoundingClientRect();
+
+        // 2. The Bookmark Symbol (Pin)
+        const bmSpan = document.createElement('span');
+        bmSpan.className = 'bookmark-symbol notranslate';
+        bmSpan.innerHTML = '🔖';
+        bmSpan.title = "Saved Bookmark Location";
+        
+        // Exact position relative to the container, with a small safety margin to avoid overlapping word
+        const zoom = (typeof currentZoom !== 'undefined') ? currentZoom : 1;
+        bmSpan.style.left = ((rect.left - contRect.left) / zoom + parentContainer.scrollLeft + (rect.width / 2 / zoom)) + "px";
+        bmSpan.style.top = ((rect.top - contRect.top) / zoom + parentContainer.scrollTop - (3 / zoom)) + "px";
+        
+        bmSpan.onclick = (e) => {
+            e.stopPropagation();
+            jumpToBookmark(0, 0, false, charIndex); // Snaps back precisely if scrolled away
+        };
+
+        parentContainer.appendChild(bmSpan);
+    } catch (e) {
+        console.error("Failed to place bookmark symbol:", e);
+    }
+}
+
+// Reposition symbols on window resize
+window.addEventListener('resize', () => {
+    if (currentBookId) {
+        renderBookmarkIcons();
+    }
+});
+
+
+async function deleteBookmark(id) {
+    showConfirmModal(
+        "Remove Bookmark?",
+        "This will permanently delete this saved location. Are you sure?",
+        "Delete Bookmark",
+        "Keep It",
+        null,
+        async () => {
+            try {
+                await fetch(`/delete_bookmark/${id}`, { method: "POST" });
+                showUploadToast("📍 Bookmark removed.", "info");
+                renderBookmarkIcons(); 
+                openBookmarks(); // Refresh list
+            } catch (err) {
+                console.error("Failed to delete bookmark:", err);
+            }
+        }
+    );
+}
+
+function closeBookmarks() {
+    document.getElementById("bookmarksModal").style.display = "none";
+}
+
+function rebuildRemainingFallbackQueue() {
+    if (!isReadingAloud || !globalReadingText) return;
+    
+    // 1. Snapshot settings
+    const index = currentAbsoluteCharIndex;
+    const testLang = getSelectedLanguage();
+    const testShort = testLang ? testLang.split('-')[0].toLowerCase() : 'en';
+
+    // 2. Fragment the remaining 10k characters (same logic as resumeReadingFromIndex)
+    let textChunkRaw = globalReadingText.substring(index, index + 10000);
+    let chunks = [];
+    let lastSplit = 0;
+    const bridgeRegex = /[.!?\n।。\?]/;
+    for (let i = 0; i < textChunkRaw.length; i++) {
+        let isBoundary = bridgeRegex.test(textChunkRaw[i]);
+        let nextChar = textChunkRaw[i + 1];
+        if (isBoundary && (!nextChar || !bridgeRegex.test(nextChar))) {
+            chunks.push(textChunkRaw.substring(lastSplit, i + 1));
+            lastSplit = i + 1;
+        } else if (i - lastSplit > 200 && /\s/.test(textChunkRaw[i])) {
+            chunks.push(textChunkRaw.substring(lastSplit, i + 1));
+            lastSplit = i + 1;
+        }
+    }
+    if (lastSplit < textChunkRaw.length) chunks.push(textChunkRaw.substring(lastSplit));
+
+    // 3. RE-BUILD THE FALLBACK QUEUE (but don't touch the active audio/job ID)
+    let newQueue = [];
+    let curAbs = index;
+
+    const prefetchEmotion = (t) => {
+        if (!t || t.length < 2) return Promise.resolve('neutral');
+        if (emotionCache.has(t)) return emotionCache.get(t);
+        let p = fetch("/analyze_emotion", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: t })
+        }).then(res => res.json()).catch(() => 'neutral');
+        emotionCache.set(t, p);
+        return p;
+    };
+
+    chunks.forEach(chunk => {
+        if (!chunk.trim()) { curAbs += chunk.length; return; }
+        // Simple internal splitter for emotion/TTS batches
+        let start = 0;
+        while(start < chunk.length) {
+            let end = Math.min(start + 190, chunk.length);
+            if (end < chunk.length) {
+                let lastSpace = chunk.lastIndexOf(' ', end);
+                if (lastSpace > start) end = lastSpace;
+            }
+            let sc = chunk.substring(start, end).trim();
+            if (sc) {
+                const lazyEmotion = () => {
+                    if (!isEmotionModeActive) return Promise.resolve('neutral');
+                    return prefetchEmotion(sc);
+                };
+                newQueue.push({
+                    url: `/tts?lang=${testShort}&text=${encodeURIComponent(sc)}&gender=${currentNarratorGender}`,
+                    text: sc,
+                    offset: curAbs + start,
+                    getEmotion: lazyEmotion
+                });
+            }
+            start = end;
+        }
+        curAbs += chunk.length;
+    });
+
+    // 4. DESTROY OLD QUEUE AND SWAP IN NEW ONE
+    fallbackQueue = newQueue;
+    console.log("Narrator queue hot-swapped mid-session for translation sync.");
+}
+
+// --- MOBILE UI HELPERS ---
+function toggleSidebar() {
+    const sidebar = document.getElementById('sidebar');
+    const appLayout = document.getElementById('appLayout');
+    if (sidebar) {
+        sidebar.classList.toggle('active');
+    }
+}
+
+// Auto-close sidebar on mobile when a book is opened
+const originalOpenBook = openBook;
+window.openBook = async function(bookId, bookName) {
+    if (window.innerWidth < 992) {
+        toggleSidebar(); 
+    }
+    return originalOpenBook(bookId, bookName);
+};
 
 
