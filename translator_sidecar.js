@@ -60,30 +60,32 @@ const server = http.createServer(async (req, res) => {
                 // We join strings into blocks of approx 4,000 characters to ensure we never
                 // exceed the translation API payload limits while maximizing efficiency.
                 const results = [];
-                const MAX_CHAR_PER_BATCH = 4000; // Optimal for Google Translate API limits
-                const PARALLE_BATCHES = 2; // Safe concurrency
+                const MAX_CHAR_PER_BATCH = 4500; // Optimal balance for Google Translate API limits
+                const PARALLE_BATCHES = 4; // Faster concurrency window
                 const TAG = " [[~]] ";
 
                 const processBigBatch = async (batch) => {
                     const combined = batch.join(TAG);
                     try {
                         const translated = await translateText(combined, source_lang, target_lang);
-                        // Case-insensitive/whitespace-insensitive split for the custom delimiter
+                        if (!translated) throw new Error("Translation returned null");
+                        
+                        // Robust splitting that handles various whitespace-preserving behaviors of translation engines
                         const parts = translated.split(/\s*\[\[~\]\]\s*/);
                         
                         if (parts.length === batch.length) {
                              return parts.map(p => p.trim());
                         }
                         
-                        console.warn(`Sidecar: Split mismatch (${parts.length}/${batch.length}). Falling back to individual.`);
+                        console.warn(`Sidecar Cluster: Split mismatch (${parts.length}/${batch.length}). Falling back to individual retry.`);
                     } catch (e) {
-                        console.error(`Sidecar: Batch Translation Error: ${e.message}`);
+                        console.error(`Sidecar Cluster: Batch Error: ${e.message}`);
                     }
-                    // INDIVIDUAL RECOVERY (Safe but slow)
+                    // INDIVIDUAL RECOVERY
                     const individualResults = [];
                     for (const t of batch) {
                         individualResults.push(await translateText(t, source_lang, target_lang));
-                        await new Promise(r => setTimeout(r, 20));
+                        await new Promise(r => setTimeout(r, 10)); // Minimal safety delay
                     }
                     return individualResults;
                 };
@@ -103,14 +105,15 @@ const server = http.createServer(async (req, res) => {
                 }
                 if (currentBatch.length > 0) charBatches.push(currentBatch);
 
-                // Process char-aware batches in parallel windows
+                // HIGH-CONCURRENCY PIPELINE
                 for (let i = 0; i < charBatches.length; i += PARALLE_BATCHES) {
                     const chunkWindow = charBatches.slice(i, i + PARALLE_BATCHES);
                     const windowResults = await Promise.all(chunkWindow.map(c => processBigBatch(c)));
                     windowResults.forEach(r => results.push(...r));
 
+                    // Use immediate resolution for next tick to avoid blocking the event loop
                     if (i + PARALLE_BATCHES < charBatches.length) {
-                        await new Promise(r => setTimeout(r, 100)); // Rate limit buffer
+                        await new Promise(r => setTimeout(r, 50)); 
                     }
                 }
 

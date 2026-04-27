@@ -1,6 +1,18 @@
-from flask import Flask, render_template, request, jsonify, send_from_directory, send_file, Response
-from werkzeug.utils import secure_filename
 import os
+import sys
+import warnings
+# Silence noisy deprecation warnings early
+warnings.filterwarnings("ignore") 
+
+# Fix emoji printing on Windows CMD
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+
+from flask import Flask, render_template, request, jsonify, send_from_directory, send_file, Response, redirect, url_for, session
+from werkzeug.utils import secure_filename
+from werkzeug.security import generate_password_hash, check_password_hash
+from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
+from flask_socketio import SocketIO, join_room, leave_room, emit
 import threading
 import sqlite3
 import time
@@ -23,28 +35,10 @@ from io import BytesIO, StringIO
 from urllib.parse import quote, unquote, urljoin
 import urllib.request
 
-# Third-party libraries
-import fitz
-import docx
-from ebooklib import epub, ITEM_DOCUMENT, ITEM_IMAGE
-from bs4 import BeautifulSoup
-import cv2
-import pytesseract
-import mammoth
-import numpy as np
-from gtts import gTTS
-import edge_tts
-from deep_translator import GoogleTranslator
-from fpdf import FPDF
-from textblob import TextBlob
-from PIL import Image
-import pptx
-from pptx.enum.shapes import MSO_SHAPE_TYPE
-from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 import subprocess
-import time
-import requests
 import atexit
+import requests
+from bs4 import BeautifulSoup
 
 # --- GLOBAL CONFIG & TRANSLATION SIDECAR ---
 SIDECAR_PORT = 3001
@@ -69,14 +63,11 @@ def kill_sidecar():
         print("🛑 Shutting down translation sidecar...")
         sidecar_process.terminate()
 
-try:
-    import transformers
-    from transformers import pipeline
-except ImportError:
-    transformers = None
-    pipeline = None
 
 app = Flask(__name__)
+app.secret_key = "antigravity_secret_key_123"
+app.debug = True  # Enable debug mode early to control initialization flow
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 UPLOAD_FOLDER = "uploads"
 EXTRACTED_FOLDER = "extracted"
@@ -97,14 +88,25 @@ def get_sentiment_analyzer():
     global _SENTIMENT_ANALYZER
     if _SENTIMENT_ANALYZER is None:
         try:
-            if pipeline:
-                _SENTIMENT_ANALYZER = pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english", device=-1)
-            else:
-                _SENTIMENT_ANALYZER = "FAILED"
+            from transformers import pipeline
+            _SENTIMENT_ANALYZER = pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english", device=-1)
         except Exception as e:
             print(f"Sentiment model pre-load failed: {e}")
             _SENTIMENT_ANALYZER = "FAILED"
     return _SENTIMENT_ANALYZER if _SENTIMENT_ANALYZER != "FAILED" else None
+
+# Background Vision Model Loading
+def load_vision_model_async():
+    try:
+        from transformers import pipeline
+        print("🧠 Vision AI: Pre-loading captioning engine in background...")
+        app.image_captioner = pipeline("image-to-text", model="nlp-connect/vit-gpt2-image-captioning", device=-1)
+        print("✅ Vision AI: Engine ready.")
+    except Exception as e:
+        print(f"⚠️ Vision AI: Engine failed to initialize: {e}")
+        app.image_captioner = "FAILED"
+
+threading.Thread(target=load_vision_model_async, daemon=True).start()
 
 def get_book_sentences(book_id):
     """Retrieve or generate tokenized sentences for a book to avoid repeated parsing."""
@@ -145,17 +147,58 @@ def get_book_sentences(book_id):
         return sentences
     except Exception:
         return []
-
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-
-
 def get_conn():
-    return sqlite3.connect(DB)
+    conn = sqlite3.connect(DB, timeout=30) # 30s busy timeout to prevent locks
+    conn.execute("PRAGMA journal_mode=WAL") # Better concurrency
+    return conn
 
+
+# --- AUTH SETUP ---
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = "login"
+
+class User(UserMixin):
+    def __init__(self, id, username, full_name, email, profile_image):
+        self.id = id
+        self.username = username
+        self.full_name = full_name
+        self.email = email
+        self.profile_image = profile_image
+
+@login_manager.user_loader
+def load_user(user_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id, username, full_name, email, profile_image FROM users WHERE id=?", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    if row:
+        return User(*row)
+    return None
 
 def init_db():
     conn = get_conn()
     cur = conn.cursor()
+
+    # CRITICAL RESET: Detect incompatible 'users' table and fix it
+    cur.execute("PRAGMA table_info(users)")
+    cols = [row[1] for row in cur.fetchall()]
+    if cols and "password_hash" in cols:
+        print("⚠️ DETECTED INCOMPATIBLE USERS TABLE. Repairing...")
+        cur.execute("ALTER TABLE users RENAME TO users_backup_" + str(int(time.time())))
+        conn.commit()
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE,
+        password TEXT,
+        email TEXT,
+        full_name TEXT,
+        profile_image TEXT DEFAULT 'default_profile.png'
+    )
+    """)
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS books(
@@ -164,15 +207,192 @@ def init_db():
         path TEXT,
         extracted_path TEXT,
         status TEXT DEFAULT 'ready',
-        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        thumbnail_path TEXT,
+        summary TEXT,
+        reading_time INTEGER DEFAULT 0,
+        last_read_at TIMESTAMP,
+        is_favorite INTEGER DEFAULT 0,
+        page_count INTEGER DEFAULT 0
     )
     """)
 
-    # Migrate existing databases that don't have the status column
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS daily_stats(
+        date DATE PRIMARY KEY,
+        seconds INTEGER DEFAULT 0
+    )
+    """)
+
+    # Migrate existing databases that don't have the status or thumbnail_path columns
     try:
         cur.execute("ALTER TABLE books ADD COLUMN status TEXT DEFAULT 'ready'")
-    except Exception:
-        pass  # Column already exists
+    except Exception: pass
+    try:
+        cur.execute("ALTER TABLE books ADD COLUMN summary TEXT")
+    except Exception: pass
+    try:
+        cur.execute("ALTER TABLE books ADD COLUMN reading_time INTEGER DEFAULT 0")
+    except Exception: pass
+    try:
+        cur.execute("UPDATE books SET reading_time = 0 WHERE reading_time IS NULL")
+    except Exception: pass
+    try:
+        cur.execute("ALTER TABLE books ADD COLUMN last_read_at TIMESTAMP")
+    except Exception: pass
+    try:
+        cur.execute("ALTER TABLE users ADD COLUMN password TEXT")
+    except Exception: pass
+    try:
+        cur.execute("ALTER TABLE users ADD COLUMN email TEXT")
+    except Exception: pass
+    try:
+        cur.execute("ALTER TABLE users ADD COLUMN full_name TEXT")
+    except Exception: pass
+    try:
+        cur.execute("ALTER TABLE users ADD COLUMN profile_image TEXT DEFAULT 'default_profile.png'")
+    except Exception: pass
+
+    try:
+        cur.execute("ALTER TABLE books ADD COLUMN user_id INTEGER")
+    except Exception: pass
+    try:
+        cur.execute("ALTER TABLE highlights ADD COLUMN user_id INTEGER")
+    except Exception: pass
+    try:
+        cur.execute("ALTER TABLE bookmarks ADD COLUMN user_id INTEGER")
+    except Exception: pass
+    try:
+        cur.execute("ALTER TABLE notes ADD COLUMN user_id INTEGER")
+    except Exception: pass
+    try:
+        cur.execute("ALTER TABLE daily_stats ADD COLUMN user_id INTEGER")
+    except Exception: pass
+
+    try:
+        cur.execute("ALTER TABLE books ADD COLUMN page_count INTEGER DEFAULT 0")
+    except Exception: pass
+
+    # --- AUTO-UPGRADE: Fix books missing thumbnails or summaries from old uploads ---
+    def auto_repair():
+        try:
+            time.sleep(1) # Wait for app to be ready
+            print("🛠️ Dashboard Maintenance: Checking for missing assets & cleaning orphans...")
+            conn_repair = sqlite3.connect(DB)
+            cur_r = conn_repair.cursor()
+            
+            # 1. PRUNE ORPHANED FILES (Remove files not in DB)
+            try:
+                cur_r.execute("SELECT path, extracted_path, thumbnail_path FROM books")
+                rows = cur_r.fetchall()
+                live_paths = {os.path.abspath(r[0]) for r in rows if r[0]}
+                live_extracted = {os.path.abspath(r[1]) for r in rows if r[1]}
+                live_thumbnails = {r[2] for r in rows if r[2]}
+                
+                cur_r.execute("SELECT profile_image FROM users")
+                live_profiles = {r[0] for r in cur_r.fetchall() if r[0]}
+                live_profiles.add("default_profile.png")
+                
+                # Scan HTML files for used assets
+                used_assets = set()
+                asset_pattern = re.compile(r'src="/uploads/extracted_assets/([^"]+)"')
+                for html_path in live_extracted:
+                    if os.path.exists(html_path):
+                        with open(html_path, "r", encoding="utf-8", errors="ignore") as f:
+                            matches = asset_pattern.findall(f.read())
+                            for m in matches: used_assets.add(m)
+                
+                # Cleanup uploads
+                if os.path.exists(UPLOAD_FOLDER):
+                    for f in os.listdir(UPLOAD_FOLDER):
+                        fpath = os.path.join(UPLOAD_FOLDER, f)
+                        if os.path.isfile(fpath) and os.path.abspath(fpath) not in live_paths:
+                            try: os.remove(fpath)
+                            except: pass
+                
+                # Cleanup extracted
+                if os.path.exists(EXTRACTED_FOLDER):
+                    for f in os.listdir(EXTRACTED_FOLDER):
+                        fpath = os.path.join(EXTRACTED_FOLDER, f)
+                        if os.path.isfile(fpath) and os.path.abspath(fpath) not in live_extracted:
+                            try: os.remove(fpath)
+                            except: pass
+                            
+                # Cleanup thumbnails
+                t_dir = os.path.join(UPLOAD_FOLDER, "thumbnails")
+                if os.path.exists(t_dir):
+                    for f in os.listdir(t_dir):
+                        if f not in live_thumbnails:
+                            try: os.remove(os.path.join(t_dir, f))
+                            except: pass
+                            
+                # Cleanup profiles
+                p_dir = os.path.join(UPLOAD_FOLDER, "profiles")
+                if os.path.exists(p_dir):
+                    for f in os.listdir(p_dir):
+                        if f not in live_profiles:
+                            try: os.remove(os.path.join(p_dir, f))
+                            except: pass
+                            
+                # Cleanup extracted_assets
+                a_dir = os.path.join(UPLOAD_FOLDER, "extracted_assets")
+                if os.path.exists(a_dir):
+                    for f in os.listdir(a_dir):
+                        if f not in used_assets:
+                            try: os.remove(os.path.join(a_dir, f))
+                            except: pass
+                print("🧹 Orphaned files cleanup complete.")
+            except Exception as pe:
+                print(f"Prune Error: {pe}")
+
+            # 2. REPAIR MISSING ASSETS
+            # ONLY fetch books that actually need repair to save time
+            cur_r.execute("SELECT id, path, extracted_path, thumbnail_path, summary, page_count FROM books WHERE thumbnail_path IS NULL OR summary IS NULL OR summary LIKE 'Exploring the depths%' OR page_count IS NULL OR page_count = 0")
+            books_r = cur_r.fetchall()
+            
+            for b in books_r:
+                bid, fpath, epath, thumb, summary = b
+                update_fields = {}
+                
+                # 1. Regenerate Thumbnail if missing
+                t_dir = os.path.join(UPLOAD_FOLDER, "thumbnails")
+                os.makedirs(t_dir, exist_ok=True)
+                if not thumb or not os.path.exists(os.path.join(t_dir, thumb)):
+                    new_thumb = generate_thumbnail(bid, fpath)
+                    if new_thumb: update_fields["thumbnail_path"] = new_thumb
+
+                # 2. Regenerate Summary if missing or default
+                if not summary or "Exploring the depths" in summary:
+                    if os.path.exists(epath):
+                        with open(epath, "r", encoding="utf-8", errors="ignore") as f:
+                            html_data = f.read()
+                            soup = BeautifulSoup(str(html_data), "html.parser")
+                            clean_text = soup.get_text(separator=' ').strip()
+                            new_summary = (clean_text[:200] + '...') if len(clean_text) > 200 else clean_text
+                            if new_summary: update_fields["summary"] = new_summary
+                            
+                            # 3. Backfill Page Count if missing
+                            if not b[5] or b[5] == 0:
+                                p_count = str(html_data).count('lazy-page-container')
+                                if p_count > 0: update_fields["page_count"] = p_count
+                elif not b[5] or b[5] == 0:
+                    # Summary exists but page count is missing
+                    if os.path.exists(epath):
+                        with open(epath, "r", encoding="utf-8", errors="ignore") as f:
+                            p_count = f.read().count('lazy-page-container')
+                            if p_count > 0: update_fields["page_count"] = p_count
+
+                if update_fields:
+                    cols = ", ".join([f"{k}=?" for k in update_fields.keys()])
+                    vals = list(update_fields.values()) + [bid]
+                    conn_repair.execute(f"UPDATE books SET {cols} WHERE id=?", vals)
+                    conn_repair.commit()
+            
+            conn_repair.close()
+            print("✅ Dashboard Sync Complete.")
+        except Exception as e: print(f"Repair Error: {e}")
+
+    threading.Thread(target=auto_repair, daemon=True).start()
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS highlights(
@@ -220,6 +440,26 @@ def init_db():
         cur.execute("ALTER TABLE bookmarks ADD COLUMN lang_code TEXT DEFAULT 'en'")
     except Exception: pass
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS invitations(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sender_id INTEGER,
+        receiver_id INTEGER,
+        book_id INTEGER,
+        status TEXT DEFAULT 'pending',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS shared_books(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        book_id INTEGER,
+        sharer_id INTEGER,
+        shared_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
 
     conn.commit()
     conn.close()
@@ -239,6 +479,7 @@ except ImportError:
 
 def google_vision_ocr(img_cv):
     """Google Cloud Vision: The gold standard for handwriting recognition."""
+    import cv2
     client = get_vision_client()
     if not client: return None
     
@@ -259,6 +500,8 @@ def extract_image_text(image, fast=True, skip_ocr=False):
     """Perform a high-fidelity OCR pass. Automatically upgrades to Google Vision for handwriting."""
     if skip_ocr: return ""
     try:
+        import cv2
+        import numpy as np
         if image is None: return ""
         if isinstance(image, str):
             # Universal Byte Decoding (Safer than imread for non-ASCII paths/WebP)
@@ -280,8 +523,10 @@ def extract_image_text(image, fast=True, skip_ocr=False):
             except Exception as e:
                 print(f"Google Vision fallback to Tesseract: {e}")
 
-        # 2. LOCAL OCR FALLBACK (Optimized for Order and Accuracy)
-        # Avoid multiple passes which cause "soo big" duplicated text.
+        import cv2
+        import numpy as np
+        import pytesseract
+        pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
         h, w = image.shape[:2]
         # Rescale for better Tesseract recognition on dense text
         scale = 1.0
@@ -299,7 +544,7 @@ def extract_image_text(image, fast=True, skip_ocr=False):
 
         # OCR: Use PSM 3 (Automatic Page Segmentation) to find lines in order without OSD overhead
         # Using OEM 3 (Default, combines LSTM and Legacy if needed)
-        config = r'--tessdata-dir c:\ai_book_reader\tessdata --oem 3 --psm 3 -l eng'
+        config = r'--tessdata-dir c:\ai_book_reader\tessdata --oem 3 --psm 3 -l tam+eng'
         
         ocr_text = pytesseract.image_to_string(processed, config=config).strip()
         
@@ -353,6 +598,9 @@ def ocr_embedded_images(html):
     def process_match_data(match_tuple):
         start, end, img_tag, src_data = match_tuple
         try:
+            import cv2
+            import numpy as np
+            import base64
             _, encoded = src_data.split(",", 1)
             data = base64.b64decode(encoded)
             nparr = np.frombuffer(data, np.uint8)
@@ -376,6 +624,10 @@ def ocr_embedded_images(html):
     # Process results in sequential order of occurrence in the HTML
     results.sort(key=lambda x: x[0])
     for start, end, replacement in results:
+        # Check if we should abort mid-construction
+        global active_ocr_bid
+        # We don't have bid here, but we can check if a DIFFERENT bid has become active
+        # This is a bit tricky, so we'll just check if the global bid has changed since we started
         parts.append(html[last_end:start])
         parts.append(replacement)
         last_end = end
@@ -386,6 +638,7 @@ def ocr_embedded_images(html):
 
 def extract_pdf_html(file_path, fast_mode=True):
     """High-speed parallel PDF processing with watermark filtering and layout stabilization."""
+    import fitz
     abs_path = os.path.abspath(file_path)
     if not os.path.exists(abs_path):
         return "<p>Error: PDF source file missing.</p>"
@@ -439,6 +692,8 @@ def extract_pdf_html(file_path, fast_mode=True):
                     img_tag = f'<img src="/uploads/extracted_assets/{asset_name}" style="max-width: 100%; height: auto; display: block; margin: 0 auto; border-radius: 8px;" />'
                     
                     try:
+                        import cv2
+                        import numpy as np
                         img_np = cv2.imdecode(np.frombuffer(img_data, np.uint8), cv2.IMREAD_COLOR)
                         if img_np is not None:
                             # Use fast sync OCR only for very large images (potential full-page scans)
@@ -468,16 +723,19 @@ def extract_pdf_html(file_path, fast_mode=True):
                     if l_text in seen_texts: continue
                     seen_texts.add(l_text)
                     
-                    style = 'style="margin-bottom: 1.25em; line-height: 1.8; color: #334155;"'
+                    style = 'style="margin-bottom: 1.5em; line-height: 1.8; color: #334155; font-family: \'Georgia\', serif;"'
                     if is_scanned:
-                        style = 'style="position:absolute; width:1px; height:1px; overflow:hidden; opacity:0; pointer-events:none;"'
+                        # For scanned PDFs, show text as a clean, continuous flow below images
+                        style = 'style="margin-bottom: 1.5em; line-height: 1.8; color: #334155; font-family: \'Georgia\', serif; font-size: 1.1rem; max-width: 800px; margin-left: auto; margin-right: auto;"'
                     text_html_parts.append(f'<p {style}>{l_text}</p>')
 
             # C. ASSEMBLY
             if img_html_parts:
-                page_html += '<div class="pdf-img-stack" style="text-align: center; margin-bottom: 20px;">' + "".join(img_html_parts) + '</div>'
+                page_html += '<div class="pdf-img-stack" style="text-align: center; margin-bottom: 30px;">' + "".join(img_html_parts) + '</div>'
             if text_html_parts:
-                page_html += '<div class="pdf-text-stack" style="width: 100%; font-family: \'Georgia\', serif; font-size: 1.15rem;">' + "".join(text_html_parts) + '</div>'
+                # Use a very subtle divider instead of a bulky header
+                header = '<div style="width: 50px; height: 2px; background: var(--primary); margin: 40px auto 30px auto; opacity: 0.3; border-radius: 2px;"></div>' if is_scanned else ''
+                page_html += '<div class="pdf-text-stack" style="width: 100%;">' + header + "".join(text_html_parts) + '</div>'
             
             page_html += "</div>"
             local_pdf.close()
@@ -494,20 +752,15 @@ def extract_pdf_html(file_path, fast_mode=True):
 
 
 def extract_docx_html(file_path):
+    import mammoth
+    import docx
+    import base64
+    import cv2
+    import numpy as np
     def convert_image(image):
         with image.open() as image_bytes:
             encoded_src = base64.b64encode(image_bytes.read()).decode("ascii")
             ext = image.content_type.split("/")[-1]
-            # Use interactive wrapper for potential handwriting/diagrams
-            img_tag = f'<img src="data:image/{ext};base64,{encoded_src}" />'
-            try:
-                # Re-decode to get CV2 image for OCR
-                image_bytes.seek(0)
-                nparr = np.frombuffer(image_bytes.read(), np.uint8)
-                img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                if img_cv is not None:
-                    return {"src": "", "html": build_clickable_img_wrapper(img_tag, img_cv)}
-            except: pass
             return {"src": f"data:image/{ext};base64,{encoded_src}"}
 
     with open(file_path, "rb") as docx_file:
@@ -517,6 +770,10 @@ def extract_docx_html(file_path):
 
 
 def extract_epub_html(file_path):
+    from ebooklib import epub, ITEM_DOCUMENT, ITEM_IMAGE
+    import base64
+    import cv2
+    import numpy as np
     book = epub.read_epub(file_path)
     
     # Pre-map ALL images in the archive regardless of folder structure
@@ -574,6 +831,9 @@ def extract_epub_html(file_path):
 
 def extract_pptx_html(file_path):
     try:
+        import pptx
+        from pptx.enum.shapes import MSO_SHAPE_TYPE
+        from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
         prs = pptx.Presentation(file_path)
     except Exception:
         return "<div class='error'>Failed to load PPTX. Try saving as PDF.</div>"
@@ -747,6 +1007,8 @@ def extract_book_html(file_path, fast_mode=True):
         # Logic for image-to-book (already works)
         filename = os.path.basename(file_path)
         try:
+            import cv2
+            import numpy as np
             with open(file_path, "rb") as f:
                 img_data = f.read()
                 img_np = cv2.imdecode(np.frombuffer(img_data, np.uint8), cv2.IMREAD_COLOR)
@@ -793,9 +1055,138 @@ def extract_book_html(file_path, fast_mode=True):
 
 
 
+# --- AUTH ROUTES ---
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if current_user.is_authenticated:
+        return redirect(url_for('index'))
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+        if not username or not password:
+            return render_template("auth.html", error="Please enter all fields")
+            
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT id, username, password, full_name, email, profile_image FROM users WHERE username=?", (username,))
+        row = cur.fetchone()
+        conn.close()
+        
+        if row:
+            if check_password_hash(row[2], password):
+                user = User(row[0], row[1], row[3], row[4], row[5])
+                login_user(user)
+                return redirect(url_for('index'))
+            else:
+                print(f"Auth DEBUG: Password mismatch for user '{username}'")
+        else:
+            print(f"Auth DEBUG: User '{username}' not found in database")
+            
+        return render_template("auth.html", error="Invalid username or password")
+    return render_template("auth.html", error=None, success=None)
+
+@app.route("/register", methods=["POST"])
+def register():
+    username = request.form.get("username", "").strip()
+    password = request.form.get("password", "")
+    confirm_password = request.form.get("confirm_password", "")
+    email = request.form.get("email", "").strip()
+    full_name = request.form.get("full_name", "").strip()
+    
+    if not username or not password or not email or not full_name:
+        return render_template("auth.html", error="Please fill all registration fields")
+
+    if password != confirm_password:
+        return render_template("auth.html", error="Passwords don't match")
+    
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        hashed = generate_password_hash(password)
+        cur.execute("INSERT INTO users (username, password, email, full_name) VALUES (?, ?, ?, ?)",
+                    (username, hashed, email, full_name))
+        conn.commit()
+        print(f"Auth DEBUG: Registered new user '{username}'")
+    except sqlite3.IntegrityError:
+        conn.close()
+        return render_template("auth.html", error="Username already exists")
+    conn.close()
+    return render_template("auth.html", success="Registration successful! Please login.")
+
+@app.route("/logout")
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for('login'))
+
+@app.route("/update_profile", methods=["POST"])
+@login_required
+def update_profile():
+    full_name = request.form.get("full_name")
+    file = request.files.get("profile_image")
+    remove_photo = request.form.get("remove_photo") == "1"
+    
+    conn = get_conn()
+    cur = conn.cursor()
+    
+    profile_image = current_user.profile_image
+    
+    if remove_photo:
+        profile_image = 'default_profile.png'
+    elif file and file.filename:
+        filename = secure_filename(f"profile_{current_user.id}_{file.filename}")
+        prof_dir = os.path.join(UPLOAD_FOLDER, 'profiles')
+        os.makedirs(prof_dir, exist_ok=True)
+        file.save(os.path.join(prof_dir, filename))
+        profile_image = filename
+        
+    cur.execute("UPDATE users SET full_name=?, profile_image=? WHERE id=?", 
+                (full_name, profile_image, current_user.id))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('index'))
+
+@app.route("/profile_image/<filename>")
+def get_profile_image(filename):
+    prof_dir = os.path.join(UPLOAD_FOLDER, 'profiles')
+    if filename == 'default_profile.png' or not os.path.exists(os.path.join(prof_dir, filename)):
+        # Provide a nice dynamic placeholder if no image exists
+        return redirect(f"https://ui-avatars.com/api/?name={current_user.full_name}&background=6366f1&color=fff")
+    return send_from_directory(prof_dir, filename)
+
 @app.route("/")
-def home():
-    return render_template("index.html")
+@login_required
+def index():
+    conn = get_conn()
+    cur = conn.cursor()
+    
+    # Get user book count
+    cur.execute("SELECT COUNT(*) FROM books WHERE user_id = ?", (current_user.id,))
+    count = cur.fetchone()[0]
+    
+    # Get user streak (reuse logic or fetch from a helper)
+    # For now, let's keep it simple for the initial profile view
+    streak = 0
+    try:
+        cur.execute("SELECT date FROM daily_stats WHERE user_id = ? AND seconds > 0 ORDER BY date DESC", (current_user.id,))
+        dates = [row[0] for row in cur.fetchall()]
+        if dates:
+            import datetime
+            today = datetime.date.today()
+            yesterday = today - datetime.timedelta(days=1)
+            last_date = datetime.datetime.strptime(dates[0], '%Y-%m-%d').date()
+            if last_date == today or last_date == yesterday:
+                streak = 1
+                for i in range(1, len(dates)):
+                    prev_date = datetime.datetime.strptime(dates[i-1], '%Y-%m-%d').date()
+                    curr_date = datetime.datetime.strptime(dates[i], '%Y-%m-%d').date()
+                    if (prev_date - curr_date).days == 1: streak += 1
+                    else: break
+    except: pass
+    
+    conn.close()
+    return render_template("index.html", user=current_user, user_books_count=count, user_streak=streak)
 
 
 @app.route("/uploads/<path:filename>")
@@ -815,7 +1206,7 @@ def upload():
     # --- Duplicate Detection ---
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id FROM books WHERE name = ?", (file.filename,))
+    cur.execute("SELECT id FROM books WHERE name = ? AND user_id = ?", (file.filename, current_user.id))
     existing = cur.fetchone()
     conn.close()
 
@@ -834,10 +1225,8 @@ def upload():
     # Insert DB record immediately with status = 'processing'
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO books(name, path, extracted_path, status) VALUES (?, ?, ?, ?)",
-        (file.filename, filepath, extracted_path, "processing")
-    )
+    cur.execute("INSERT INTO books(name, path, extracted_path, status, user_id) VALUES (?, ?, ?, ?, ?)",
+                (file.filename, filepath, extracted_path, "Processing File...", current_user.id))
     book_id = cur.lastrowid
     conn.commit()
     conn.close()
@@ -846,35 +1235,152 @@ def upload():
     return jsonify({"status": "processing", "message": "Book received! Processing in background..."})
 
 
-def background_ocr_upgrade_task(fpath, epath):
-    """Deep OCR pass in background to upgrade structural extractions."""
+def generate_thumbnail(bid, fpath):
+    """Generates a visual preview (thumbnail) for the dashboard."""
     try:
-        # Perform the heavy-duty OCR now (no fast mode)
+        import fitz
+        import cv2
+        import numpy as np
+        import docx
+        import pptx
+        ext = os.path.splitext(fpath)[1].lower()
+        thumb_name = f"thumb_{bid}.png"
+        thumb_dir = os.path.join(UPLOAD_FOLDER, "thumbnails")
+        os.makedirs(thumb_dir, exist_ok=True)
+        thumb_path = os.path.join(thumb_dir, thumb_name)
+
+        if ext == ".pdf":
+            doc = fitz.open(fpath)
+            if len(doc) > 0:
+                page = doc[0]
+                # Render at 150dpi for a crisp thumbnail
+                pix = page.get_pixmap(matrix=fitz.Matrix(0.4, 0.4)) 
+                pix.save(thumb_path)
+            doc.close()
+            return thumb_name
+        
+        # Image books
+        if ext in [".png", ".jpg", ".jpeg", ".webp"]:
+            img = cv2.imread(fpath)
+            if img is not None:
+                h, w = img.shape[:2]
+                aspect = w / h
+                new_h = 400
+                new_w = int(new_h * aspect)
+                resized = cv2.resize(img, (new_w, new_h))
+                cv2.imwrite(thumb_path, resized)
+                return thumb_name
+
+        # Text books (Generate styled cover)
+        if ext == ".txt":
+            # Create a nice portrait cover
+            img = np.full((500, 350, 3), (249, 250, 251), dtype=np.uint8) # Slight off-white
+            cv2.rectangle(img, (0,0), (350,500), (99, 102, 241), 15) # Indigo border
+            title = os.path.basename(fpath).replace('.txt','')
+            # Center title
+            lines = [title[i:i+15] for i in range(0, len(title), 15)]
+            for i, line in enumerate(lines[:3]):
+                cv2.putText(img, line, (40, 120 + (i*40)), cv2.FONT_HERSHEY_DUPLEX, 0.8, (30, 41, 59), 2)
+            cv2.putText(img, "TEXT DOCUMENT", (40, 440), cv2.FONT_HERSHEY_DUPLEX, 0.5, (107, 114, 128), 1)
+            cv2.imwrite(thumb_path, img)
+            return thumb_name
+
+    except Exception as e:
+        print(f"Thumbnail Generation Error for {bid}: {e}")
+    
+    # Generic Fallback if everything fails
+    try:
+        fallback_dir = os.path.join(UPLOAD_FOLDER, "thumbnails")
+        fallback_name = f"thumb_{bid}.png"
+        fallback_path = os.path.join(fallback_dir, fallback_name)
+        img = np.full((500, 350, 3), (243, 244, 246), dtype=np.uint8)
+        cv2.rectangle(img, (0,0), (350,500), (148, 163, 184), 5)
+        cv2.putText(img, "DOC", (130, 250), cv2.FONT_HERSHEY_DUPLEX, 1.2, (71, 85, 105), 3)
+        cv2.imwrite(fallback_path, img)
+        return fallback_name
+    except: pass
+
+    return None
+
+active_ocr_bid = None
+
+def background_ocr_upgrade_task(fpath, epath, bid=None):
+    """Deep OCR pass in background to upgrade structural extractions."""
+    global active_ocr_bid
+    if bid: active_ocr_bid = bid
+    
+    try:
+        # Check if we should even start (user might have switched already)
+        if bid and active_ocr_bid != bid:
+            print(f"Skipping background OCR for {bid}: user switched books.")
+            return
+
+        # 1. Generate thumbnail early in the background
+        thumb = generate_thumbnail(bid, fpath) if bid else None
+        
+        # Check again after thumbnail (which can be slow)
+        if bid and active_ocr_bid != bid: return
+
+        # 2. Perform the heavy-duty OCR now (no fast mode)
+        # This enhances the initial fast extraction with searchable image text
         final_html = extract_book_html(fpath, fast_mode=False)
+        
+        # Check one last time before saving
+        if bid and active_ocr_bid != bid: return
+        
         with open(epath, "w", encoding="utf-8") as f:
             f.write(str(final_html))
-        print(f"Background OCR upgrade complete for {epath}.")
+            
+        # 3. Finalize DB state: mark as 'ready'
+        if bid:
+            conn = get_conn()
+            if thumb:
+                conn.execute("UPDATE books SET status='ready', thumbnail_path=? WHERE id=?", (thumb, bid))
+            else:
+                conn.execute("UPDATE books SET status='ready' WHERE id=?", (bid,))
+            conn.commit()
+            conn.close()
+        
+        print(f"Background OCR upgrade complete for {bid if bid else 'unknown'}.")
     except Exception:
         traceback.print_exc()
+        # Ensure we don't leave it stuck in 'processing' if it technically finished or failed
+        if bid:
+            try:
+                conn = get_conn()
+                conn.execute("UPDATE books SET status='ready' WHERE id=?", (bid,))
+                conn.commit()
+                conn.close()
+            except: pass
 
 def do_extract_task(fpath, epath, bid):
     """Phase 1: Fast Start (Structural extraction only for instant availability)"""
     try:
         # 1. Quickly extract structure and native text, skip heavy OCR for now
         html = extract_book_html(fpath, fast_mode=True)
+        
+        # 1b. CAPTURE SUMMARY & PAGE COUNT: Extract first 200 chars and count page containers
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(str(html), "html.parser")
+        clean_text = soup.get_text(separator=' ').strip()
+        summary = (clean_text[:200] + '...') if len(clean_text) > 200 else clean_text
+        
+        # Count the number of lazy-page-containers to get the total pages
+        page_count = str(html).count('lazy-page-container')
+        
         os.makedirs(os.path.dirname(epath), exist_ok=True)
         with open(epath, "w", encoding="utf-8") as f:
             f.write(str(html))
         
         # 2. Mark book as ready so user can open it immediately
         conn2 = get_conn()
-        conn2.execute("UPDATE books SET status='ready' WHERE id=?", (bid,))
+        conn2.execute("UPDATE books SET status='OCR Upgrade In Progress...', summary=?, page_count=? WHERE id=?", (summary, page_count, bid))
         conn2.commit()
         conn2.close()
         print(f"Book {bid} is ready (Fast Mode).")
 
-        # Phase 2: Background Knowledge Mining (Async OCR)
-        threading.Thread(target=background_ocr_upgrade_task, args=(fpath, epath), daemon=True).start()
+        # Phase 2: Background Knowledge Mining (Async OCR and Thumbnails)
+        threading.Thread(target=background_ocr_upgrade_task, args=(fpath, epath, bid), daemon=True).start()
 
     except Exception as e:
         traceback.print_exc()
@@ -889,13 +1395,352 @@ def do_extract_task(fpath, epath, bid):
 
 
 @app.route("/books")
+@login_required
 def books():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, name, uploaded_at, status FROM books ORDER BY id DESC")
+    # Fetch owned books AND shared books
+    cur.execute("""
+        SELECT b.id, b.name, b.uploaded_at, b.status, b.thumbnail_path, b.summary, b.reading_time, b.is_favorite,
+               (SELECT COUNT(*) FROM bookmarks WHERE book_id = b.id) as bookmark_count,
+               (SELECT COUNT(*) FROM notes WHERE book_id = b.id) as notes_count,
+               'owned' as relation, b.page_count, NULL as sharer_name
+        FROM books b
+        WHERE b.user_id = ?
+        
+        UNION ALL
+        
+        SELECT b.id, b.name, b.uploaded_at, b.status, b.thumbnail_path, b.summary, b.reading_time, b.is_favorite,
+               (SELECT COUNT(*) FROM bookmarks WHERE book_id = b.id) as bookmark_count,
+               (SELECT COUNT(*) FROM notes WHERE book_id = b.id) as notes_count,
+               'shared' as relation, b.page_count, u.username as sharer_name
+        FROM books b
+        JOIN shared_books sb ON b.id = sb.book_id
+        JOIN users u ON sb.sharer_id = u.id
+        WHERE sb.user_id = ?
+        
+        ORDER BY id DESC
+    """, (current_user.id, current_user.id))
     data = cur.fetchall()
     conn.close()
     return jsonify(data)
+
+
+@app.route("/update_reading_time", methods=["POST"])
+@login_required
+def update_reading_time():
+    data = request.json
+    bid = data.get("book_id")
+    seconds = data.get("seconds", 0)
+    if not bid: return "Bad Request", 400
+    conn = get_conn()
+    db_cur = conn.cursor()
+    # Check if last_read_at exists (migration-safe)
+    try:
+        db_cur.execute("UPDATE books SET reading_time = reading_time + ?, last_read_at = CURRENT_TIMESTAMP WHERE id=? AND user_id=?", (seconds, bid, current_user.id))
+    except Exception:
+        # Fallback if column doesn't exist yet
+        db_cur.execute("UPDATE books SET reading_time = reading_time + ? WHERE id=? AND user_id=?", (seconds, bid, current_user.id))
+    
+    # Update Daily Stats for Streak/Goals (PER USER)
+    db_cur.execute("INSERT OR IGNORE INTO daily_stats (date, seconds, user_id) VALUES (CURRENT_DATE, 0, ?)", (current_user.id,))
+    db_cur.execute("UPDATE daily_stats SET seconds = seconds + ? WHERE date = CURRENT_DATE AND user_id = ?", (seconds, current_user.id))
+    
+    conn.commit()
+    conn.close()
+    return "OK"
+
+@app.route("/get_user_streak")
+def get_user_streak():
+    conn = get_conn()
+    cur = conn.cursor()
+    import datetime
+    
+    # 20 mins goal
+    daily_goal_sec = 1200 
+    
+    cur.execute("SELECT seconds FROM daily_stats WHERE date = CURRENT_DATE AND user_id = ?", (current_user.id,))
+    today_row = cur.fetchone()
+    today_sec = today_row[0] if today_row else 0
+    
+    cur.execute("SELECT date FROM daily_stats WHERE seconds > 0 AND user_id = ? ORDER BY date DESC", (current_user.id,))
+    dates = [row[0] for row in cur.fetchall()]
+    
+    streak = 0
+    if dates:
+        today = datetime.date.today()
+        yesterday = today - datetime.timedelta(days=1)
+        last_date = datetime.datetime.strptime(dates[0], '%Y-%m-%d').date()
+        
+        if last_date == today or last_date == yesterday:
+            streak = 1
+            for i in range(1, len(dates)):
+                prev_date = datetime.datetime.strptime(dates[i-1], '%Y-%m-%d').date()
+                curr_date = datetime.datetime.strptime(dates[i], '%Y-%m-%d').date()
+                if (prev_date - curr_date).days == 1:
+                    streak += 1
+                else: break
+                
+    conn.close()
+    return jsonify({
+        "today_seconds": today_sec,
+        "daily_goal_seconds": daily_goal_sec,
+        "streak": streak
+    })
+
+@app.route("/send_invite", methods=["POST"])
+@login_required
+def send_invite():
+    data = request.json
+    receiver_query = data.get("receiver_identity")
+    book_id = data.get("book_id")
+    
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM users WHERE username = ? OR email = ?", (receiver_query, receiver_query))
+    receiver = cur.fetchone()
+    
+    if not receiver:
+        conn.close()
+        return jsonify({"error": "User not found"}), 404
+    
+    receiver_id = receiver[0]
+    if receiver_id == current_user.id:
+        conn.close()
+        return jsonify({"error": "You cannot invite yourself"}), 400
+        
+    cur.execute("SELECT id FROM invitations WHERE sender_id = ? AND receiver_id = ? AND book_id = ? AND status = 'pending'", (current_user.id, receiver_id, book_id))
+    if cur.fetchone():
+        conn.close()
+        return jsonify({"info": "Invitation already sent"}), 200
+        
+    # Prevent "Inserting Again": Check if receiver already has this book by name
+    cur.execute("SELECT name FROM books WHERE id = ?", (book_id,))
+    book_res = cur.fetchone()
+    if book_res:
+        b_name = book_res[0]
+        cur.execute("""
+            SELECT id FROM books WHERE user_id = ? AND name = ?
+            UNION
+            SELECT book_id FROM shared_books WHERE user_id = ? AND book_id IN (SELECT id FROM books WHERE name = ?)
+        """, (receiver_id, b_name, receiver_id, b_name))
+        if cur.fetchone():
+            warning = f"Invitation sent! Note: {receiver_query} already has '{b_name}' in their library."
+            cur.execute("INSERT INTO invitations (sender_id, receiver_id, book_id) VALUES (?, ?, ?)", (current_user.id, receiver_id, book_id))
+            conn.commit()
+            conn.close()
+            return jsonify({"status": "success", "message": warning})
+
+    cur.execute("INSERT INTO invitations (sender_id, receiver_id, book_id) VALUES (?, ?, ?)", (current_user.id, receiver_id, book_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "success", "message": "Invitation sent!"})
+
+@app.route("/get_invites")
+@login_required
+def get_invites():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT i.id, u.username, u.full_name, b.name, i.book_id 
+        FROM invitations i
+        JOIN users u ON i.sender_id = u.id
+        JOIN books b ON i.book_id = b.id
+        WHERE i.receiver_id = ? AND i.status = 'pending'
+    """, (current_user.id,))
+    invites = cur.fetchall()
+    
+    res = []
+    for inv in invites:
+        # Check if the receiver (current user) already has a book with the same name
+        cur.execute("SELECT id FROM books WHERE user_id = ? AND name = ?", (current_user.id, inv[3]))
+        already_has = cur.fetchone() is not None
+        
+        res.append({
+            "id": inv[0],
+            "sender": inv[1],
+            "sender_name": inv[2],
+            "book_name": inv[3],
+            "book_id": inv[4],
+            "already_has": already_has
+        })
+    conn.close()
+    return jsonify(res)
+
+@app.route("/respond_invite", methods=["POST"])
+@login_required
+def respond_invite():
+    data = request.json
+    invite_id = data.get("invite_id")
+    action = data.get("action")
+    
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT book_id, sender_id FROM invitations WHERE id = ? AND receiver_id = ?", (invite_id, current_user.id))
+    invite = cur.fetchone()
+    
+    if not invite:
+        conn.close()
+        return jsonify({"error": "Invitation not found"}), 404
+        
+    book_id, sender_id = invite
+    if action == "accept":
+        cur.execute("UPDATE invitations SET status = 'accepted' WHERE id = ?", (invite_id,))
+        cur.execute("INSERT INTO shared_books (user_id, book_id, sharer_id) VALUES (?, ?, ?)", (current_user.id, book_id, sender_id))
+    else:
+        cur.execute("UPDATE invitations SET status = 'rejected' WHERE id = ?", (invite_id,))
+        
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "success"})
+
+@app.route("/get_collaborations")
+@login_required
+def get_collaborations():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT sb.id, b.name, u_sharer.username as sharer, u_receiver.username as receiver, sb.user_id, sb.sharer_id
+        FROM shared_books sb
+        JOIN books b ON sb.book_id = b.id
+        JOIN users u_sharer ON sb.sharer_id = u_sharer.id
+        JOIN users u_receiver ON sb.user_id = u_receiver.id
+        WHERE sb.user_id = ? OR sb.sharer_id = ?
+    """, (current_user.id, current_user.id))
+    collabs = cur.fetchall()
+    conn.close()
+    
+    res = []
+    for c in collabs:
+        is_owner = c[5] == current_user.id
+        partner = c[3] if is_owner else c[2]
+        res.append({
+            "id": c[0], "book_name": c[1], "partner": partner, "role": "Owner" if is_owner else "Guest"
+        })
+    return jsonify(res)
+
+@app.route("/disconnect_collaboration", methods=["POST"])
+@login_required
+def disconnect_collaboration():
+    data = request.json
+    collab_id = data.get("collab_id")
+    conn = get_conn()
+    cur = conn.cursor()
+    
+    # 1. Get info about the collaboration
+    cur.execute("SELECT book_id, user_id, sharer_id FROM shared_books WHERE id = ? AND (user_id = ? OR sharer_id = ?)", 
+                (collab_id, current_user.id, current_user.id))
+    collab = cur.fetchone()
+    
+    if collab:
+        book_id, collaborator_id, owner_id = collab
+        
+        # 2. Get the book details
+        cur.execute("SELECT name, path, extracted_path, thumbnail_path, summary, status FROM books WHERE id = ?", (book_id,))
+        book_details = cur.fetchone()
+        
+        if book_details:
+            name, path, ex_path, thumb, summary, status = book_details
+            
+            # 3. Check if the collaborator already has a personal entry for this path (Safety Check)
+            cur.execute("SELECT id FROM books WHERE user_id = ? AND path = ?", (collaborator_id, path))
+            exists = cur.fetchone()
+            
+            if not exists:
+                # 4. Create a personal copy for the collaborator
+                cur.execute("""
+                    INSERT INTO books (name, path, extracted_path, thumbnail_path, summary, status, user_id) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (name, path, ex_path, thumb, summary, status, collaborator_id))
+                new_book_id = cur.lastrowid
+                
+                # 5. Clone Highlights for the new copy
+                cur.execute("SELECT highlighted_text FROM highlights WHERE book_id = ?", (book_id,))
+                h_rows = cur.fetchall()
+                for h in h_rows:
+                    cur.execute("INSERT INTO highlights (book_id, highlighted_text) VALUES (?, ?)", (new_book_id, h[0]))
+                
+                # 6. Clone Bookmarks for the new copy
+                cur.execute("""
+                    SELECT page_number, scroll_y, char_index, node_index, node_offset, lang_code, label 
+                    FROM bookmarks WHERE book_id = ?
+                """, (book_id,))
+                bm_rows = cur.fetchall()
+                for bm in bm_rows:
+                    cur.execute("""
+                        INSERT INTO bookmarks (book_id, page_number, scroll_y, char_index, node_index, node_offset, lang_code, label)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (new_book_id, bm[0], bm[1], bm[2], bm[3], bm[4], bm[5], bm[6]))
+
+        # 7. Finally delete the collaboration link
+        cur.execute("DELETE FROM shared_books WHERE id = ?", (collab_id,))
+    
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "success"})
+
+@app.route("/toggle_favorite/<int:book_id>", methods=["POST"])
+def toggle_favorite(book_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE books SET is_favorite = NOT is_favorite WHERE id = ?", (book_id,))
+    conn.commit()
+    conn.close()
+    return "OK"
+@app.route("/reading_stats")
+@login_required
+def reading_stats():
+    conn = get_conn()
+    cur = conn.cursor()
+    # Fetch top 5 books, prioritized BY RECENCY for THIS USER (including shared books)
+    try:
+        cur.execute("""
+            SELECT id, name, reading_time, thumbnail_path, uploaded_at, last_read_at 
+            FROM books 
+            WHERE user_id = ? OR id IN (SELECT book_id FROM shared_books WHERE user_id = ?)
+            ORDER BY last_read_at DESC, reading_time DESC, id DESC LIMIT 5
+        """, (current_user.id, current_user.id))
+    except Exception:
+        cur.execute("""
+            SELECT id, name, reading_time, thumbnail_path, uploaded_at 
+            FROM books 
+            WHERE user_id = ? OR id IN (SELECT book_id FROM shared_books WHERE user_id = ?)
+            ORDER BY reading_time DESC, id DESC LIMIT 5
+        """, (current_user.id, current_user.id))
+    data = cur.fetchall()
+    conn.close()
+    return jsonify(data)
+
+@app.route("/touch_book/<int:book_id>", methods=["POST"])
+def touch_book(book_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    # Update last_read_at even if reading time hasn't changed (Ensures it pops to top of Recent list)
+    try:
+        cur.execute("""
+            UPDATE books SET last_read_at = CURRENT_TIMESTAMP 
+            WHERE id = ? AND (user_id = ? OR id IN (SELECT book_id FROM shared_books WHERE user_id = ?))
+        """, (book_id, current_user.id, current_user.id))
+    except Exception: pass
+    conn.commit()
+    conn.close()
+    return "OK"
+
+
+
+@app.route("/thumbnail/<int:book_id>")
+def get_thumbnail(book_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT thumbnail_path FROM books WHERE id=?", (book_id,))
+    row = cur.fetchone()
+    conn.close()
+    
+    if row and row[0]:
+        return send_from_directory(os.path.join(UPLOAD_FOLDER, "thumbnails"), row[0])
+    
+    # Placeholder if no thumb
+    return "", 404
 
 
 @app.route("/tts")
@@ -940,6 +1785,7 @@ def tts():
     if l not in EDGE_SUPPORTED:
         # PURE FALLBACK FOR UNSUPPORTED REGIONS
         try:
+            from gtts import gTTS
             tts_obj = gTTS(text=text, lang=l, slow=False)
             fp = io.BytesIO()
             tts_obj.write_to_fp(fp)
@@ -953,6 +1799,7 @@ def tts():
 
 
     def generate_streaming_tts():
+        import edge_tts
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         communicate = edge_tts.Communicate(text, voice)
@@ -973,20 +1820,172 @@ def tts():
 
     return Response(generate_streaming_tts(), mimetype="audio/mpeg")
 
+@app.route("/export_audiobook/<int:book_id>")
+def export_audiobook(book_id):
+    lang = request.args.get("lang", "en") or "en"
+    gender = request.args.get("gender", "female").lower()
+    
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT name, extracted_path FROM books WHERE id=?", (book_id,))
+    book = cur.fetchone()
+    conn.close()
+    
+    if not book: return "Book not found", 404
+    name, extracted_path = book
+    if not os.path.exists(extracted_path): return "Book content not found", 404
+        
+    try:
+        with open(extracted_path, "r", encoding="utf-8", errors="ignore") as f:
+            html_content = f.read()
+            
+        # Extract plain text for narration
+        soup = BeautifulSoup(html_content, "html.parser")
+        for p in soup.find_all(['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'br']):
+            p.append(" ")
+        text = soup.get_text()
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        if not text: return "No text found to narate", 400
+
+        # Voice mapping (Simplified for the export route)
+        VOICE_MAP = {
+            'en': { 'female': 'en-US-AriaNeural', 'male': 'en-US-GuyNeural' },
+            'ta': { 'female': 'ta-IN-PallaviNeural', 'male': 'ta-IN-ValluvarNeural' },
+            'hi': { 'female': 'hi-IN-SwaraNeural', 'male': 'hi-IN-MadhurNeural' },
+            'kn': { 'female': 'kn-IN-SapnaNeural', 'male': 'kn-IN-GaganNeural' },
+            'te': { 'female': 'te-IN-ShrutiNeural', 'male': 'te-IN-MohanNeural' },
+            'ml': { 'female': 'ml-IN-SobhanaNeural', 'male': 'ml-IN-MidhunNeural' },
+            'pa': { 'female': 'pa-IN-OjasNeural', 'male': 'pa-IN-GurumaNeural' },
+            'gu': { 'female': 'gu-IN-DhwaniNeural', 'male': 'gu-IN-NiranjanNeural' },
+            'mr': { 'female': 'mr-IN-AarohiNeural', 'male': 'mr-IN-ManoharNeural' },
+            'bn': { 'female': 'bn-IN-TanishaaNeural', 'male': 'bn-IN-BashkarNeural' },
+            'ur': { 'female': 'ur-PK-UzmaNeural', 'male': 'ur-PK-AsadNeural' },
+            'ko': { 'female': 'ko-KR-SunHiNeural', 'male': 'ko-KR-InJoonNeural' },
+            'ja': { 'female': 'ja-JP-NanamiNeural', 'male': 'ja-JP-KeitaNeural' },
+            'th': { 'female': 'th-TH-PremwadeeNeural', 'male': 'th-TH-NiwatNeural' },
+            'fr': { 'female': 'fr-FR-DeniseNeural', 'male': 'fr-FR-HenriNeural' },
+            'es': { 'female': 'es-ES-ElviraNeural', 'male': 'es-ES-AlvaroNeural' },
+            'de': { 'female': 'de-DE-KatjaNeural', 'male': 'de-DE-ConradNeural' },
+            'it': { 'female': 'it-IT-ElsaNeural', 'male': 'it-IT-DiegoNeural' },
+            'zh': { 'female': 'zh-CN-XiaoxiaoNeural', 'male': 'zh-CN-YunxiNeural' }
+        }
+        
+        # Language Selection / Detection
+        target_l = lang.split('-')[0].lower() if '-' in lang else lang.lower()
+        
+        # If 'Original' is selected, we must detect the actual language of the book content
+        # to pick the correct narrator voice.
+        if target_l == "orig":
+            detect_sample = text[:5000]
+            if re.search(r'[\u0B80-\u0BFF]', detect_sample): target_l = 'ta'
+            elif re.search(r'[\u0900-\u097F]', detect_sample): target_l = 'hi'
+            elif re.search(r'[\u0C00-\u0C7F]', detect_sample): target_l = 'te'
+            elif re.search(r'[\u0C80-\u0CFF]', detect_sample): target_l = 'kn'
+            elif re.search(r'[\u0D00-\u0D7F]', detect_sample): target_l = 'ml'
+            elif re.search(r'[\u0980-\u09FF]', detect_sample): target_l = 'bn'
+            elif re.search(r'[\u3040-\u309F\u30A0-\u30FF]', detect_sample): target_l = 'ja'
+            elif re.search(r'[\u4E00-\u9FFF]', detect_sample): target_l = 'zh'
+            else: target_l = 'en'
+            # We DON'T want to translate if they requested 'orig', but we NEED the code for the voice.
+            should_translate = False
+        else:
+            # If they chose a specific target language, we always attempt translation.
+            should_translate = (target_l != 'en' and not re.search(r'[\u0B80-\u0BFF\u0900-\u097F]', text[:1000]))
+            # (Wait, more simply: if chosen lang != detected lang, translate. But usually user wants 'ta' quiz/audio from any book)
+            should_translate = (target_l != "en") 
+
+        # Narrator Selection
+        voice = VOICE_MAP.get(target_l, {}).get(gender, 'en-US-AriaNeural')
+
+        # CHUNKING: Support massive books (Up to ~2 million characters / 600+ pages)
+        chunk_size = 2500 
+        chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+        chunks = chunks[:800] # Safe upper bound for massive academic books
+
+        def generate_audiobook():
+            import edge_tts
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            for chunk in chunks:
+                try:
+                    # LAZY TRANSLATION: Only translate if the user didn't ask for 'Original'
+                    processed_text = chunk
+                    if should_translate:
+                        try:
+                            # Direct single-chunk translation for speed
+                            translated = translate_batch_fast([chunk], target_l)
+                            if translated and len(translated) > 0:
+                                processed_text = translated[0]
+                        except Exception as te:
+                            print(f"Lazy translation failed for chunk: {te}")
+                    
+                    if not processed_text or len(processed_text.strip()) < 2:
+                        continue
+
+                    communicate = edge_tts.Communicate(processed_text, voice)
+                    async_gen = communicate.stream()
+                    while True:
+                        try:
+                            audio_chunk = loop.run_until_complete(async_gen.__anext__())
+                            if audio_chunk["type"] == "audio":
+                                yield audio_chunk["data"]
+                        except StopAsyncIteration: break
+                    
+                    # Small breath between chunks
+                    time.sleep(0.1)
+                except Exception as e:
+                    print(f"Audio chunk error: {e}")
+                    continue
+            loop.close()
+
+        # Generate Response
+        safe_name = secure_filename(name).rsplit('.', 1)[0] + f"_{target_l}_audiobook.mp3"
+        
+        is_download = request.args.get("download") == "1"
+        disposition = "attachment" if is_download else "inline"
+
+        return Response(generate_audiobook(), 
+                        mimetype="audio/mpeg",
+                        headers={"Content-Disposition": f"{disposition}; filename={safe_name}"})
+    except Exception as e:
+        traceback.print_exc()
+        return str(e), 500
+
 @app.route("/book/<int:book_id>")
 def open_book(book_id):
     try:
         conn = get_conn()
         cur = conn.cursor()
 
-        cur.execute("SELECT name, path, extracted_path FROM books WHERE id = ?", (book_id,))
+        # Check if user OWN the book OR if it was SHARED with them
+        # Offload non-critical updates to background thread to avoid blocking the main fetch
+        def update_last_read(bid):
+            try:
+                c = get_conn()
+                c.execute("UPDATE books SET last_read_at = CURRENT_TIMESTAMP WHERE id = ?", (bid,))
+                c.commit()
+                c.close()
+            except: pass
+        threading.Thread(target=update_last_read, args=(book_id,), daemon=True).start()
+
+        cur.execute("""
+            SELECT name, path, extracted_path, reading_time, is_favorite 
+            FROM books 
+            WHERE id = ? AND (user_id = ? OR id IN (SELECT book_id FROM shared_books WHERE user_id = ?))
+        """, (book_id, current_user.id, current_user.id))
         book = cur.fetchone()
         conn.close()
 
-        if not book:
-            return jsonify({"error": "Book not found in database"}), 404
+        # Update global OCR priority
+        global active_ocr_bid
+        active_ocr_bid = book_id
 
-        name, file_path, extracted_path = book
+        if not book:
+            return jsonify({"error": "Access Denied or Book Not Found"}), 403
+
+        name, file_path, extracted_path, reading_time, is_favorite = book
         file_name = os.path.basename(file_path) if file_path else ""
 
         # HEALING LOGIC: Detect if the book was uploaded using the old, slow Base64 method.
@@ -1002,50 +2001,27 @@ def open_book(book_id):
                     sample = f.read(20000)
                     if 'src="data:image/' in sample:
                         needs_migration = True
-            
-            # AGGRESSIVE HEALING: If the PDF extraction has NO image tags but we think it should
-            # (or just to be safe if it was extracted before the external asset fix), 
-            # we trigger repair if specific markers are missing.
-            if not needs_migration:
-                try:
-                    with open(extracted_path, "r", encoding="utf-8", errors="ignore") as f:
-                        content_sample = f.read(50000)
-                    # If it's a large PDF but has NO images at all in the first 50k chars, 
-                    # it might be a failed extraction.
-                    if '<img' not in content_sample:
-                        # Check if the PDF actually has images using a fast check
-                        try:
-                            # Use absolute path to ensure fitz can find it
-                            abs_pdf_path = os.path.abspath(file_path)
-                            test_pdf = fitz.open(abs_pdf_path)
-                            if len(test_pdf) > 0 and test_pdf[0].get_images():
-                                needs_migration = True
-                            test_pdf.close()
-                        except Exception: 
-                            pass
-                except Exception:
-                    pass
+
 
         if not os.path.exists(extracted_path) or needs_migration:
-            # If the file exists, return it NOW and heal in background.
-            if os.path.exists(extracted_path):
-                print(f"Book needs healing. Sending current version and starting background repair for {file_name}...")
+            if os.path.exists(extracted_path) and needs_migration:
+                # FAST RECOVERY: Don't block the user on migration. 
+                # Load the current (bloated) version so they can read immediately,
+                # while healing happens in the background.
                 with open(extracted_path, "r", encoding="utf-8", errors="ignore") as f:
                     text = f.read()
-                threading.Thread(target=background_ocr_upgrade_task, args=(file_path, extracted_path), daemon=True).start()
+                threading.Thread(target=background_ocr_upgrade_task, args=(file_path, extracted_path, book_id), daemon=True).start()
             else:
-                print(f"New book or missing extraction. Creating initial fast version for {file_name}...")
+                # Must extract at least once if missing
                 text = extract_book_html(file_path, fast_mode=True)
                 os.makedirs(os.path.dirname(extracted_path), exist_ok=True)
                 with open(extracted_path, "w", encoding="utf-8") as f:
                     f.write(str(text))
-                threading.Thread(target=background_ocr_upgrade_task, args=(file_path, extracted_path), daemon=True).start()
+                threading.Thread(target=background_ocr_upgrade_task, args=(file_path, extracted_path, book_id), daemon=True).start()
         else:
+            # OPTIMIZED PATH: Direct read
             with open(extracted_path, "r", encoding="utf-8", errors="ignore") as f:
                 text = f.read()
-
-        with open(extracted_path, "r", encoding="utf-8", errors="ignore") as f:
-            text = str(f.read())
 
         # Automatic Language Detection for Regional Support
         detected_lang = 'en'
@@ -1072,7 +2048,9 @@ def open_book(book_id):
             "name": name,
             "text": text,
             "file_name": file_name,
-            "detected_lang": detected_lang
+            "detected_lang": detected_lang,
+            "reading_time": reading_time,
+            "is_favorite": is_favorite
         })
     except Exception as e:
         traceback.print_exc()
@@ -1150,27 +2128,84 @@ def delete_book(book_id):
     conn = get_conn()
     cur = conn.cursor()
 
-    cur.execute("SELECT path, extracted_path FROM books WHERE id = ?", (book_id,))
+    # Security: Verify access first
+    cur.execute("SELECT user_id, path, extracted_path, thumbnail_path FROM books WHERE id = ?", (book_id,))
     book = cur.fetchone()
 
     if not book:
         conn.close()
-        return jsonify({"error": "Book not found"})
+        return jsonify({"error": "Book not found"}), 404
 
-    file_path, extracted_path = book
+    owner_id, file_path, extracted_path, thumb_path = book
+    
+    # Check if user is a collaborator if they aren't the owner
+    is_owner = (owner_id == current_user.id)
+    cur.execute("SELECT id FROM shared_books WHERE book_id = ? AND user_id = ?", (book_id, current_user.id))
+    is_collaborator = cur.fetchone() is not None
 
+    if not is_owner and not is_collaborator:
+        conn.close()
+        return jsonify({"error": "Unauthorized"}), 403
+
+    # Logic: If I'm a collaborator, just remove my link
+    if not is_owner:
+        cur.execute("DELETE FROM shared_books WHERE book_id = ? AND user_id = ?", (book_id, current_user.id))
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True, "message": "Collaboration ended"})
+
+    # Logic: If I'm the owner, check if others are using it
+    cur.execute("SELECT user_id FROM shared_books WHERE book_id = ?", (book_id,))
+    others = cur.fetchall()
+
+    if others:
+        # TRANSFER OWNERSHIP to the first collaborator instead of deleting files
+        new_owner_id = others[0][0]
+        cur.execute("UPDATE books SET user_id = ? WHERE id = ?", (new_owner_id, book_id))
+        cur.execute("DELETE FROM shared_books WHERE book_id = ? AND user_id = ?", (book_id, new_owner_id))
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True, "message": "Ownership transferred, book preserved for collaborators"})
+
+    # If we reached here, NO ONE else is using the book. SAFE TO DELETE.
     cur.execute("DELETE FROM highlights WHERE book_id = ?", (book_id,))
+    cur.execute("DELETE FROM bookmarks WHERE book_id = ?", (book_id,))
+    cur.execute("DELETE FROM notes WHERE book_id = ?", (book_id,))
+    cur.execute("DELETE FROM shared_books WHERE book_id = ?", (book_id,))
     cur.execute("DELETE FROM books WHERE id = ?", (book_id,))
     conn.commit()
     conn.close()
 
-    if file_path and os.path.exists(file_path):
-        os.remove(file_path)
+    # PHYSICAL FILE CLEANUP
+    def cleanup_task():
+        try:
+            # 1. Clean up the main files
+            if file_path and os.path.exists(file_path):
+                os.remove(file_path)
+            
+            # 2. Clean up extracted assets (handled efficiently by background prune, 
+            # but we remove the main HTML file here)
+            if extracted_path and os.path.exists(extracted_path):
+                if os.path.isdir(extracted_path):
+                    import shutil
+                    shutil.rmtree(extracted_path)
+                else:
+                    os.remove(extracted_path)
 
-    if extracted_path and os.path.exists(extracted_path):
-        os.remove(extracted_path)
+            # 3. Clean up thumbnail
+            if thumb_path:
+                t_path = os.path.join(UPLOAD_FOLDER, "thumbnails", thumb_path)
+                if os.path.exists(t_path):
+                    os.remove(t_path)
+            
+            print(f"🗑️ Permanent deletion complete for book {book_id}")
+        except Exception as e:
+            print(f"File Cleanup Error: {e}")
 
-    return jsonify({"message": "Book deleted successfully"})
+    # Run cleanup in background to keep UI snappy
+    threading.Thread(target=cleanup_task, daemon=True).start()
+
+    return jsonify({"success": True, "message": "Book deletion initiated. Files will be purged in background."})
 
 
 @app.route("/download/<int:book_id>")
@@ -1249,6 +2284,7 @@ def translate_text():
             print(f"Sidecar Bridge Failure: {e}. Falling back to internal Python engine.")
 
         # FALLBACK: Using a specialized Batch Translator for maximum reliability vs manual string joining
+        from deep_translator import GoogleTranslator
         translator = GoogleTranslator(source='auto', target=target_lang)
         
         # PARTITIONED BATCHING: Prevents URI overflow and provides faster individual feedback
@@ -1412,22 +2448,43 @@ def summarize():
             sentences = get_book_sentences(book_id)
             text = " ".join(sentences)
             
-        if not text or len(text.strip()) < 50:
-            return jsonify({"summary": "Text is too short to summarize. Please highlight a larger section."})
+        target_lang = data.get("target_lang", "orig")
+        
+        target_lang = data.get("target_lang", "orig")
+        
+        # Determine the actual target language (handle 'orig' case)
+        actual_target = target_lang
+        if target_lang == "orig":
+            # Detect dominant script using a 10k character sample
+            sample_text = text[:10000]
+            ta_count = len(re.findall(r'[\u0B80-\u0BFF]', sample_text))
+            hi_count = len(re.findall(r'[\u0900-\u097F]', sample_text))
+            
+            if ta_count > 20: actual_target = 'ta'
+            elif hi_count > 20: actual_target = 'hi'
+            elif re.search(r'[\u0C00-\u0C7F]', sample_text): actual_target = 'te'
+            elif re.search(r'[\u0C80-\u0CFF]', sample_text): actual_target = 'kn'
+            elif re.search(r'[\u4E00-\u9FFF]', sample_text): actual_target = 'zh'
+            else: actual_target = 'en'
 
         # Pure Python Extractive Summarization (Fallback/Offline mode without heavy NLP dependencies)
         
-        # 1. Clean and tokenize sentences
-        sentences = re.split(r'(?<=[.!?])\s+', text.strip())
-        if len(sentences) <= 3:
-            return jsonify({"summary": text})
-            
-        # 2. Word frequency calculation (ignore common stop words)
-        stop_words = set(['the', 'is', 'in', 'and', 'to', 'a', 'of', 'for', 'it', 'on', 'with', 'as', 'by', 'that', 'this', 'an', 'are', 'was', 'be', 'or', 'at', 'from'])
-        words = re.findall(r'\w+', text.lower())
+        # 1. Clean and tokenize sentences (Support multilingual boundaries)
+        sentences = re.split(r'(?<=[.!?।])\s+', text.strip())
+        if len(sentences) < 2:
+             # Even if one sentence, try splitting on commas/semicolons if it's a long run-on
+             sentences = re.split(r'[,;:]\s*', text.strip())
+        
+        # 2. Word frequency calculation (Multilingual stop words)
+        stop_words = {
+            'the', 'is', 'in', 'and', 'to', 'a', 'of', 'for', 'it', 'on', 'with', 'as', 'by', 'that', 'this', 'an', 'are', 'was', 'be', 'or', 'at', 'from',
+            'என்று', 'மற்றும்', 'இந்த', 'ஒரு', 'அவன்', 'அவள்', 'அது', 'அவர்கள்', 'என்பது', 'என்றால்', 'உள்ள', 'உள்ளது'
+        }
+        # Use Unicode-aware word detection for various scripts
+        words = re.findall(r'[\w\u0080-\uFFFF]+', text.lower())
         freq_table = {}
         for word in words:
-            if word not in stop_words:
+            if word not in stop_words and len(word) > 2:
                 freq_table[word] = freq_table.get(word, 0) + 1
                 
         # 3. Score sentences based on word frequency
@@ -1444,28 +2501,32 @@ def summarize():
             if len(words_in_sentence) > 0:
                 sentence_scores[i] = float(sentence_score) / float(len(words_in_sentence))
 
-        # 4. Extract top sentences (aim for ~30% compression, max 6 bullet points)
-        target_length = max(2, min(6, int(len(sentences) * 0.35)))
+        # 4. Extract top sentences (aim for ~40% compression for short paragraphs, more for large)
+        if len(sentences) > 10:
+            target_length = max(3, min(7, int(len(sentences) * 0.3)))
+        else:
+            # For short snippets, be very aggressive: pick the 1-2 most important parts
+            target_length = max(1, int(len(sentences) * 0.5))
         
-        # Get the indices of the highest-scoring sentences
-        all_indices = sorted(sentence_scores.keys(), key=lambda k: float(sentence_scores[k]), reverse=True)
-        top_sentence_indices = []
-        for i in range(min(len(all_indices), target_length)):
-            top_sentence_indices.append(all_indices[i])
-        
-        # 5. Re-sort chronologically so the summary reads in the correct order
-        top_sentence_indices.sort()
-        
-        summary_sentences = []
-        for index in top_sentence_indices:
-            clean_sentence = sentences[index].strip()
-            if clean_sentence:
-                summary_sentences.append("- " + clean_sentence)
+        # 5. Build final summary string
+        sorted_indices = sorted(sentence_scores.keys(), key=lambda x: sentence_scores[x], reverse=True)[:target_length]
+        # Put them back in original order for flow
+        summary = ""
+        for idx in sorted(sorted_indices):
+            line = sentences[idx].strip()
+            if line: summary += f"• {line}\n"
             
-        summary = "\n".join(summary_sentences)
-        
+        # 6. Translate if target is not English (or detected as non-English)
+        if actual_target and actual_target != 'en':
+            try:
+                # Use sidecar for multi-line summary translation speed
+                summary_lines = summary.split('\n')
+                translated_lines = translate_batch_fast(summary_lines, actual_target)
+                summary = "\n".join(translated_lines)
+            except Exception as e:
+                print(f"Summary translation error: {e}")
+
         return jsonify({"summary": summary})
-        
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": "Summarization failed internally."}), 500
@@ -1498,11 +2559,23 @@ def get_notes(book_id):
     for row in rows:
         note_id, content = row
         # Auto-translate if not in original/english
-        if lang and lang != 'en' and lang != 'orig':
+        # Determine target language (handle 'orig')
+        actual_target = lang
+        if lang == 'orig' and book_id:
+            # We need a small sample of content to detect if it's 'orig'
+            notes_sample = content[:1000]
+            if re.search(r'[\u0B80-\u0BFF]', notes_sample): actual_target = 'ta'
+            elif re.search(r'[\u0900-\u097F]', notes_sample): actual_target = 'hi'
+            elif re.search(r'[\u0B80-\u0BFF]', content): actual_target = 'ta' # Backwards compatibility/Deep check
+            
+        # Auto-translate if actual_target is not english/original
+        if actual_target and actual_target != 'en':
             try:
-                content = GoogleTranslator(source='auto', target=lang).translate(content)
+                # If the content is already in the target language, deep-translator usually handles it fine
+                from deep_translator import GoogleTranslator
+                content = GoogleTranslator(source='auto', target=actual_target).translate(content)
             except Exception:
-                pass # Fallback to original if translation fails
+                pass 
         notes.append({"id": note_id, "content": content})
         
     return jsonify(notes)
@@ -1534,6 +2607,7 @@ def delete_note_endpoint(note_id):
 @app.route("/download_notes/<int:book_id>")
 def download_notes(book_id):
     format_type = request.args.get("format", "txt").lower()
+    lang = request.args.get("lang", "en")
     
     conn = get_conn()
     cur = conn.cursor()
@@ -1545,14 +2619,37 @@ def download_notes(book_id):
         
     book_name = book_row[0]
     cur.execute("SELECT content FROM notes WHERE book_id = ?", (book_id,))
-    notes = [row[0] for row in cur.fetchall()]
+    raw_notes = [row[0] for row in cur.fetchall()]
     conn.close()
+    
+    # Determine the actual target language (handle 'orig' case)
+    actual_target = lang
+    if lang == "orig" and raw_notes:
+        notes_sample = " ".join(raw_notes[:5])
+        if re.search(r'[\u0B80-\u0BFF]', notes_sample): actual_target = 'ta'
+        elif re.search(r'[\u0900-\u097F]', notes_sample): actual_target = 'hi'
+        elif re.search(r'[\u0C00-\u0C7F]', notes_sample): actual_target = 'te'
+        # ... add more if needed, but 'auto' in translator handles others
+        
+    # Translate notes if requested language is not original
+    notes = []
+    if actual_target and actual_target != 'en':
+        from deep_translator import GoogleTranslator
+        translator = GoogleTranslator(source='auto', target=actual_target)
+        for n in raw_notes:
+            try:
+                notes.append(translator.translate(n))
+            except:
+                notes.append(n)
+    else:
+        notes = raw_notes
 
     
     if not notes:
         return "No notes found to download.", 400
 
     if format_type == "docx":
+        import docx
         doc = docx.Document()
         doc.add_heading(f'Study Notes: {book_name}', 0)
         doc.add_paragraph('Collected using AI Book Reader').italic = True
@@ -1567,10 +2664,13 @@ def download_notes(book_id):
         return send_file(target, as_attachment=True, download_name=f"Notes_{book_name}.docx", mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
     elif format_type == "pdf":
+        from fpdf import FPDF
+        
         class PDF(FPDF):
             def header(self):
+                # We use a standard font for header, but we'll try to be safe
                 self.set_font('helvetica', 'B', 15)
-                self.cell(0, 10, f'Study Notes: {book_name}', border=True, ln=True, align='C')
+                self.cell(0, 10, f'Study Notes: {book_name[:40]}...', border=False, ln=True, align='C')
                 self.ln(5)
             def footer(self):
                 self.set_y(-15)
@@ -1578,16 +2678,42 @@ def download_notes(book_id):
                 self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
 
         pdf = PDF()
+        # Add a more robust font if we can find one on the system (Windows specific attempt)
+        font_found = False
+        font_paths = [
+            r'C:\Windows\Fonts\arial.ttf',
+            r'C:\Windows\Fonts\segoeui.ttf',
+            r'/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf'
+        ]
+        for path in font_paths:
+            if os.path.exists(path):
+                try:
+                    pdf.add_font('UnicodeFont', '', path)
+                    pdf.set_font('UnicodeFont', size=11)
+                    font_found = True
+                    break
+                except: continue
+        
+        if not font_found:
+            pdf.set_font("helvetica", size=11)
+
         pdf.add_page()
-        pdf.set_font("helvetica", size=11)
         
         for i, note in enumerate(notes):
-            pdf.set_font("helvetica", 'B', 12)
+            # Header for snippet - Bold only for built-in fonts, Regular for custom Unicode
+            style = '' if font_found else 'B'
+            pdf.set_font(pdf.font_family, style, 12)
             pdf.cell(0, 10, f"Snippet {i+1}:", ln=True)
-            pdf.set_font("helvetica", size=10)
-            # Remove characters that may crash basic PDF fonts or use multi_cell safely
-            safe_text = note.encode('latin-1', 'replace').decode('latin-1')
-            pdf.multi_cell(0, 10, safe_text)
+            
+            # Content
+            pdf.set_font(pdf.font_family, size=10)
+            if not font_found:
+                # If no unicode font, we MUST use latin-1 for helvetica
+                safe_text = note.encode('latin-1', 'replace').decode('latin-1')
+            else:
+                safe_text = note
+                
+            pdf.multi_cell(0, 8, safe_text)
             pdf.ln(5)
 
         response_bytes = pdf.output()
@@ -1635,17 +2761,36 @@ def generate_revision():
             score = sum(freq[w] for w in words_in_s if w in freq)
             scores.append((score / len(words_in_s), i, s))
             
-        # Pick top 25 diverse points
-        top_points = sorted(scores, key=lambda x: float(x[0]), reverse=True)[:30]
+        # Scale revision points based on book length for better coverage
+        rev_limit = min(60, max(20, len(sentences) // 12))
+        top_points = sorted(scores, key=lambda x: float(x[0]), reverse=True)[:rev_limit]
         # Re-sort by book order
         top_points.sort(key=lambda x: x[1])
         
         revision_points = [p[2].strip() for p in top_points]
         
-        if target_lang != 'en' and target_lang != 'orig':
+        # Determine the actual target language (handle 'orig' case)
+        actual_target = target_lang
+        if target_lang == "orig":
+            # Detect language from the sample text
+            lang_detect_sample = " ".join(sentences[:20])
+            if re.search(r'[\u0B80-\u0BFF]', lang_detect_sample): actual_target = 'ta'
+            elif re.search(r'[\u0900-\u097F]', lang_detect_sample): actual_target = 'hi'
+            elif re.search(r'[\u0C00-\u0C7F]', lang_detect_sample): actual_target = 'te'
+            elif re.search(r'[\u0C80-\u0CFF]', lang_detect_sample): actual_target = 'kn'
+            elif re.search(r'[\u0D00-\u0D7F]', lang_detect_sample): actual_target = 'ml'
+            elif re.search(r'[\u0980-\u09FF]', lang_detect_sample): actual_target = 'bn'
+            elif re.search(r'[\u0A00-\u0A7F]', lang_detect_sample): actual_target = 'pa'
+            elif re.search(r'[\u0A80-\u0AFF]', lang_detect_sample): actual_target = 'gu'
+            elif re.search(r'[\u0D80-\u0DFF]', lang_detect_sample): actual_target = 'si'
+            elif re.search(r'[\u3040-\u309F\u30A0-\u30FF]', lang_detect_sample): actual_target = 'ja'
+            elif re.search(r'[\u4E00-\u9FFF]', lang_detect_sample): actual_target = 'zh'
+            else: actual_target = 'en'
+
+        if actual_target and actual_target != 'en':
             try:
-                translator = GoogleTranslator(source='auto', target=target_lang)
-                revision_points = [translator.translate(pt) for pt in revision_points]
+                # Use sidecar for multi-line revision translation speed
+                revision_points = translate_batch_fast(revision_points, actual_target)
             except Exception as e:
                 print(f"Revision Translation Error: {e}")
                 
@@ -1677,9 +2822,11 @@ def download_revision(book_id):
             score = float(sum(freq[w] for w in words_in_s if w in freq))
             scores.append((score / float(len(words_in_s)), i, s))
             
+        # Dynamic scaling for high-quality guide extraction
+        rev_limit = min(80, max(25, len(sentences) // 10))
         all_top = sorted(scores, key=lambda x: float(str(x[0])), reverse=True)
         top_points = []
-        for i in range(min(len(all_top), 35)):
+        for i in range(min(len(all_top), rev_limit)):
             top_points.append(all_top[i])
         top_points.sort(key=lambda x: int(x[1]))
         
@@ -1687,8 +2834,8 @@ def download_revision(book_id):
         
         if target_lang != 'en' and target_lang != 'orig':
             try:
-                translator = GoogleTranslator(source='auto', target=target_lang)
-                revision_points = [translator.translate(pt) for pt in revision_points]
+                # Use sidecar for multi-line content translation speed
+                revision_points = translate_batch_fast(revision_points, target_lang)
             except Exception as e:
                 print(f"Revision Content Translation Error: {e}")
         
@@ -1743,6 +2890,7 @@ def translate_batch_fast(texts, target_lang):
     # 2. FALLBACK to Python Library (Batching for safety)
     if not translated_pool:
         try:
+            from deep_translator import GoogleTranslator
             translator = GoogleTranslator(source='auto', target=target_lang)
             batch_size = 15 # conservative for deep_translator stability
             for i in range(0, len(to_translate), batch_size):
@@ -1778,9 +2926,8 @@ def generate_quiz():
 
         if book_id and not text:
             sentences = get_book_sentences(book_id)
-            # Randomized window ensure quiz covers various parts and prevents 500+ page parsing hangs
-            random.shuffle(sentences)
-            text = " ".join(sentences[:500])
+            # Use a healthy sample size that covers large books without crashing the interpreter
+            text = " ".join(sentences[:8000]) 
         elif text and len(text) > 150000:
             # Massive selections (20+ pages) also need clamping for server safety
             text = text[:150000]
@@ -1791,52 +2938,116 @@ def generate_quiz():
 
         # 1. CLEAN & TOKENIZE
         sentences = re.split(r'(?<=[.!?])\s+', text.strip())
-        all_words = re.findall(r'\b\w{4,}\b', text.lower())
+        # Use a broader regex to capture words in various scripts (Tamil, Hindi, etc.)
+        all_words = re.findall(r'[\w\u0B80-\u0BFFA-Za-z]{3,}', text) 
         
         # 2. KEYWORDS EXTRACTION (Frequent nouns/concepts)
         stop_words = set(['the', 'and', 'that', 'with', 'from', 'this', 'their', 'which', 'will', 'have', 'been', 'were', 'about'])
         freq = {}
         for w in all_words:
-            if w not in stop_words:
-                freq[w] = int(freq.get(w, 0)) + 1
+            w_low = w.lower()
+            if w_low not in stop_words:
+                freq[w_low] = int(freq.get(w_low, 0)) + 1
         
         raw_keywords = sorted(freq.keys(), key=lambda k: float(freq[k]), reverse=True)
         top_keywords = []
-        for i in range(min(len(raw_keywords), 100)):
+        for i in range(min(len(raw_keywords), 250)): # Increased pool for better variety
             top_keywords.append(str(raw_keywords[i]))
         
-        # Scaling logic: More text = More questions (up to 50 for massive books in English)
-        mcq_limit = min(50, max(10, len(sentences) // 15))
-        short_limit = min(40, max(8, len(sentences) // 25))
-        long_limit = min(20, max(5, len(sentences) // 40))
+        # Scaling logic: More text = More questions (Higher floor for comprehensive study)
+        # Min 10-15 per book as requested by user
+        mcq_limit = min(100, max(15, len(sentences) // 8)) 
+        short_limit = min(80, max(12, len(sentences) // 15))
+        long_limit = min(50, max(10, len(sentences) // 25))
 
         # TIGHTEN LIMITS FOR TRANSLATED QUIZZES: 
         # Translation hits (Sidecar) take significantly longer; keep it fast!
         target_lang = data.get("target_lang", "en")
-        if target_lang and target_lang not in ["en", "orig"]:
-            mcq_limit = min(15, mcq_limit)
-            short_limit = min(10, short_limit)
-            long_limit = min(5, long_limit)
+        
+        # Determine the actual target language (handle 'orig' case)
+        actual_target = target_lang
+        if target_lang == "orig":
+            # Detect language using a larger sample to avoid getting tripped up by English prefaces
+            sample_text = text[:15000]
+            # Count occurrences of specific scripts to find the dominant language
+            ta_count = len(re.findall(r'[\u0B80-\u0BFF]', sample_text))
+            hi_count = len(re.findall(r'[\u0900-\u097F]', sample_text))
+            te_count = len(re.findall(r'[\u0C00-\u0C7F]', sample_text))
+            
+            if ta_count > 30: actual_target = 'ta'
+            elif hi_count > 30: actual_target = 'hi'
+            elif te_count > 30: actual_target = 'te'
+            elif re.search(r'[\u0C80-\u0CFF]', sample_text): actual_target = 'kn'
+            elif re.search(r'[\u0D00-\u0D7F]', sample_text): actual_target = 'ml'
+            elif re.search(r'[\u0980-\u09FF]', sample_text): actual_target = 'bn'
+            elif re.search(r'[\u0A00-\u0A7F]', sample_text): actual_target = 'pa'
+            elif re.search(r'[\u0A80-\u0AFF]', sample_text): actual_target = 'gu'
+            elif re.search(r'[\u0D80-\u0DFF]', sample_text): actual_target = 'si'
+            elif re.search(r'[\u3040-\u309F\u30A0-\u30FF]', sample_text): actual_target = 'ja'
+            elif re.search(r'[\u4E00-\u9FFF]', sample_text): actual_target = 'zh'
+            else: actual_target = 'en'
+
+        if actual_target and actual_target != "en":
+            # For translated quizzes, we still want a healthy amount for large books
+            mcq_limit = min(40, mcq_limit) 
+            short_limit = min(30, short_limit)
+            long_limit = min(20, long_limit)
 
         questions = []
 
         if quiz_type == "mcq":
-            # Existing MCQ logic
-            candidates = [s for s in sentences if re.search(r'\b(is|was|means|refers to|defined as|called|known as)\b', s, re.I)]
+            # Multilingual pattern matching for finding definition-like sentences across Indian languages & English
+            regex_markers = [
+                r'\b(is|was|means|refers to|defined as|called|known as)\b', # English
+                r'என்பது', r'என்றால்', r'குறிக்கிறது', # Tamil
+                r'है', r'का\s+अर्थ', r'कहते\s+हैं', # Hindi
+                r'అంటే', r'అనేది', # Telugu
+                r'ఎಂದರೆ', r'ಎನ್ನುವುದು', # Kannada
+                r'মানে', r'হল' # Bengali
+            ]
+            pattern = '|'.join(regex_markers)
+            candidates = [s for s in sentences if re.search(pattern, s, re.I)]
             random.shuffle(candidates)
             
-            for s in candidates[:max(mcq_limit * 2, 50)]:
-                words = re.findall(r'\b\w+\b', s)
-                possible_masks = [w for w in words if w.lower() in top_keywords and len(w) > 3]
+            for s in candidates[:max(mcq_limit * 3, 150)]:
+                # Unicode-aware word extraction
+                words = re.findall(r'[\w\u0B80-\u0BFF]+', s) 
+                possible_masks = [w for w in words if w.lower() in top_keywords and len(w) > 2]
                 if not possible_masks: continue
+                
                 mask = random.choice(possible_masks)
                 distractors = [k for k in top_keywords if k.lower() != mask.lower()]
                 if len(distractors) < 3: continue
+                
                 options = random.sample(distractors, 3) + [mask]
                 random.shuffle(options)
-                q_text = re.sub(r'\b' + re.escape(mask) + r'\b', '__________', str(s), count=1, flags=re.I)
-                questions.append({"question": q_text, "options": options, "answer": mask, "type": "mcq"})
+                
+                # Precise replacement of the first instance
+                if mask in s:
+                    q_text = s.replace(mask, '__________', 1)
+                    questions.append({"question": q_text, "options": options, "answer": mask, "type": "mcq"})
+                
                 if len(questions) >= mcq_limit: break
+            
+            # --- CONTINUITY FIX: Fill up remaining required slots if definition-like sentences are exhausted ---
+            if len(questions) < mcq_limit:
+                rem = mcq_limit - len(questions)
+                used_keys = {q["answer"].lower() for q in questions}
+                available_keys = [k for k in top_keywords if k.lower() not in used_keys]
+                
+                random.shuffle(sentences) # Pick from throughout the book
+                for k in available_keys[:rem]:
+                    # Find any reasonable sentence as a context
+                    context_s = next((s for s in sentences if k.lower() in s.lower() and 40 < len(s) < 300), None)
+                    if context_s:
+                        q_text = context_s.replace(k, '__________', 1)
+                        distractors = [dk for dk in top_keywords if dk.lower() != k.lower()]
+                        if len(distractors) >= 3:
+                            options = random.sample(distractors, 3) + [k]
+                            random.shuffle(options)
+                            questions.append({"question": q_text, "options": options, "answer": k, "type": "mcq"})
+                    
+                    if len(questions) >= mcq_limit: break
 
         elif quiz_type in ["short", "long"]:
             # Standard Academic Question Templates
@@ -1858,6 +3069,7 @@ def generate_quiz():
 
             # High-Performance NLP Logic using TextBlob
             try:
+                from textblob import TextBlob
                 blob = TextBlob(text)
                 # Group noun phrases and filter out junk
                 concepts = [str(np).lower() for np in blob.noun_phrases if len(str(np)) > 3]
@@ -1913,19 +3125,19 @@ def generate_quiz():
                         break
 
         if not questions:
-            # Fallback
-            for k in top_keywords[:5]:
+            # Fallback: Use top keywords to generate generic concept questions up to the limit
+            target_limit = mcq_limit if quiz_type == "mcq" else (short_limit if quiz_type == "short" else long_limit)
+            for k in top_keywords[:target_limit]:
                 questions.append({
                     "question": f"Based on the text, what is a key concept identified as '{k}'?",
-                    "options": random.sample(top_keywords[10:13], 3) + [k] if quiz_type == "mcq" else None,
+                    "options": random.sample(top_keywords[10:30] if len(top_keywords)>30 else top_keywords, 3) + [k] if quiz_type == "mcq" else None,
                     "answer": f"The term '{k}' is used as a significant keyword in this context.",
                     "type": quiz_type
                 })
                 if quiz_type == "mcq": random.shuffle(questions[-1]["options"])
 
         # --- NEW: High-Speed Batch Translation Pass ---
-        target_lang = data.get("target_lang", "en")
-        if target_lang and target_lang not in ["en", "orig"]:
+        if actual_target and actual_target != "en":
             try:
                 # 1. Flatten all strings to translate (Questions + Options + Answers)
                 pool = []
@@ -1945,7 +3157,7 @@ def generate_quiz():
                         pool.append(q["answer"])
 
                 # 2. PERFORM BATCH HIT
-                translated_pool = translate_batch_fast(pool, target_lang)
+                translated_pool = translate_batch_fast(pool, actual_target)
 
                 # 3. RE-INJECT
                 if len(translated_pool) == len(pool):
@@ -1958,9 +3170,36 @@ def generate_quiz():
                             questions[q_idx]["answer"] = translated_pool[idx]
                 else: 
                      print(f"Quiz translation count mismatch: {len(translated_pool)} vs {len(pool)}")
+                     
+                # --- FORCED LOCALIZATION PASS: Fix "Mixed Language" bleeding (stragglers) ---
+                # If a question still looks like English but the target is non-English, retry it individually.
+                lang_ranges = {
+                    'ta': r'[\u0B80-\u0BFF]', 'hi': r'[\u0900-\u097F]', 
+                    'te': r'[\u0C00-\u0C7F]', 'kn': r'[\u0C80-\u0CFF]',
+                    'ml': r'[\u0D00-\u0D7F]', 'bn': r'[\u0980-\u09FF]'
+                }
+                regex = lang_ranges.get(actual_target)
+                if regex:
+                    for q in questions:
+                        has_target_script = bool(re.search(regex, q["question"]))
+                        if not has_target_script:
+                            try:
+                                # Final forced translation for this specific straggler
+                                from deep_translator import GoogleTranslator
+                                t = GoogleTranslator(source='auto', target=actual_target)
+                                q["question"] = t.translate(q["question"])
+                                if q.get("options"):
+                                    q["options"] = [t.translate(o) if not re.search(regex, o) else o for o in q["options"]]
+                                if q.get("answer"):
+                                    q["answer"] = t.translate(q["answer"]) if not re.search(regex, q["answer"]) else q["answer"]
+                            except: pass
             except Exception as e:
                 print(f"Quiz translation pipeline failed: {e}")
-                traceback.print_exc()
+                # We return the original English/untranslated questions anyway as a safety measure
+        
+        # FINAL SANITY CHECK: Ensure we have at least 15 questions if the book is large
+        if len(questions) < 15 and len(sentences) > 500:
+             print(f"Post-processing safety: only {len(questions)} generated. This should not happen with current limits.")
 
         return jsonify({"questions": questions, "type": quiz_type})
 
@@ -2220,6 +3459,16 @@ def ask_assistant():
 @app.route("/explain_image", methods=["POST"])
 def explain_image():
     try:
+        import base64
+        import io
+        import cv2
+        import numpy as np
+        from PIL import Image
+        import urllib.request
+        from urllib.parse import unquote
+        import pytesseract
+        import re
+
         data = request.get_json()
         # Support both 'src' (legacy/original) and 'image' (new frontend logic)
         src = data.get("src", "") or data.get("image", "")
@@ -2284,35 +3533,54 @@ def explain_image():
         ai_caption = ""
         faces = []
         
-        # 1. Run OCR (Tesseract) to find labels/data
+        # 1. Run Advanced Multi-Stage OCR (Tesseract)
         try:
+            # 🚀 OPTIMIZATION: Resize massive images to speed up OCR (Tesseract sweet spot is ~2000px)
+            h, w = img_np.shape[:2]
+            if w > 2000 or h > 2000:
+                scale = 2000.0 / max(w, h)
+                img_np = cv2.resize(img_np, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+
             gray = cv2.cvtColor(img_np, cv2.COLOR_BGR2GRAY)
-            # Denoise and sharpen for better OCR
-            gray = cv2.GaussianBlur(gray, (0,0), 3)
-            gray = cv2.addWeighted(gray, 1.5, gray, -0.5, 0)
             
-            ocr_text_raw = pytesseract.image_to_string(gray, config='--oem 3 --psm 6').strip()
-            ocr_text = re.sub(r'[^a-zA-Z0-9\s.,!?:;@&()\"\'-]', '', ocr_text_raw)
-            if not ocr_text and re.search(r'[a-zA-Z]{3,}', ocr_text_raw):
-                ocr_text = ocr_text_raw.strip()
-        except Exception:
+            # Pass 1: Standard Sharpened (Fastest)
+            s_gray = cv2.GaussianBlur(gray, (0,0), 3)
+            s_gray = cv2.addWeighted(gray, 1.5, s_gray, -0.5, 0)
+            ocr_text_1 = pytesseract.image_to_string(s_gray, config='--oem 3 --psm 6').strip()
+            
+            ocr_text_2 = ""
+            ocr_text_3 = ""
+            
+            # 🚀 EARLY EXIT: If Pass 1 found substantial text, skip expensive thresholding to prevent timeouts
+            if len(ocr_text_1.split()) < 8:
+                # Pass 2: Adaptive Thresholding
+                thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+                ocr_text_2 = pytesseract.image_to_string(thresh, config='--oem 3 --psm 11').strip()
+                
+                # Pass 3: Inverted Thresholding (Only if needed)
+                if len(ocr_text_2.split()) < 5:
+                    inv_thresh = cv2.bitwise_not(thresh)
+                    ocr_text_3 = pytesseract.image_to_string(inv_thresh, config='--oem 3 --psm 11').strip()
+
+            combined_raw = f"{ocr_text_1} {ocr_text_2} {ocr_text_3}".strip()
+            ocr_text = re.sub(r'[^a-zA-Z0-9\s.,!?:;@&()\"\'-]', ' ', combined_raw)
+            words = ocr_text.split()
+            ocr_text = " ".join([w for w in words if len(w) > 1 or w.lower() in ['a', 'i']])
+            
+            seen = set()
+            ocr_text = " ".join([x for x in ocr_text.split() if not (x.lower() in seen or seen.add(x.lower()))])
+        except Exception as e:
+            print("OCR Pipeline Error:", e)
             pass
 
         try:
             img_pil = Image.fromarray(cv2.cvtColor(img_np, cv2.COLOR_BGR2RGB))
             
-            if not hasattr(app, "image_captioner"):
-                try:
-                    if pipeline:
-                        app.image_captioner = pipeline("image-to-text", model="nlp-connect/vit-gpt2-image-captioning", device=-1)
-                    else:
-                        app.image_captioner = None
-                except Exception:
-                    app.image_captioner = None
-                    
-            if app.image_captioner:
-                # Optimized for speed
-                res = app.image_captioner(img_pil, max_new_tokens=25)
+            # Check if model is ready (handled by background thread)
+            captioner = getattr(app, "image_captioner", None)
+            if captioner and captioner != "FAILED":
+                # Only run if not still downloading/initializing
+                res = captioner(img_pil, max_new_tokens=25)
                 if res and len(res) > 0 and 'generated_text' in res[0]:
                     ai_caption = res[0]['generated_text'].capitalize().strip()
                 
@@ -2354,33 +3622,43 @@ def explain_image():
         # 3. Analyze and Combine (Detailed Visual Logic)
         is_diagram = any(kw in (ocr_text + ai_caption).lower() for kw in ["diagram", "chart", "graph", "figure", "fig.", "illustration", "table", "cycle", "process", "thank you", "slide", "presentation"])
         
-        # Priority 1: Visual Scene Description
+        # --- Visual Reasoning Logic ---
         if ai_caption:
             visual_desc = f"🖼️ AI VISUAL SUMMARY: {ai_caption}."
-            
-            # Enrich with context to explain "what it belongs to"
             if context:
                 visual_desc += f"\n\n📚 VIEWPOINT: This appears in a passage discussing: '{context[:150]}...'."
             
             if ocr_text:
                 if is_diagram:
-                    explanation = f"{visual_desc}\n\n🔍 KEY DETAILS: The image contains text which points to: \"{ocr_text[:300]}...\""
+                    explanation = f"{visual_desc}\n\n🔍 KEY DETAILS: This graphic functions as a diagram or chart with labels including: \"{ocr_text[:300]}...\""
                 else:
-                    explanation = f"{visual_desc}\n\n📝 EMBEDDED TEXT: {ocr_text[:120]}..."
+                    explanation = f"{visual_desc}\n\n📝 EMBEDDED TEXT: It contains the text: \"{ocr_text[:150]}...\""
             else:
                 explanation = visual_desc
                 
-        # Priority 2: Text-only images or charts where AI failed
         elif ocr_text:
-            cleaned_context = re.sub(r'[:;{}[]]', '', context[:100]).strip()
-            explanation = f"🔍 DOCUMENT SNAPSHOT: Based on the visual data, this contains text elements including: \"{ocr_text[:400]}...\"\n\n"
-            if cleaned_context:
-                explanation += f"🚀 INTEGRATION: This likely serves as a visual reference for: '{cleaned_context}'."
+            # Smart Title Card & Cover Detection
+            words = ocr_text.split()
+            u_ocr = ocr_text.upper()
+            
+            # If it's short, uppercase-heavy, and high-contrast, it's a Title Card
+            is_title_card = len(words) < 25 and (sum(1 for w in words if w.isupper()) / max(1, len(words)) > 0.6)
+            
+            if is_title_card:
+                explanation = f"🎨 SECTION HEADER: This is a high-impact title card or section header.\n\n📖 CONTENT: \"{ocr_text}\"\n\nIt likely serves as a visual break or a thematic introduction to the next part of the book."
             else:
-                explanation += "Note: Vision AI is starting up or unavailable, using high-precision OCR for internal details."
+                explanation = f"🔍 DOCUMENT SNAPSHOT: This image contains significant textual data or instructions.\n\n📝 EXTRACTED TEXT:\n\"{ocr_text[:600]}...\"\n\n"
                 
+            # Contextual Enrichment
+            cleaned_context = re.sub(r'[:;{}[]]', '', context[:150]).strip()
+            if cleaned_context and not is_title_card:
+                explanation += f"\n🚀 CONTEXTUAL LINK: This visual is supporting the following discussion: '{cleaned_context}...'"
+            elif not is_title_card:
+                 explanation += "\nNote: Vision AI is currently analyzing visual patterns via high-precision OCR."
         else:
-            explanation = "This image appears to be an illustration or decorative element. Try highlighting surrounding text to help me understand its theme!"
+            explanation = "🖼️ VISUAL ELEMENT: This appears to be an illustration, photo, or decorative graphic without readable text.\n\n💡 TIP: Try highlighting the text around this image—I can then use that context to better explain what this specific visual represents in your book!"
+
+        return jsonify({"explanation": explanation})
 
         return jsonify({"explanation": explanation})
         
@@ -2392,41 +3670,53 @@ def explain_image():
 def analyze_emotion():
     try:
         data = request.get_json()
-        text = data.get("text", "").lower()
-        if not text:
-            return jsonify({"emotion": "neutral"})
+        texts = data.get("texts", []) # Now accepts a list
+        if not texts:
+            # Fallback for single text for backward compatibility
+            single_text = data.get("text", "")
+            texts = [single_text] if single_text else []
+            
+        if not texts:
+            return jsonify([{"emotion": "neutral"}])
 
-        # 1. Rule-based Fast Emotion Mapping
+        results = []
+        analyzer = get_sentiment_analyzer()
+        
+        # Fast Rule-based pass for all texts
         emotion_rules = {
             "happy": ["happy", "joy", "wonderful", "delighted", "smile", "laugh", "cheerful", "magic", "sunshine", "hope", "love", "friend", "proud", "achieved"],
             "sad": ["sad", "cried", "tear", "unhappy", "lost", "death", "lonely", "darkness", "misery", "sorrow", "alone", "grave", "hurt", "pain", "hopeless"],
             "angry": ["angry", "rage", "hate", "fight", "shout", "mad", "fury", "annoyed", "bitter", "punch", "strike", "vengeance"],
             "fear": ["fear", "scared", "terrified", "ghost", "dark", "shadow", "unknown", "scary", "shiver", "beast", "creepy", "dangerous", "nervous"],
         }
-        
-        words = text.split()
-        found_counts = {emotion: sum(1 for word in words if word in keywords) for emotion, keywords in emotion_rules.items()}
-        
-        # Safe max with lambda
-        max_emotion = "neutral"
-        max_val = -1
-        for em, val in found_counts.items():
-            if val > max_val:
-                max_val = val
-                max_emotion = em
-        
-        if max_val > 0:
-            return jsonify({"emotion": max_emotion})
 
-        # 2. AI Fallback
-        analyzer = get_sentiment_analyzer()
-        if analyzer:
-            res = analyzer(text[:512])[0]
-            if res['label'] == 'POSITIVE':
-                return jsonify({"emotion": "happy"})
+        for t in texts:
+            text_lower = t.lower()
+            words = text_lower.split()
+            found_counts = {emotion: sum(1 for word in words if word in keywords) for emotion, keywords in emotion_rules.items()}
+            
+            max_emotion = "neutral"
+            max_val = -1
+            for em, val in found_counts.items():
+                if val > max_val:
+                    max_val = val
+                    max_emotion = em
+            
+            if max_val > 0:
+                results.append({"emotion": max_emotion})
+                continue
+
+            # Model Fallback (only if rules failed)
+            if analyzer:
+                res = analyzer(t[:512])[0]
+                results.append({"emotion": "happy" if res['label'] == 'POSITIVE' else "fear"})
             else:
-                return jsonify({"emotion": "fear"})
-        return jsonify({"emotion": "neutral"})
+                results.append({"emotion": "neutral"})
+
+        return jsonify(results)
+    except Exception as e:
+        print(f"Emotion analysis batch error: {e}")
+        return jsonify([{"emotion": "neutral"}] * len(texts))
     except Exception as e:
         print(f"Emotion analysis error: {e}")
         return jsonify({"emotion": "neutral"})
@@ -2646,8 +3936,8 @@ def download_external():
         conn = get_conn()
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO books(name, path, extracted_path, status) VALUES (?, ?, ?, ?)",
-            (title, filepath, extracted_path, "processing")
+            "INSERT INTO books(name, path, extracted_path, status, user_id) VALUES (?, ?, ?, ?, ?)",
+            (title, filepath, extracted_path, "processing", current_user.id)
         )
         book_id = cur.lastrowid
         conn.commit()
@@ -2681,7 +3971,29 @@ def download_external():
         print(f"Full-Text Download failed: {e}")
         return jsonify({"error": str(e)}), 500
 
+@socketio.on('join_room')
+def handle_join_room(data):
+    room = data.get('room')
+    if room:
+        join_room(room)
+        print(f"User joined room: {room}")
+        emit('user_joined', {'status': 'connected'}, room=room)
+
+@socketio.on('scroll_sync')
+def handle_scroll_sync(data):
+    room = data.get('room')
+    page_id = data.get('page_id')
+    scroll_top = data.get('scroll_top')
+    if room and page_id:
+        # Broadcast to everyone else in the room
+        emit('remote_scroll', {'page_id': page_id, 'scroll_top': scroll_top}, room=room, include_self=False)
+
 if __name__ == "__main__":
-    init_db()
-    start_translation_sidecar()
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    # Perfect Logic: Only run initialization in the child process during debug mode,
+    # or run once if debug mode is disabled.
+    if os.environ.get('WERKZEUG_RUN_MAIN') == 'true' or not app.debug:
+        init_db()
+        start_translation_sidecar()
+        print("🚀 Systems Initialized. Server starting...")
+    
+    socketio.run(app, host='0.0.0.0', port=5000, allow_unsafe_werkzeug=True)

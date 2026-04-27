@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Book Reader - Access</title>
+    <!-- Google Fonts -->
+    <link
+        href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Playfair+Display:wght@700;900&display=swap"
+        rel="stylesheet">
+    <style>
+        :root {
+            /* Dark Theme (Default) */
+            --primary: #6366f1;
+            --primary-hover: #4f46e5;
+            --primary-glow: rgba(99, 102, 241, 0.4);
+            --bg-body: #0f172a;
+            --bg-card: rgba(30, 41, 59, 0.7);
+            --glass-bg: rgba(255, 255, 255, 0.03);
+            --glass-border: rgba(255, 255, 255, 0.1);
+            --text-main: #f8fafc;
+            --text-dim: #94a3b8;
+            --input-bg: rgba(255, 255, 255, 0.05);
+            --hero-overlay: rgba(15, 23, 42, 0.6);
+        }
+
+        [data-theme="light"] {
+            --bg-body: #f1f5f9;
+            --bg-card: rgba(255, 255, 255, 0.8);
+            --glass-bg: rgba(255, 255, 255, 0.5);
+            --glass-border: rgba(0, 0, 0, 0.08);
+            --text-main: #0f172a;
+            --text-dim: #64748b;
+            --input-bg: rgba(0, 0, 0, 0.03);
+            --hero-overlay: rgba(255, 255, 255, 0.2);
+        }
+
+        body,
+        html {
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            width: 100vw;
+            font-family: 'Outfit', sans-serif;
+            background: url('/static/images/auth_hero.png') center/cover no-repeat fixed;
+            color: var(--text-main);
+            transition: background 0.3s, color 0.3s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+
+        body::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: var(--hero-overlay);
+            backdrop-filter: blur(8px);
+            z-index: 0;
+        }
+
+        .auth-container {
+            width: 95%;
+            max-width: 800px;
+            padding: 40px;
+            background: var(--bg-card);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--glass-border);
+            border-radius: 32px;
+            box-shadow: 0 40px 100px rgba(0,0,0,0.5);
+            animation: fadeInScale 0.6s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+            position: relative;
+            z-index: 10;
+        }
+
+        .auth-form-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            text-align: left;
+        }
+
+        .full-width {
+            grid-column: span 2;
+        }
+
+        @keyframes fadeInScale {
+            from {
+                opacity: 0;
+                transform: scale(0.95) translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: scale(1) translateY(0);
+            }
+        }
+
+        .logo-mobile {
+            display: none;
+            font-family: 'Playfair Display', serif;
+            font-size: 2rem;
+            font-weight: 900;
+            margin-bottom: 30px;
+            text-align: center;
+            background: linear-gradient(135deg, var(--primary) 0%, #a5b4fc 100%);
+            background-clip: text;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .auth-header {
+            margin-bottom: 35px;
+            text-align: left;
+        }
+
+        .auth-header h2 {
+            font-size: 2.2rem;
+            font-weight: 800;
+            margin: 0;
+            letter-spacing: -0.03em;
+        }
+
+        .auth-header p {
+            color: var(--text-dim);
+            margin: 10px 0 0 0;
+            font-size: 1rem;
+        }
+
+        .auth-tabs {
+            display: flex;
+            gap: 5px;
+            margin-bottom: 30px;
+            background: var(--input-bg);
+            padding: 5px;
+            border-radius: 16px;
+            border: 1px solid var(--glass-border);
+        }
+
+        .auth-tab {
+            flex: 1;
+            padding: 12px;
+            border-radius: 12px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.95rem;
+            text-align: center;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            color: var(--text-dim);
+        }
+
+        .auth-tab.active {
+            background: var(--primary);
+            color: white;
+            box-shadow: 0 4px 12px var(--primary-glow);
+        }
+
+        .input-group {
+            margin-bottom: 18px;
+            position: relative;
+        }
+
+        .input-group label {
+            display: block;
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--text-dim);
+            margin-bottom: 6px;
+            margin-left: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .input-group input {
+            width: 100%;
+            padding: 14px 18px;
+            background: var(--input-bg);
+            border: 1px solid var(--glass-border);
+            border-radius: 14px;
+            color: var(--text-main);
+            font-size: 1rem;
+            box-sizing: border-box;
+            transition: all 0.25s;
+            font-family: 'Outfit', sans-serif;
+        }
+
+        .input-group input:focus {
+            outline: none;
+            border-color: var(--primary);
+            background: var(--bg-card);
+            box-shadow: 0 0 0 4px var(--primary-glow);
+        }
+
+        .btn-primary {
+            width: 100%;
+            padding: 16px;
+            background: var(--primary);
+            border: none;
+            border-radius: 14px;
+            color: white;
+            font-size: 1.05rem;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.3s;
+            margin-top: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        .btn-primary:hover {
+            background: var(--primary-hover);
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px var(--primary-glow);
+        }
+
+        .btn-primary:active {
+            transform: translateY(0);
+        }
+
+        .alert {
+            padding: 14px 18px;
+            border-radius: 14px;
+            margin-bottom: 25px;
+            font-size: 0.9rem;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            animation: slideInDown 0.4s ease-out;
+        }
+
+        @keyframes slideInDown {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .alert-error {
+            background: rgba(239, 68, 68, 0.1);
+            color: #ef4444;
+            border: 1px solid rgba(239, 68, 68, 0.2);
+        }
+
+        .alert-success {
+            background: rgba(34, 197, 94, 0.1);
+            color: #22c55e;
+            border: 1px solid rgba(34, 197, 94, 0.2);
+        }
+
+        /* Theme Toggle */
+        .theme-toggle {
+            position: absolute;
+            top: 30px;
+            right: 30px;
+            width: 44px;
+            height: 44px;
+            border-radius: 12px;
+            background: var(--input-bg);
+            border: 1px solid var(--glass-border);
+            color: var(--text-main);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            z-index: 100;
+        }
+
+        .theme-toggle:hover {
+            background: var(--primary);
+            color: white;
+            border-color: var(--primary);
+        }
+
+        /* Form Switching */
+        #registerForm {
+            display: none;
+        }
+
+        @media (max-width: 768px) {
+            .auth-container {
+                padding: 25px;
+            }
+
+            .auth-form-grid {
+                grid-template-columns: 1fr;
+                gap: 10px;
+            }
+
+            .full-width {
+                grid-column: span 1;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .auth-container {
+                padding: 0 20px;
+            }
+
+            .auth-header h2 {
+                font-size: 1.8rem;
+            }
+        }
+
+        /* Fix auto-fill background color */
+        input:-webkit-autofill,
+        input:-webkit-autofill:hover,
+        input:-webkit-autofill:focus {
+            -webkit-text-fill-color: var(--text-main);
+            -webkit-box-shadow: 0 0 0px 1000px var(--bg-card) inset;
+            transition: background-color 5000s ease-in-out 0s;
+        }
+    </style>
+</head>
+
+<body data-theme="dark" id="authContainer" data-error="{{ error or '' }}" data-success="{{ success or '' }}">
+    <button class="theme-toggle" onclick="toggleTheme()" title="Toggle Light/Dark Mode">
+        <span id="themeIcon">🌙</span>
+    </button>
+
+    <div class="auth-container">
+        <div class="logo-mobile" style="display: block;">AI Book Reader</div>
+
+        <div class="auth-header">
+            <h2 id="authTitle">Welcome Back</h2>
+            <p id="authDesc">Please enter your details to access your library.</p>
+        </div>
+
+                {% if error %}
+                <div class="alert alert-error">
+                    <span>⚠️</span> {{ error }}
+                </div>
+                {% endif %}
+                {% if success %}
+                <div class="alert alert-success">
+                    <span>✨</span> {{ success }}
+                </div>
+                {% endif %}
+
+                <div class="auth-tabs">
+                    <div id="loginTab" class="auth-tab active" onclick="showAuth('login')">Login</div>
+                    <div id="registerTab" class="auth-tab" onclick="showAuth('register')">Register</div>
+                </div>
+
+                <!-- Login Form -->
+                <form id="loginForm" action="/login" method="POST" style="max-width: 400px; margin: 0 auto;">
+                    <div class="input-group">
+                        <label for="login_user">Username</label>
+                        <input type="text" id="login_user" name="username" placeholder="Enter username" required
+                            autocomplete="username">
+                    </div>
+                    <div class="input-group">
+                        <label for="login_pass">Password</label>
+                        <input type="password" id="login_pass" name="password" placeholder="••••••••" required
+                            autocomplete="current-password">
+                    </div>
+                    <button type="submit" class="btn-primary">Unlock Library <span>→</span></button>
+                </form>
+
+                <!-- Register Form -->
+                <form id="registerForm" action="/register" method="POST">
+                    <div class="auth-form-grid">
+                        <div class="input-group">
+                            <label for="reg_name">Full Name</label>
+                            <input type="text" id="reg_name" name="full_name" placeholder="John Doe" required
+                                autocomplete="name">
+                        </div>
+                        <div class="input-group">
+                            <label for="reg_email">Email Address</label>
+                            <input type="email" id="reg_email" name="email" placeholder="john@example.com" required
+                                autocomplete="email">
+                        </div>
+                        <div class="input-group">
+                            <label for="reg_user">Choose Username</label>
+                            <input type="text" id="reg_user" name="username" placeholder="johndoe123" required
+                                autocomplete="username">
+                        </div>
+                        <div class="input-group">
+                            <label for="reg_pass">Password</label>
+                            <input type="password" id="reg_pass" name="password" placeholder="Create password" required
+                                autocomplete="new-password">
+                        </div>
+                        <div class="input-group">
+                            <label for="reg_conf">Confirm Password</label>
+                            <input type="password" id="reg_conf" name="confirm_password" placeholder="Repeat password"
+                                required autocomplete="new-password">
+                        </div>
+                        <div class="full-width">
+                            <button type="submit" class="btn-primary">Create Account <span>✨</span></button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+
+    <script>
+        function showAuth(type) {
+            const loginForm = document.getElementById('loginForm');
+            const registerForm = document.getElementById('registerForm');
+            const loginTab = document.getElementById('loginTab');
+            const registerTab = document.getElementById('registerTab');
+            const authTitle = document.getElementById('authTitle');
+            const authDesc = document.getElementById('authDesc');
+
+            if (type === 'login') {
+                loginForm.style.display = 'block';
+                registerForm.style.display = 'none';
+                loginTab.classList.add('active');
+                registerTab.classList.remove('active');
+                authTitle.innerText = "Welcome Back";
+                authDesc.innerText = "Please enter your details to access your library.";
+            } else {
+                loginForm.style.display = 'none';
+                registerForm.style.display = 'block';
+                loginTab.classList.remove('active');
+                registerTab.classList.add('active');
+                authTitle.innerText = "Join the Library";
+                authDesc.innerText = "Start your journey today with our AI-powered reader.";
+            }
+        }
+
+        function toggleTheme() {
+            const body = document.body;
+            const icon = document.getElementById('themeIcon');
+            const currentTheme = body.getAttribute('data-theme');
+
+            if (currentTheme === 'dark') {
+                body.setAttribute('data-theme', 'light');
+                icon.innerText = '☀️';
+                localStorage.setItem('auth-theme', 'light');
+            } else {
+                body.setAttribute('data-theme', 'dark');
+                icon.innerText = '🌙';
+                localStorage.setItem('auth-theme', 'dark');
+            }
+        }
+
+        // Persistent theme
+        const savedTheme = localStorage.getItem('auth-theme');
+        if (savedTheme) {
+            document.body.setAttribute('data-theme', savedTheme);
+            document.getElementById('themeIcon').innerText = savedTheme === 'dark' ? '🌙' : '☀️';
+        }
+
+        // Auto-switch to register if there was a registration success/error that makes sense
+        const authData = document.getElementById('authContainer');
+        const serverError = authData.dataset.error;
+        const serverSuccess = authData.dataset.success;
+
+        if (serverError) {
+            const errLow = serverError.toLowerCase();
+            const isRegistrationError = errLow.includes("registration") ||
+                errLow.includes("username already exists") ||
+                (errLow.includes("password") && !errLow.includes("invalid"));
+
+            if (isRegistrationError) {
+                showAuth('register');
+            }
+        }
+
+        if (serverSuccess) {
+            showAuth('login');
+        }
+    </script>
+</body>
+
+</html>

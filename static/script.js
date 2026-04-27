@@ -1,14 +1,64 @@
 let currentBookId = null;
+let currentRoom = null;
+let isRemoteScrolling = false;
+let socket = null;
+try {
+    socket = io();
+    socket.on('connect', () => {
+        const up = new URLSearchParams(window.location.search);
+        if (up.get('room')) {
+            currentRoom = up.get('room');
+            socket.emit('join_room', { room: currentRoom });
+        }
+    });
+    socket.on('remote_scroll', (d) => {
+        if (!d.page_id || isRemoteScrolling) return;
+        isRemoteScrolling = true;
+        const rd = document.getElementById('reader'), tg = document.getElementById(d.page_id);
+        if (tg && rd) {
+            const cb = rd.getBoundingClientRect(), pb = tg.getBoundingClientRect();
+            rd.scrollTo({ top: pb.top - cb.top + rd.scrollTop + (d.scroll_top || 0), behavior: 'smooth' });
+        }
+        setTimeout(() => { isRemoteScrolling = false; }, 800);
+    });
+    socket.on('user_joined', () => { showUploadToast("👋 A friend joined!", "info"); });
+
+    // Sync Scroll
+    window.addEventListener('load', () => {
+        const reader = document.getElementById('reader');
+        if (reader) {
+            let st;
+            reader.addEventListener('scroll', () => {
+                if (currentRoom && !isRemoteScrolling) {
+                    clearTimeout(st);
+                    st = setTimeout(() => {
+                        const pages = document.querySelectorAll('.lazy-page-container');
+                        let tid = null; let md = 99999;
+                        pages.forEach(p => {
+                            const b = p.getBoundingClientRect();
+                            if (Math.abs(b.top) < md) { md = Math.abs(b.top); tid = p.id; }
+                        });
+                        if (tid) socket.emit('scroll_sync', { room: currentRoom, page_id: tid, scroll_top: 0 });
+                    }, 300);
+                }
+            });
+        }
+    });
+} catch (e) { }
+
 let currentBookName = "";
+let goalCelebrated = false;
 let currentBookText = "";
 let currentBookDetectedLangCode = "en";
 let activeBooksList = [];
 let currentSpeed = 1.0;
-let studyStartTime = null;
+let studySessionStartTime = null;
+let initialStudyTime = 0;
 let studyTimerInterval = null;
 
-function startStudyTimer() {
-    studyStartTime = Date.now();
+function startStudyTimer(startTimeInSeconds = 0) {
+    initialStudyTime = startTimeInSeconds;
+    studySessionStartTime = Date.now();
     const timerEl = document.getElementById("studyTimer");
     if (timerEl) {
         timerEl.style.display = "inline";
@@ -19,11 +69,13 @@ function startStudyTimer() {
 }
 
 function updateStudyTimer() {
-    if (!studyStartTime) return;
-    const elapsed = Math.floor((Date.now() - studyStartTime) / 1000);
-    const hrs = Math.floor(elapsed / 3600);
-    const mins = Math.floor((elapsed % 3600) / 60);
-    const secs = elapsed % 60;
+    if (!studySessionStartTime) return;
+    const sessionElapsed = Math.floor((Date.now() - studySessionStartTime) / 1000);
+    const totalElapsed = initialStudyTime + sessionElapsed;
+    
+    const hrs = Math.floor(totalElapsed / 3600);
+    const mins = Math.floor((totalElapsed % 3600) / 60);
+    const secs = totalElapsed % 60;
     
     const timeStr = [hrs, mins, secs].map(v => v < 10 ? "0" + v : v).join(":");
     const timerEl = document.getElementById("studyTimer");
@@ -35,7 +87,8 @@ function updateStudyTimer() {
 function stopStudyTimer() {
     if (studyTimerInterval) clearInterval(studyTimerInterval);
     studyTimerInterval = null;
-    studyStartTime = null;
+    studySessionStartTime = null;
+    initialStudyTime = 0;
     const timerEl = document.getElementById("studyTimer");
     if (timerEl) {
         timerEl.style.display = "none";
@@ -72,6 +125,586 @@ window.addEventListener('click', function(e) {
 });
 
 // --- Study Notebook Logic (Plain & Clean) ---
+function toggleDashboard() {
+    const overlay = document.getElementById("dashboardOverlay");
+    const isVisible = overlay.style.display === "flex";
+    if (!isVisible) {
+        overlay.style.display = "flex";
+        stopReadingPulse(); 
+        loadBooks(); 
+        fetchUserStreak(); 
+        checkForInvites(); 
+    } else {
+        overlay.style.display = "none";
+        // CRITICAL: Close any open sub-modals to prevent UI ghosting over the reader
+        const subModals = ['collabsModal', 'invitationsModal', 'roomModal', 'profileModal'];
+        subModals.forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.style.display = 'none';
+        });
+        
+        // If we are currently in a book, resume counting
+        if (currentBookId) startReadingPulse();
+    }
+}
+
+function renderDashboard(data) {
+    console.log("Rendering Dashboard with", data.length, "books");
+    const grid = document.getElementById("dashboardGrid");
+    const bookmarkTotal = document.getElementById("libraryBookmarkCount");
+    
+    if (!grid) return;
+    
+    // Update Global Library Stats
+    const totalCount = data.length;
+    let globalBookmarks = 0;
+
+    data.forEach(book => {
+        globalBookmarks += (book[8] || 0);
+    });
+    // Update New Snapshot Displays
+    const bookCountDisplay = document.getElementById("libraryBookCountDisplay");
+    const totalLibTime = document.getElementById("totalLibraryReadTime");
+    
+    if (bookCountDisplay) bookCountDisplay.innerText = totalCount;
+    
+    if (totalLibTime) {
+        let totalSecs = 0;
+        data.forEach(b => totalSecs += (b[6] || 0)); // reading_time is index 6
+        const h = Math.floor(totalSecs / 3600);
+        const m = Math.floor((totalSecs % 3600) / 60);
+        totalLibTime.innerText = `${h}h ${m}m`;
+        
+        // Also update the global label if it exists
+        const globalTimeLabel = document.getElementById("totalReadTimeGlobal");
+        if (globalTimeLabel) globalTimeLabel.innerText = `${h}h ${m}m`;
+    }
+    if (bookmarkTotal) {
+        let bookmarkBooks = data.filter(b => (b[8] || 0) > 0);
+        let listHtml = `<div style="font-size: 1.15rem; font-weight: 800; color: #ff9f43; margin-bottom: 5px;">${globalBookmarks} 🔖</div>`;
+        
+        if (bookmarkBooks.length > 0) {
+            listHtml += `<div style="display: flex; flex-direction: column; gap: 4px;">`;
+            bookmarkBooks.slice(0, 2).forEach(b => {
+                listHtml += `<div style="font-size: 0.75rem; color: var(--text-white); opacity: 0.8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-left: 2px solid #ff9f43; padding-left: 8px;">${b[1]}</div>`;
+            });
+            if (bookmarkBooks.length > 2) {
+                listHtml += `<div style="font-size: 0.7rem; color: var(--text-light); opacity: 0.5; padding-left: 10px; cursor: pointer; text-decoration: underline;" onclick="toggleBookmarksFilter()">+ ${bookmarkBooks.length - 2} more</div>`;
+            }
+            listHtml += `</div>`;
+        } else {
+            listHtml += `<div style="font-size: 0.75rem; color: var(--text-light); opacity: 0.5;">No bookmarks yet</div>`;
+        }
+        bookmarkTotal.innerHTML = listHtml;
+    }
+
+    grid.innerHTML = "";
+    
+    if (totalCount === 0) {
+        grid.innerHTML = `
+            <div class="col-12 text-center py-5" style="color: var(--text-light); opacity: 0.6;">
+                <span style="font-size: 5rem; display: block; margin-bottom: 20px;">📚</span>
+                <h3>Your library is empty</h3>
+                <p>Upload your first book to get started!</p>
+            </div>
+        `;
+        return;
+    }
+
+    data.forEach(book => {
+        // [id, name, uploaded_at, status, thumb, summary, time, is_favorite, bCount, nCount, relation, pageCount, sharerName]
+        const [id, name, uploaded_at, status, thumb, summary, time, is_fav, bCount, nCount, relation, pageCount, sharerName] = book;
+        
+        // Format upload date
+        let uploadDateStr = "";
+        try {
+            // SQLite TIMESTAMP DEFAULT CURRENT_TIMESTAMP is usually UTC
+            const date = new Date(uploaded_at.replace(" ", "T") + "Z");
+            uploadDateStr = date.toLocaleString('en-US', { 
+                month: 'short', 
+                day: 'numeric', 
+                year: 'numeric',
+                hour: 'numeric',
+                minute: '2-digit',
+                hour12: true 
+            });
+        } catch(e) { uploadDateStr = uploaded_at; }
+
+        const card = document.createElement("div");
+        card.className = "book-card";
+        card.setAttribute("data-book-id", id);
+        card.setAttribute("data-book-name", name.toLowerCase());
+        card.setAttribute("data-is-favourite", is_fav ? "1" : "0");
+        card.setAttribute("data-bookmark-count", bCount || 0);
+        
+        let thumbContent = `
+            <div class="portait-placeholder" style="height:100%; width:100%; display:flex; align-items:center; justify-content:center; background:#eee; color:#aaa;">
+                <span style="font-size:3rem;">📖</span>
+            </div>
+        `;
+        
+        if (thumb) {
+            thumbContent = `<img src="/thumbnail/${id}" alt="${name}" onerror="this.style.display='none'">`;
+        }
+
+        const indicators = `
+            <div class="card-indicators">
+                ${(status && status !== 'ready') ? `<span class="indicator-badge status-badge">⚙️ ${status}</span>` : ''}
+                ${relation === 'shared' ? `<span class="indicator-badge" style="background: rgba(99, 102, 241, 0.15); color: var(--primary); border: 1px solid rgba(99, 102, 241, 0.3); font-weight: 700; letter-spacing: 0.02em;" title="Collaborated with ${sharerName || 'someone'}">👥 SHARED</span>` : ''}
+                ${bCount > 0 ? `<span class="indicator-badge" title="Has Bookmarks">🔖 ${bCount}</span>` : ''}
+                ${nCount > 0 ? `<span class="indicator-badge" title="Has Study Notes">📝 ${nCount}</span>` : ''}
+            </div>
+        `;
+
+        card.innerHTML = `
+            <div class="card-thumbnail">
+                ${thumbContent}
+                <button class="btn-favorite ${is_fav ? 'active' : ''}" onclick="toggleFavorite(${id}, this)" title="${is_fav ? 'Unfavorite' : 'Add to Favorites'}">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="${is_fav ? '#ef4444' : 'none'}" stroke="${is_fav ? '#ef4444' : 'white'}" stroke-width="2">
+                        <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l8.84-8.84 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
+                    </svg>
+                </button>
+            </div>
+            <div class="card-content">
+                <div class="card-title" title="${name}">${name}</div>
+                ${indicators}
+                <div class="card-meta" style="margin-bottom: 4px;">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6; margin-right:4px;">
+                        <circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline>
+                    </svg>
+                    ${uploadDateStr}
+                </div>
+                <div class="card-meta" style="opacity: 0.8; margin-top: 0; margin-bottom: 12px;">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.6; margin-right:4px;">
+                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+                        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+                    </svg>
+                    ${pageCount || 0} Pages
+                </div>
+                <div class="card-footer">
+                    <button class="btn-read-more" onclick="openBook(${id}, '${name.replace(/'/g, "\\'")}'); toggleDashboard();">
+                        <span>Open</span>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                            <polyline points="15 3 21 3 21 9"></polyline>
+                            <line x1="10" y1="14" x2="21" y2="3"></line>
+                        </svg>
+                    </button>
+                    <div class="card-actions-row">
+                         <button class="btn-card-icon" onclick="deleteBook(${id})" title="Delete Book">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="3 6 5 6 21 6"></polyline>
+                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                            </svg>
+                         </button>
+                         <button class="btn-card-icon" title="Download" onclick="downloadBook(${id}, '${name.replace(/'/g, "\\'")}')">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line>
+                            </svg>
+                         </button>
+                         <button class="btn-card-icon" title="Share" onclick="shareBook(${id}, '${name.replace(/'/g, "\\'")}')">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle>
+                                <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line>
+                            </svg>
+                         </button>
+                    </div>
+                </div>
+            </div>
+            <!-- AI Summary Overlay -->
+            <div class="card-summary-overlay">
+                <div class="summary-badge">🪄 AI Synopsis</div>
+                <p class="summary-text">${summary || "Our AI is still processing this book to provide a concise summary. Check back soon!"}</p>
+                <div class="summary-footer">
+                    <span style="opacity: 0.6; font-size: 0.65rem;">HOVER TO RECALL</span>
+                </div>
+            </div>
+        `;
+        grid.appendChild(card);
+    });
+
+    // Also fetch and show reading stats
+    fetchReadingStats();
+}
+
+async function fetchUserStreak() {
+    try {
+        const res = await fetch("/get_user_streak");
+        const data = await res.json();
+        
+        const streakEl = document.getElementById("userStreakCount");
+        const todayTimeEl = document.getElementById("todayReadingTime");
+        const goalCircle = document.getElementById("dailyGoalCircle");
+        const goalPercent = document.getElementById("dailyGoalPercent");
+        const goalStatus = document.getElementById("goalStatus");
+
+        if (!streakEl) return;
+
+        // Update Streak
+        streakEl.innerHTML = `🔥 ${data.streak} Day Streak`;
+        
+        // Today's Time
+        const mins = Math.floor(data.today_seconds / 60);
+        const goalMins = Math.floor(data.daily_goal_seconds / 60);
+        todayTimeEl.innerHTML = `${mins}m <span style="font-size: 0.9rem; font-weight: 400; opacity: 0.5;">/ ${goalMins}m</span>`;
+
+        // Percent & Circle
+        const percent = Math.min(100, Math.round((data.today_seconds / data.daily_goal_seconds) * 100));
+        if (goalPercent) goalPercent.innerText = percent + "%";
+        
+        // Progress Ring: Total circum = 2 * PI * R (R=45) = 282.7
+        const offset = 282.7 - (percent / 100) * 282.7;
+        if (goalCircle) {
+            goalCircle.style.strokeDashoffset = offset;
+        }
+
+        // Status & Celebration
+        if (goalStatus) {
+            const today = new Date().toISOString().split('T')[0];
+            const goalKey = `goal_celebrated_${today}`;
+            
+            if (percent >= 100) {
+                goalStatus.innerText = "Goal achieved! You're a legend! 🏆";
+                goalStatus.style.color = "#2ed573";
+                
+                // CELEBRATION: Only trigger if not already celebrated TODAY
+                if (!localStorage.getItem(goalKey)) {
+                    console.log("🏆 GOAL REACHED! Triggering celebration...");
+                    
+                    const duration = 3 * 1000;
+                    const end = Date.now() + duration;
+
+                    (function frame() {
+                        confetti({
+                            particleCount: 5,
+                            angle: 60,
+                            spread: 55,
+                            origin: { x: 0 },
+                            colors: ['#ff6b6b', '#ff9f43', '#2ed573']
+                        });
+                        confetti({
+                            particleCount: 5,
+                            angle: 120,
+                            spread: 55,
+                            origin: { x: 1 },
+                            colors: ['#ff6b6b', '#ff9f43', '#2ed573']
+                        });
+
+                        if (Date.now() < end) {
+                            requestAnimationFrame(frame);
+                        }
+                    }());
+                    
+                    localStorage.setItem(goalKey, "true");
+                }
+            } else {
+                // Not at 100% yet
+            }
+        }
+    } catch (e) {
+        console.error("Streak Error:", e);
+    }
+}
+
+async function fetchReadingStats() {
+    // Cache-busting to ensure recency is reflected instantly
+    const res = await fetch(`/reading_stats?t=${Date.now()}`);
+    const data = await res.json();
+    const chartDiv = document.getElementById("readingChart");
+    const totalTimeLabel = document.getElementById("totalReadTimeGlobal");
+    const resumePortal = document.getElementById("resumeReadingPortal");
+    const resumeBookCard = document.getElementById("lastActiveBookCard");
+
+    if (!chartDiv) return;
+    chartDiv.innerHTML = "";
+
+    // Leaderboard sorted by TIME
+    const timeSorted = [...data].sort((a,b) => b[2] - a[2]); 
+    // Recent Portal uses the first item (API already sorts BY last_read_at DESC)
+    const lastActiveSorted = [...data]; 
+    
+    // Show total read time
+    let totalSecs = 0;
+    data.forEach(b => totalSecs += b[2]);
+    if (totalTimeLabel) {
+        const globalH = Math.floor(totalSecs / 3600);
+        const globalM = Math.floor((totalSecs % 3600) / 60);
+        // Force strings to ensure correct character rendering in custom fonts
+        totalTimeLabel.innerText = String(globalH) + "h " + String(globalM) + "m";
+    }
+
+    // Build the Resume Portal: Use the absolute MOST RECENT book
+    if (lastActiveSorted.length > 0 && resumePortal && resumeBookCard) {
+        const last = lastActiveSorted[0]; 
+        const [lid, lname, ltime, lthumb] = last;
+        
+        // Update the "Last Session Activity" card in Snapshot
+        const lastActiveDate = document.getElementById("lastActiveDate");
+        if (lastActiveDate) {
+            const h = Math.floor(ltime / 3600);
+            const m = Math.floor((ltime % 3600) / 60);
+            lastActiveDate.innerHTML = `<div style="font-size: 0.75rem; color: #60a5fa; margin-bottom:4px;">${lname}</div>
+                                      <div style="font-size: 1.15rem; font-weight:800;">${h > 0 ? h + 'h ' : ''}${m}m active</div>`;
+        }
+
+        resumePortal.style.display = 'block';
+        resumeBookCard.innerHTML = `
+            <div style="width: 50px; height: 65px; border-radius: 8px; overflow: hidden; flex-shrink: 0; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2);">
+                ${lthumb ? `<img src="/thumbnail/${lid}" style="width:100%; height:100%; object-fit:cover;">` : `<div style="width:100%; height:100%; display:flex; align-items:center; justify-content:center; font-size:1.5rem;">📖</div>`}
+            </div>
+            <div style="flex-grow: 1; overflow: hidden;">
+                <div style="color: var(--text-white); font-weight: 800; font-size: 1.05rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 2px;">${lname}</div>
+                <div style="color: var(--text-light); font-size: 0.8rem; opacity: 0.8;">
+                    ${ltime > 0 ? `Resume from ${Math.floor(ltime / 60)}m read time` : 'Start your first session today!'}
+                </div>
+            </div>
+            <button class="btn-read-more" style="background: var(--primary); color: white; padding: 10px 18px; font-size: 0.85rem; height: auto; border-radius: 14px;" onclick="openBook(${lid}, '${lname.replace(/'/g, "\\'")}'); toggleDashboard();">
+                <span>Resume</span>
+            </button>
+        `;
+    }
+
+    if (timeSorted.length === 0) {
+        chartDiv.innerHTML = "<p style='color:var(--text-light); text-align:center; padding:20px; font-size:0.85rem;'>No books found. Upload one to start!</p>";
+        return;
+    }
+
+    const maxDelta = Math.max(1, ...timeSorted.map(b => b[2]));
+    
+    timeSorted.forEach((book, index) => {
+        const [id, name, time] = book;
+        const percent = Math.max(10, (time / maxDelta) * 100); 
+        
+        // Format seconds to compact string
+        const h = Math.floor(time / 3600);
+        const m = Math.floor((time % 3600) / 60);
+        const s = time % 60;
+        const timeDisplay = `${h > 0 ? h + 'h ' : ''}${m}m ${s}s`;
+        
+        const row = document.createElement("div");
+        row.className = "chart-bar-row";
+        row.style.marginBottom = "12px";
+        
+        row.innerHTML = `
+            <div class="bar-book-name" title="${name}">${name}</div>
+            <div class="bar-wrapper-horizontal">
+                <div class="bar-progress-horizontal" style="width: ${percent}%; background: ${getGradient(index)};">
+                    <span class="bar-time-badge">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="margin-right:2px;">
+                            <circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline>
+                        </svg>
+                        ${timeDisplay}
+                    </span>
+                </div>
+            </div>
+        `;
+        chartDiv.appendChild(row);
+    });
+}
+
+function getGradient(index) {
+    const gradients = [
+        "linear-gradient(90deg, #3b82f6 0%, #60a5fa 100%)", 
+        "linear-gradient(90deg, #8b5cf6 0%, #a78bfa 100%)", 
+        "linear-gradient(90deg, #14b8a6 0%, #2dd4bf 100%)", 
+        "linear-gradient(90deg, #ec4899 0%, #f472b6 100%)", 
+        "linear-gradient(90deg, #f59e0b 0%, #fbbf24 100%)"  
+    ];
+    return gradients[index % gradients.length];
+}
+
+function startReadingPulse() {
+    stopReadingPulse(); // Clear any existing
+    window.readingPulseInterval = setInterval(() => {
+        if (currentBookId) {
+            fetch("/update_reading_time", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ book_id: currentBookId, seconds: 10 })
+            }).then(() => {
+                // Check if we hit our daily goal WHILE reading
+                fetchUserStreak();
+            });
+        }
+    }, 10000); // 10s increments
+}
+
+function stopReadingPulse() {
+    if (window.readingPulseInterval) {
+        clearInterval(window.readingPulseInterval);
+        window.readingPulseInterval = null;
+    }
+}
+
+
+async function toggleFavorite(bookId, btn) {
+    try {
+        const res = await fetch(`/toggle_favorite/${bookId}`, { method: 'POST' });
+        if (res.ok) {
+            const svg = btn.querySelector('svg');
+            const isActive = btn.classList.toggle('active');
+            
+            if (isActive) {
+                svg.setAttribute('fill', '#ef4444');
+                svg.setAttribute('stroke', '#ef4444');
+                btn.title = "Unfavorite";
+            } else {
+                svg.setAttribute('fill', 'none');
+                svg.setAttribute('stroke', 'white');
+                btn.title = "Add to Favorites";
+            }
+            
+            // Update the state of ALL instances of this book in the UI locally
+            updateBookFavoriteUI(bookId, isActive);
+            
+            // Re-render dashboard order if NOT in "Only Favorites" mode is handled by the data
+            // If the filter is active, we need to refresh the filter view
+            filterDashboard();
+            filterBooks();
+        }
+    } catch (e) {
+        console.error("Toggle Favorite Error:", e);
+    }
+}
+
+async function toggleReaderFavorite() {
+    if (!currentBookId) return;
+    const btn = document.getElementById("readerFavoriteBtn");
+    try {
+        const res = await fetch(`/toggle_favorite/${currentBookId}`, { method: 'POST' });
+        if (res.ok) {
+            const isActive = btn.classList.toggle('active');
+            btn.title = isActive ? "Unfavorite" : "Add to Favorites";
+            
+            // Update the rest of the UI in background without full reload
+            updateBookFavoriteUI(currentBookId, isActive);
+            filterDashboard();
+            filterBooks();
+        }
+    } catch (e) {
+        console.error("Toggle Reader Favorite Error:", e);
+    }
+}
+
+function updateBookFavoriteUI(bookId, isActive) {
+    // 1. Update the local data model
+    const book = activeBooksList.find(b => b[0] == bookId);
+    if (book) {
+        book[7] = isActive ? 1 : 0; 
+    }
+
+    // 2. Update Dashboard Cards
+    const dashboardCards = document.querySelectorAll(`.book-card[data-book-id="${bookId}"]`);
+    dashboardCards.forEach(card => {
+        card.setAttribute("data-is-favourite", isActive ? "1" : "0");
+        const favBtn = card.querySelector(".btn-favorite");
+        if (favBtn) {
+            favBtn.classList.toggle("active", isActive);
+            const svg = favBtn.querySelector("svg");
+            if (svg) {
+                svg.setAttribute('fill', isActive ? '#ef4444' : 'none');
+                svg.setAttribute('stroke', isActive ? '#ef4444' : 'white');
+            }
+            favBtn.title = isActive ? "Unfavorite" : "Add to Favorites";
+        }
+    });
+
+    // 3. Update Sidebar Table Rows
+    const sidebarRows = document.querySelectorAll(`#booklist tr[data-book-id="${bookId}"]`);
+    sidebarRows.forEach(tr => {
+        tr.setAttribute("data-is-favourite", isActive ? "1" : "0");
+        const favBtn = tr.querySelector(".btn-sidebar-fav");
+        if (favBtn) {
+            favBtn.classList.toggle("active", isActive);
+            const svg = favBtn.querySelector("svg");
+            if (svg) {
+                svg.setAttribute('fill', isActive ? '#ef4444' : 'none');
+                svg.setAttribute('stroke', isActive ? '#ef4444' : 'var(--text-light)');
+            }
+            favBtn.title = isActive ? "Unfavorite" : "Add to Favorites";
+        }
+    });
+
+    // 4. Update Reader Button if it's the current book
+    if (currentBookId == bookId) {
+        const readerBtn = document.getElementById("readerFavoriteBtn");
+        if (readerBtn) {
+            readerBtn.classList.toggle("active", isActive);
+            readerBtn.title = isActive ? "Unfavorite" : "Add to Favorites";
+        }
+    }
+}
+
+function shareBook(id, name) {
+    // We create a direct link with the book ID
+    const shareUrl = window.location.origin + window.location.pathname + `?open=${id}`;
+    
+    if (navigator.share) {
+        navigator.share({
+            title: name,
+            text: `Reading '${name}' on AI Reader. Join me!`,
+            url: shareUrl
+        }).catch(err => console.log('Share canceled:', err));
+    } else {
+        // Fallback: Copy link
+        navigator.clipboard.writeText(shareUrl).then(() => {
+            showUploadToast("📋 Book link copied to clipboard!", "info");
+        }).catch(err => {
+            showUploadToast("❌ Background processes might be blocking clipboard access.", "error");
+        });
+    }
+}
+
+
+function filterDashboard() {
+    const desktopQ = document.getElementById("dashboardSearch")?.value || "";
+    const mobileQ = document.getElementById("dashboardSearchMobile")?.value || "";
+    const q = (desktopQ || mobileQ).toLowerCase();
+    
+    const cards = document.querySelectorAll(".book-card");
+    const container = document.getElementById("dashboardGrid");
+    let visibleCount = 0;
+
+    cards.forEach(card => {
+        const name = card.getAttribute("data-book-name") || "";
+        const isFav = card.getAttribute("data-is-favourite") === "1";
+        
+        let shouldShow = name.toLowerCase().includes(q);
+        if (onlyFavoritesFilter && !isFav) {
+            shouldShow = false;
+        }
+        if (onlyBookmarksFilter && parseInt(card.getAttribute("data-bookmark-count") || "0") === 0) {
+            shouldShow = false;
+        }
+        
+        card.style.display = shouldShow ? "flex" : "none";
+        if (shouldShow) visibleCount++;
+    });
+
+    // Show empty state if needed
+    const emptyState = document.getElementById("dashboardEmptyState");
+    if (visibleCount === 0) {
+        if (!emptyState) {
+            const div = document.createElement("div");
+            div.id = "dashboardEmptyState";
+            div.style.textAlign = "center";
+            div.style.padding = "40px";
+            div.style.color = "#888";
+            div.innerHTML = `<span style="font-size: 3rem; display: block; margin-bottom: 20px;">🏜️</span><p>No books found matching your current filters.</p>`;
+            container.appendChild(div);
+        }
+    } else if (emptyState) {
+        emptyState.remove();
+    }
+}
+
+function filterDashboardMobile(val) {
+    // Sync both inputs for consistency
+    const desktopInput = document.getElementById("dashboardSearch");
+    if (desktopInput) desktopInput.value = val;
+    filterDashboard();
+}
+
 async function saveAsNote() {
     let selection = window.getSelection();
     let selectedText = selection.toString().trim();
@@ -134,7 +767,7 @@ async function loadRecommendations() {
 
                 card.innerHTML = `
                     <div style="position: absolute; top: 12px; right: 12px; background: var(--primary); color: white; font-size: 0.65rem; padding: 2px 10px; border-radius: 20px; font-weight: 700; text-transform: uppercase; box-shadow: 0 4px 10px rgba(0,0,0,0.2);">Discover</div>
-                    <img src="${book.cover || 'https://via.placeholder.com/150x220?text=No+Cover'}" style="width: 100%; height: auto; max-height: 190px; min-height: 160px; object-fit: cover; border-radius: 12px; margin-bottom: 12px; border: 1px solid var(--border); background: #2d3748;">
+                    <img src="${book.cover || 'https://placehold.co/150x220?text=No+Cover'}" style="width: 100%; height: auto; max-height: 190px; min-height: 160px; object-fit: cover; border-radius: 12px; margin-bottom: 12px; border: 1px solid var(--border); background: #2d3748;">
                     <h4 style="color: var(--text-white); font-size: 0.85rem; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600;" title="${book.title}">${book.title}</h4>
                     <p style="color: var(--text-light); font-size: 0.72rem; margin-bottom: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${book.author}</p>
                     <button onclick="downloadExternalBook('${book.id}', '${encodeURIComponent(book.title)}', '${book.url}')" class="btn-primary" style="width: 100%; padding: 10px; font-size: 0.82rem; border-radius: 10px; font-weight: 600; letter-spacing: 0.3px;">
@@ -269,8 +902,9 @@ function deleteNote(noteId) {
 
 
 function downloadNotes(format) {
-    // Generate a download link for the specific backend route
-    const url = `/download_notes/${currentBookId}?format=${format}`;
+    const currentLang = document.getElementById('langSelect')?.value || 'en';
+    // Generate a download link for the specific backend route with translation support
+    const url = `/download_notes/${currentBookId}?format=${format}&lang=${currentLang}`;
     window.open(url, "_blank");
 }
 
@@ -664,6 +1298,46 @@ function downloadRevision() {
     window.open(`/download_revision/${currentBookId}?target_lang=${targetLang}`, "_blank");
 }
 
+async function exportAudiobook() {
+    if (!currentBookId) {
+        showUploadToast("📚 Please open a book first!", "info");
+        return;
+    }
+
+    const lang = document.getElementById('langSelect').value || 'en';
+    const gender = currentNarratorGender || 'female';
+    const bookTitle = currentBookName || "audiobook";
+
+    const exportUrl = `/export_audiobook/${currentBookId}?lang=${encodeURIComponent(lang)}&gender=${encodeURIComponent(gender)}`;
+    
+    // Open the modal
+    const modal = document.getElementById("audiobookModal");
+    const player = document.getElementById("audiobookPlayer");
+    const downloadBtn = document.getElementById("btnDownloadAudiobookAction");
+
+    if (modal && player && downloadBtn) {
+        player.src = exportUrl;
+        player.load();
+        
+        downloadBtn.onclick = () => {
+            showUploadToast("📥 Starting full audiobook download. This may take a while...", "success");
+            window.location.href = exportUrl + "&download=1";
+        };
+        
+        modal.style.display = "flex";
+    }
+}
+
+function closeAudiobookModal() {
+    const modal = document.getElementById("audiobookModal");
+    const player = document.getElementById("audiobookPlayer");
+    if (modal) modal.style.display = "none";
+    if (player) {
+        player.pause();
+        player.src = "";
+    }
+}
+
 function closeRevisionModal() {
     document.getElementById("revisionModal").style.display = "none";
 }
@@ -713,8 +1387,10 @@ function toggleTheme() {
     document.documentElement.setAttribute('data-theme', newTheme);
     localStorage.setItem('reader-theme', newTheme);
 
-    const icon = document.querySelector('.mode-icon');
-    if (icon) icon.innerText = isDark ? '☀️' : '🌙';
+    const icons = document.querySelectorAll('.themeIcon');
+    icons.forEach(icon => {
+        if (icon) icon.innerText = isDark ? '☀️' : '🌙';
+    });
 }
 
 // Apply Saved Theme
@@ -722,8 +1398,10 @@ function toggleTheme() {
     const saved = localStorage.getItem('reader-theme') || 'dark';
     document.documentElement.setAttribute('data-theme', saved);
     document.addEventListener('DOMContentLoaded', () => {
-        const icon = document.querySelector('.mode-icon');
-        if (icon) icon.innerText = saved === 'light' ? '☀️' : '🌙';
+        const icons = document.querySelectorAll('.themeIcon');
+        icons.forEach(icon => {
+            if (icon) icon.innerText = saved === 'light' ? '☀️' : '🌙';
+        });
     });
 })();
 
@@ -1044,7 +1722,7 @@ function showUploadToast(msg, type) {
         position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
         background: ${bg}; color: #fff; padding: 12px 24px; border-radius: 12px;
         font-size: 0.9rem; font-weight: 600; box-shadow: 0 4px 20px rgba(0,0,0,0.35);
-        z-index: 9999; animation: toastIn 0.3s ease; max-width: 380px; text-align: center;
+        z-index: 100000; animation: toastIn 0.3s ease; max-width: 380px; text-align: center;
     `;
     toast.innerHTML = msg;
     document.body.appendChild(toast);
@@ -1064,18 +1742,32 @@ function loadBooks() {
     return fetch("/books")
         .then(res => res.json())
         .then(data => {
-            activeBooksList = data; // Store for voice matching: [id, name, uploaded_at, status]
+            activeBooksList = data; 
+            
+            // Sync filter buttons
+            syncFilterButtons();
+            
+            // Sync both Library views
+            renderDashboard(data);
+            loadCollaborations();
+
             let list = document.getElementById("booklist");
             list.innerHTML = "";
 
             let hasProcessing = false;
 
             data.forEach(book => {
-                // book = [id, name, uploaded_at, status]
-                let status = book[3] || "ready";
+                const [id, name, uploaded_at, status, thumb, summary, time, is_fav, bCount, nCount, relation, pageCount, sharerName] = book;
                 if (status === "processing") hasProcessing = true;
 
                 let tr = document.createElement("tr");
+                tr.setAttribute("data-book-id", id);
+                tr.setAttribute("data-is-favourite", is_fav ? "1" : "0");
+                tr.setAttribute("data-bookmark-count", bCount || 0);
+                
+                if (currentBookId && id == currentBookId) {
+                    tr.classList.add("active-book-row");
+                }
 
                 let badge = "";
                 let btnClass = "";
@@ -1086,11 +1778,13 @@ function loadBooks() {
                     badge = `<span class="processing-badge" style="background:#7f1d1d;color:#fca5a5;">❌ Failed</span>`;
                 }
 
-                let openBtn = status === "ready"
-                    ? `<button class="btn-open" onclick="openBook(${book[0]})">Open</button>`
+                let isActive = (currentBookId && id == currentBookId);
+                let openBtnText = isActive ? "Active" : "Open";
+                let openBtn = (status !== "processing" && status !== "error")
+                    ? `<button class="btn-open ${isActive ? 'active-pulse' : ''}" onclick="openBook(${id})">${openBtnText}</button>`
                     : `<button disabled class="btn-open processing-btn" style="opacity:0.6;cursor:not-allowed;">Open</button>`;
 
-                let downloadBtn = status === "ready"
+                let downloadBtn = (status !== "processing" && status !== "error")
                     ? `<button class="btn-download" onclick="downloadBook(${book[0]}, '${book[1].replace(/'/g, "\\'")}')">Download</button>`
                     : `<button disabled class="btn-download" style="opacity:0.4;cursor:not-allowed;">Download</button>`;
 
@@ -1098,8 +1792,18 @@ function loadBooks() {
                 <td>
                     <div class="book-entry">
                         <div class="book-info">
-                            <span class="book-name">${book[1]}${badge}</span>
-                            <span class="book-meta">${book[2]}</span>
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <span class="book-name">${name}${badge}${relation === 'shared' ? ' <span style="font-size:0.65rem; background:rgba(99,102,241,0.1); color:var(--primary); padding:2px 6px; border-radius:4px; font-weight:800; border:1px solid rgba(99,102,241,0.2); vertical-align:middle; margin-left:4px;">👥 SHARED</span>' : ''}</span>
+                                <button class="btn-sidebar-fav ${is_fav ? 'active' : ''}" onclick="toggleFavorite(${book[0]}, this)" title="${is_fav ? 'Unfavorite' : 'Add to Favorites'}">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="${is_fav ? '#ef4444' : 'none'}" stroke="${is_fav ? '#ef4444' : 'var(--text-light)'}" stroke-width="2.5">
+                                        <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l8.84-8.84 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
+                                    </svg>
+                                </button>
+                            </div>
+                            <div class="book-meta" style="display: flex; flex-direction: column; gap: 4px; margin-top: 5px;">
+                                <span>${book[2]}</span>
+                                <span style="opacity: 0.8; font-weight: 500;">${book[11] || 0} Pages</span>
+                            </div>
                         </div>
                         <div class="book-actions">
                             ${openBtn}
@@ -1140,19 +1844,83 @@ function loadBooks() {
 }
 
 function filterBooks() {
-    let filter = document.getElementById("bookSearchInput").value.toLowerCase();
+    const searchEl = document.getElementById("librarySearch");
+    let filter = searchEl ? searchEl.value.toLowerCase() : "";
     let rows = document.querySelectorAll("#booklist tr");
+    
     rows.forEach(tr => {
-        let nameDiv = tr.querySelector("td div");
-        if (nameDiv) {
-            let bookName = nameDiv.innerText.toLowerCase();
-            if (bookName.includes(filter)) {
-                tr.style.display = "";
+        let nameEl = tr.querySelector(".book-name");
+        let isFav = tr.getAttribute("data-is-favourite") === "1";
+        
+        if (nameEl) {
+            let bookName = nameEl.innerText.toLowerCase();
+            let shouldShow = bookName.includes(filter);
+            
+            if (onlyFavoritesFilter && !isFav) {
+                shouldShow = false;
+            }
+            if (onlyBookmarksFilter && parseInt(tr.getAttribute("data-bookmark-count") || "0") === 0) {
+                shouldShow = false;
+            }
+            
+            tr.style.display = shouldShow ? "" : "none";
+        }
+    });
+}
+
+let onlyFavoritesFilter = false;
+
+function toggleFavoritesFilter() {
+    onlyFavoritesFilter = !onlyFavoritesFilter;
+    if (onlyFavoritesFilter) onlyBookmarksFilter = false; // Mutually exclusive for better UX
+    syncFilterButtons();
+    filterDashboard();
+    filterBooks();
+}
+
+let onlyBookmarksFilter = false;
+function toggleBookmarksFilter(forceValue = null) {
+    if (forceValue !== null) {
+        onlyBookmarksFilter = forceValue;
+    } else {
+        onlyBookmarksFilter = !onlyBookmarksFilter;
+    }
+    
+    if (onlyBookmarksFilter) onlyFavoritesFilter = false; // Mutually exclusive
+    
+    syncFilterButtons();
+    filterDashboard();
+    filterBooks();
+}
+
+function syncFilterButtons() {
+    // Sync Favorites Buttons
+    const favBtns = [document.getElementById("btnFilterFavs"), document.getElementById("sidebarBtnFilterFavs")];
+    favBtns.forEach(btn => {
+        if (btn) {
+            if (onlyFavoritesFilter) {
+                btn.classList.add("active");
+                let svg = btn.querySelector("svg");
+                if (svg) svg.setAttribute("fill", "currentColor");
             } else {
-                tr.style.display = "none";
+                btn.classList.remove("active");
+                let svg = btn.querySelector("svg");
+                if (svg) svg.setAttribute("fill", "none");
             }
         }
     });
+
+    // Handle visual feedback for Bookmarks filter
+    const bookmarkStatCard = document.getElementById("bookmarkStatCard");
+    if (bookmarkStatCard) {
+        if (onlyBookmarksFilter) {
+            bookmarkStatCard.style.borderColor = "#ff9f43";
+            bookmarkStatCard.style.background = "rgba(255, 159, 67, 0.1)";
+        } else {
+            bookmarkStatCard.style.borderColor = "var(--glass-border)";
+            bookmarkStatCard.style.background = "rgba(255,255,255,0.03)";
+        }
+    }
 }
 function showLoader(msg) {
     const loader = document.getElementById("simpleLoader");
@@ -1256,6 +2024,30 @@ function showConfirmModal(title, text, primaryText, secondaryText, tertiaryText,
 }
 
 function openBook(bookId) {
+    // ⚡ INSTANT CANCELLATION: Kill everything from the previous book immediately
+    // Don't wait for the new book's fetch to return.
+    const myRenderJobId = Date.now();
+    window._currentRenderJobId = myRenderJobId;
+    window.activeTranslationJob = myRenderJobId; 
+    
+    // Stop expensive tasks
+    isReadingAloud = false;
+    isPaused = false;
+    if (typeof stopReading === 'function') stopReading();
+    if (typeof stopStudyTimer === 'function') stopStudyTimer();
+    
+    // 🧹 PRE-FETCH CLEANUP: Clear massive strings and DOM right now
+    currentBookText = "";
+    if (window._currentBookPages) window._currentBookPages = [];
+    
+    // Detach old DOM instantly to help GC
+    let reader = document.getElementById("reader");
+    if (reader) {
+        while (reader.firstChild) {
+            reader.removeChild(reader.firstChild);
+        }
+    }
+
     let bookmarkIndex = currentAbsoluteCharIndex;
     let oldBookId = currentBookId;
 
@@ -1269,7 +2061,7 @@ function openBook(bookId) {
             "Cancel",
             () => {
                 localStorage.setItem(`bookmark_${oldBookId}`, bookmarkIndex);
-                resetReadingSession();
+                resetReadingSession(); // Still call for deep variable reset
                 proceedToOpenBook(bookId);
             },
             () => {
@@ -1284,15 +2076,43 @@ function openBook(bookId) {
     if (oldBookId !== bookId) {
         resetReadingSession();
     }
-    currentBookId = bookId; // Ensure ID is set before loading recs
-    loadRecommendations();
+    currentBookId = bookId; 
     proceedToOpenBook(bookId);
+    
+    // Load recommendations async
+    setTimeout(() => loadRecommendations(), 1000);
 }
 
 
 function proceedToOpenBook(bookId) {
     showLoader();
     window._pendingBookmarkResume = null; // Clear old book's residue
+    window._isRenderingFinished = false; // Track if rendering is done for late-arriving bookmarks
+
+    // 🔖 PARALLEL BOOKMARK FETCH: Start fetching immediately while the book content is loading
+    // This ensures we have the resume target ready by the time the first batch renders.
+    fetch(`/bookmarks/${bookId}`)
+        .then(r => r.json())
+        .then(list => {
+            if (list && list.length > 0) {
+                const bm = list[0];
+                const resumeData = {
+                    charIndex: bm.char_index,
+                    page: bm.page_number,
+                    scrollY: bm.scroll_y
+                };
+                
+                if (window._isRenderingFinished) {
+                    // Safety: If rendering already completed before fetch returned, jump now
+                    console.log("📍 Late-arriving bookmark. Jumping now.");
+                    jumpToBookmark(resumeData.page, resumeData.scrollY, true, resumeData.charIndex);
+                } else {
+                    window._pendingBookmarkResume = resumeData;
+                }
+            }
+        })
+        .catch(e => console.log("Bookmark check bypassed.", e));
+
     fetch("/book/" + bookId)
         .then(res => res.json())
         .then(async data => {
@@ -1306,30 +2126,56 @@ function proceedToOpenBook(bookId) {
             currentBookName = data.name || "Untitled";
             currentBookText = data.text || "";
             currentBookDetectedLangCode = data.detected_lang || "en";
+            
+            // 🛡️ IMMEDIATE LAST-READ STAMP: Ensure this book shows up in the dashboard INSTANTLY 
+            // even if the user only looks at it for a second.
+            fetch("/update_reading_time", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ book_id: currentBookId, seconds: 0 })
+            });
+
+            // Start precision time logging (10s heartbeats) for the chart
+            startReadingPulse();
 
             // Update Floating Badge and reveal it
             const bookTitleEl = document.getElementById("bookTitle");
             const bookBadgeEl = document.getElementById("bookBadge");
+            const readerFavBtn = document.getElementById("readerFavoriteBtn");
+
             if (bookTitleEl) bookTitleEl.innerText = data.name;
             if (bookBadgeEl) bookBadgeEl.classList.add('visible');
-            startStudyTimer();
-
-            // 🔖 Auto-Resume Logic (Server-side stored bookmarks)
-            // MUST await this to prevent race condition where rendering finishes before fetch returns
-            try {
-                const bmRes = await fetch(`/bookmarks/${bookId}`);
-                const list = await bmRes.json();
-                if (list && list.length > 0) {
-                    const bm = list[0];
-                    window._pendingBookmarkResume = {
-                        charIndex: bm.char_index,
-                        page: bm.page_number,
-                        scrollY: bm.scroll_y
-                    };
+            
+            // Highlight active book in sidebar instantly
+            document.querySelectorAll("#booklist tr").forEach(row => {
+                const rowId = row.getAttribute("data-book-id");
+                const openBtn = row.querySelector(".btn-open");
+                if (rowId == bookId) {
+                    row.classList.add("active-book-row");
+                    if (openBtn) {
+                        openBtn.classList.add("active-pulse");
+                        openBtn.innerText = "Active";
+                    }
+                } else {
+                    row.classList.remove("active-book-row");
+                    if (openBtn && !openBtn.classList.contains("processing-btn")) {
+                        openBtn.classList.remove("active-pulse");
+                        openBtn.innerText = "Open";
+                    }
                 }
-            } catch (e) {
-                console.log("Bookmark check bypassed.", e);
+            });
+
+            if (readerFavBtn) {
+                if (data.is_favorite) {
+                    readerFavBtn.classList.add('active');
+                    readerFavBtn.title = "Unfavorite";
+                } else {
+                    readerFavBtn.classList.remove('active');
+                    readerFavBtn.title = "Add to Favorites";
+                }
             }
+
+            startStudyTimer(data.reading_time || 0);
 
             // Clear progress on new book
             const progEl = document.getElementById("readingProgress");
@@ -1344,13 +2190,6 @@ function proceedToOpenBook(bookId) {
             }
 
             let reader = document.getElementById("reader");
-            if (reader) {
-                reader.innerHTML = data.text;
-                // Clear any leftover attributes from older DOM if they somehow persisted
-                reader.querySelectorAll('.lazy-page-container').forEach(p => {
-                    delete p.dataset.translated;
-                });
-            }
             let detectedLang = "Original Language";
 
             let langSelectBtn = document.getElementById("langSelect");
@@ -1428,23 +2267,23 @@ function proceedToOpenBook(bookId) {
                 window.activeTranslationJob = Date.now(); // Cancel any stale background translation jobs
             }
 
-            // 1. FORCE THE CLEAN SLATE
+            // 1. FORCE THE CLEAN SLATE (Fast reset + DOM detachment)
             if (reader) {
-                // Ensure no attributes or leftover content from previous book can "haunt" the next session
-                reader.querySelectorAll('[data-translated]').forEach(el => {
-                    delete el.dataset.translated;
-                    delete el.dataset.translatedContent;
-                });
-                reader.innerHTML = '<div class="book-content-container"></div>';
+                // Using child removal is often faster than innerHTML="" for huge DOMs
+                while (reader.firstChild) {
+                    reader.removeChild(reader.firstChild);
+                }
+                const contentCont = document.createElement('div');
+                contentCont.className = 'book-content-container';
+                reader.appendChild(contentCont);
                 reader.scrollTop = 0;
                 reader.scrollLeft = 0;
             }
-            reader.scrollTop = 0;
-            reader.scrollLeft = 0;
             let container = reader.querySelector('.book-content-container');
 
             // Efficiently split currentBookText into individual pages without massive memory duplication
             let pageChunks = [];
+            window._currentBookPages = pageChunks; // Global reference for cleanup
 
             // 1. Optimized splitting with index-based substring search
             // Check first 10k chars for the marker to avoid full-string search for detection
@@ -1454,9 +2293,6 @@ function proceedToOpenBook(bookId) {
             if (splitMarker) {
                 let markerIdx = currentBookText.indexOf(splitMarker);
                 if (markerIdx !== -1) {
-                    // Skip adding the leading header (wrapper prefix) as a page chunk
-                    // This prevents an empty "Page 1" from appearing before the actual first page.
-
                     while (markerIdx !== -1) {
                         let nextMarkerIdx = currentBookText.indexOf(splitMarker, markerIdx + 1);
                         if (nextMarkerIdx !== -1) {
@@ -1466,27 +2302,24 @@ function proceedToOpenBook(bookId) {
                         }
                         markerIdx = nextMarkerIdx;
 
-                        // Support 3,600+ page books without triggering "Page Unresponsive"
-                        // Increase yielding frequency: every 150 chunks for 180MB books
-                        if (pageChunks.length % 150 === 0) {
+                        // Yielding more frequently for massive books to keep UI snappy
+                        if (pageChunks.length % 100 === 0) {
                             await new Promise(r => setTimeout(r, 0));
                         }
                     }
                 }
             }
 
-            // 2. Fallback for older PPT slides or other block-like structures that look like pages
+            // 2. Fallback for older PPT slides or other block-like structures
             if (pageChunks.length === 0) {
-                // Check for slide patterns in a small head sample to avoid long wait
                 const headSample = currentBookText.substring(0, 50000);
                 const hasSlidePattern = headSample.includes('Slide ') || headSample.includes('pptx-slide') || headSample.includes('aspect-ratio: 16/9') || headSample.includes('lazy-page-container') || headSample.includes('slide-');
 
                 if (hasSlidePattern) {
-                    // Only parse if the string isn't absolutely massive (prevent hang on 200MB strings)
-                    if (currentBookText.length < 5000000) {
+                    // Optimized DOM parsing: only if truly necessary and for reasonable sizes
+                    if (currentBookText.length < 3000000) {
                         const tempDiv = document.createElement('div');
                         tempDiv.innerHTML = currentBookText;
-                        // Look for common slide/page markers
                         const blocks = tempDiv.querySelectorAll('.lazy-page-container, .reader-page, .pptx-slide, div[style*="aspect-ratio: 16/9"], div[id*="page-"], div[class*="slide-"]');
                         if (blocks.length > 0) {
                             blocks.forEach((b, i) => {
@@ -1495,9 +2328,7 @@ function proceedToOpenBook(bookId) {
                                 pageChunks.push(b.outerHTML);
                             });
                         }
-                    } else {
-                        // Fallback for massive un-split books: don't parse as slides, just show as one giant block
-                        // or we could split by regex manually here without DOM parsing
+                        tempDiv.innerHTML = ""; // Fast cleanup
                     }
                 }
             }
@@ -1507,13 +2338,22 @@ function proceedToOpenBook(bookId) {
                 hideLoader();
             }
 
+            // Once split, we can potentially null out currentBookText if we only use pageChunks
+            // but we need it for 'Find in Book' and TTS. So we keep it but ensure it's not duplicated.
+
             totalPages = pageChunks.length || (currentBookText.trim() ? 1 : 0);
             updatePagesList();
 
             let containerW = reader.clientWidth - 20;
             let renderedCount = 0;
+            const myRenderJobId = Date.now();
+            window._currentRenderJobId = myRenderJobId;
 
             async function renderBatch(startIndex) {
+                if (myRenderJobId !== window._currentRenderJobId) {
+                    console.log("🛑 Stale render job detected. Terminating batch for old book.");
+                    return;
+                }
                 if (startIndex === 0) {
                     if (reader) reader.scrollTop = 0;
                     // Enable CSS scaling for PDFs once on start
@@ -1537,6 +2377,10 @@ function proceedToOpenBook(bookId) {
                     if (window.activeTranslationObserver) {
                         window.activeTranslationObserver.observe(pageWrapper);
                     }
+
+                    // 🛠️ INSTANT NORMALIZATION: Clean soft-hyphens/spaces IMMEDIATELY
+                    // This ensures charIndex mapping is STABLE before any jump occurs.
+                    await normalizeBookDOM(pageWrapper);
 
                     // Apply scaling immediately to the new page
                     // Match both ID formats: 'page-N' or 'pdf-page-N'
@@ -1586,13 +2430,19 @@ function proceedToOpenBook(bookId) {
 
                 renderedCount = endIndex;
 
-                // applyExistingHighlights used to be here every 100 pages, but removed to prevent O(N^2) hangs.
-                // Highlights are now applied once at the end or on-demand.
-
+                // CHECKPOINT: If we are resuming from a bookmark, check if the target page is now available
+                if (window._pendingBookmarkResume) {
+                    const pb = window._pendingBookmarkResume;
+                    // page_number is 1-indexed, pdf-page-N is 0-indexed
+                    if (pb.page <= endIndex) {
+                        console.log("📍 Bookmark target page rendered. Jumping now...");
+                        jumpToBookmark(pb.page, pb.scrollY, true, pb.charIndex);
+                        window._pendingBookmarkResume = null; // Successfully resumed
+                    }
+                }
 
                 if (renderedCount < pageChunks.length) {
                     // Return to main thread to keep UI responsive. 
-                    // Yield longer for massive books to prevent GC pressure hang.
                     const yieldTime = isMassive ? 35 : 12;
                     await new Promise(r => setTimeout(r, yieldTime));
                     return renderBatch(renderedCount);
@@ -1600,65 +2450,22 @@ function proceedToOpenBook(bookId) {
                     // Final pass once everything is rendered
                     applyExistingHighlights();
                     renderBookmarkIcons();
-
-                    // Check for pending bookmark resumes once everything is in the DOM
+                    
+                    // Final fallback check if bookmark was never cleared (e.g. for massive books)
                     if (window._pendingBookmarkResume) {
-                        const pb = window._pendingBookmarkResume;
-                        setTimeout(() => {
-                            // Only jump if we still have the resume data (prevents race conditions)
-                            if (pb) {
-                                jumpToBookmark(pb.page, pb.scrollY, true, pb.charIndex);
-                            }
-                            window._pendingBookmarkResume = null;
-                        }, 500); // Increased timeout for DOM stability
+                         const pb = window._pendingBookmarkResume;
+                         jumpToBookmark(pb.page, pb.scrollY, true, pb.charIndex);
+                         window._pendingBookmarkResume = null;
                     }
+                    window._isRenderingFinished = true;
                 }
             }
 
-            // Check for existing bookmark before starting batches
-            const savedIndex = localStorage.getItem(`bookmark_${bookId}`);
-        if (savedIndex) {
-            showConfirmModal(
-                "Continue Reading?",
-                "We found a bookmark. Would you like to resume from your last position?",
-                "Resume",
-                "Start Over",
-                "Cancel",
-                () => {
-                    currentAbsoluteCharIndex = parseInt(savedIndex);
-                    // Start rendering and scroll once ready
-                    renderBatch(0).then(() => {
-                        scrollToIndex(currentAbsoluteCharIndex);
-                    });
-                },
-                () => {
-                    currentAbsoluteCharIndex = 0;
-                    localStorage.removeItem(`bookmark_${bookId}`);
-                    renderBatch(0);
-                },
-                () => {
-                    reader.innerHTML = `<div class="empty-state" style="text-align: center; color: var(--text-light); font-style: italic; margin-top: 50px;">Select a book from the sidebar to start reading.</div>`;
-                    document.getElementById("bookTitle").innerText = "Select a book from your library";
-                    currentBookId = null;
-                }
-            );
-        } else {
-                currentAbsoluteCharIndex = 0;
-                renderBatch(0);
-            }
-
-            // Apply a one-time normalization pass to clear soft-hyphens and messy characters
-            // that cause offset drift between speech engine and DOM.
-            // Use a specific, fast normalization pass for text-heavy documents (TXT, Word)
-            // while keeping a safer delay for massive PDFs to prevent UI jank.
-            const isPlainDoc = pageChunks.length === 0;
-            setTimeout(async () => {
-                await normalizeBookDOM(reader);
-                rebuildReadingNodeMap();
-            }, isPlainDoc ? 50 : 1000);
+            currentAbsoluteCharIndex = 0;
+            renderBatch(0);
 
             loadHighlights(bookId);
-            setTimeout(renderBookmarkIcons, 1500); // Wait for initial render and normalization
+            setTimeout(renderBookmarkIcons, 1500); // Wait for initial render
         })
         .catch(err => {
             console.error("Reader Fetch Error:", err);
@@ -1685,18 +2492,27 @@ function deleteBook(bookId) {
         "Keep Book",
         "Cancel",
         () => {
-            // EXECUTE DELETE
-            resetReadingSession();
-            let playPauseBtn = document.getElementById("playPauseBtn");
-            if (playPauseBtn) playPauseBtn.innerText = "Read Full ▶";
+            // Check if we are deleting the currently open book
+            const isDeletingActiveBook = (typeof currentBookId !== 'undefined' && currentBookId == bookId);
+
+            if (isDeletingActiveBook) {
+                resetReadingSession();
+                let playPauseBtn = document.getElementById("playPauseBtn");
+                if (playPauseBtn) playPauseBtn.innerHTML = "🔊 <span>Read Full</span>";
+                
+                document.getElementById("reader").innerHTML = '<div class="empty-state">Select a book from the sidebar to start reading.</div>';
+                document.getElementById("bookTitle").innerText = "No book selected";
+                const badge = document.getElementById("bookBadge");
+                if (badge) badge.classList.remove('visible');
+                currentBookId = null;
+            }
 
             fetch("/delete_book/" + bookId, { method: "POST" })
                 .then(res => res.json())
                 .then(data => {
                     showUploadToast(data.message || data.error, data.error ? "error" : "success");
-                    document.getElementById("reader").innerHTML = '<div class="empty-state">Select a book from the sidebar to start reading.</div>';
-                    document.getElementById("bookTitle").innerText = "No book selected";
                     loadBooks();
+                    if (typeof renderDashboard === 'function') renderDashboard();
                 });
         },
         () => { /* Stay - no action */ },
@@ -2159,6 +2975,13 @@ function getNodesAndText(root) {
         }
         if (!isVisible) continue;
 
+        // Skip genuinely empty nodes to keep the character map dense
+        if (!node.nodeValue || node.nodeValue.trim().length === 0) {
+            // But keep track for space injection logic
+            lastNode = node;
+            continue;
+        }
+
         // SPACE INJECTION: Crucial for drift-free highlighting
         // If we jump between elements, the browser/narrator implies a space.
         // We must add this space to our character map to keep everything aligned.
@@ -2283,24 +3106,21 @@ function stopSpeechKeepAlive() {
 }
 
 async function resumeReadingFromIndex(index, startPaused = false, forceExactPosition = false) {
-    // CRITICAL: Ensure node map is rebuilt if it's empty, too short, or disconnected (stale).
-    // SELF-HEALING MAP: Check if the text node map is still connected to the DOM.
-    // DOM-modifying actions like "Find in Book" or manual highlighting can invalidate nodes.
-    const isMapConnected = globalTextNodes && globalTextNodes.length > 0 && 
-                          globalTextNodes[0].isConnected && 
-                          globalTextNodes[Math.floor(globalTextNodes.length/2)].isConnected;
-
-    if (!isMapConnected || !globalReadingText || globalReadingText.length < 10) {
-        rebuildReadingNodeMap();
+    const playPauseBtn = document.getElementById("playPauseBtn");
+    if (playPauseBtn && !startPaused) {
+        playPauseBtn.innerHTML = `<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> <span>Preparing...</span>`;
     }
 
-    if (!globalReadingText || !globalReadingText.trim()) {
-        console.warn("No text found in reader. Rebuilding...");
-        rebuildReadingNodeMap();
-        if (!globalReadingText.trim()) {
-            showUploadToast("📚 No readable text found in this book.", "error");
-            return;
-        }
+    // CRITICAL: Always rebuild the map when starting a fresh narration to catch any 
+    // recent translations that happened while the reader was idle. 
+    window.speechSyncNext = false; // Reset sync flag for new session start
+    rebuildReadingNodeMap();
+
+    if (!globalReadingText || !globalReadingText.trim() || (globalReadingText.length < 5 && !isReadingAloud)) {
+        console.warn("No text found in reader after rebuild.", { nodes: globalTextNodes?.length, text: globalReadingText });
+        showUploadToast("📚 No readable text found to narrate.", "error");
+        if (playPauseBtn) playPauseBtn.innerHTML = "▶ <span>Read Full</span>";
+        return;
     }
 
     // Resume from a safe word boundary to avoid repeated fragments, unless exactly requested
@@ -2313,6 +3133,7 @@ async function resumeReadingFromIndex(index, startPaused = false, forceExactPosi
         return;
     }
 
+    window.speechSynthesis.resume(); // Ensure it's not paused before canceling (Chrome Fix)
     window.speechSynthesis.cancel();
     if (currentFallbackAudio) {
         currentFallbackAudio.pause();
@@ -2331,17 +3152,10 @@ async function resumeReadingFromIndex(index, startPaused = false, forceExactPosi
     // INSTANT JUMP: Don't wait for audio engine to start; reveal current reading point now.
     highlightReadingWord(index, 5);
 
-    let playPauseBtn = document.getElementById("playPauseBtn");
-    if (playPauseBtn) playPauseBtn.innerText = startPaused ? "Resume ▶" : "Pause ⏸";
-
-    utterancePool = [];
-    if (watchdogTimer) clearTimeout(watchdogTimer);
-    startSpeechKeepAlive();
-
     let text = globalReadingText;
-    // PERFORMANCE FIX: Only chunk the next 15,000 characters at a time.
-    // This makes the 'start' time instant regardless of book length (Total book could be 1M+ chars)
-    let processingLimit = 15000;
+    // PERFORMANCE FIX: Only chunk the next 10,000 characters at a time.
+    // This makes the 'start' time instant regardless of book length.
+    let processingLimit = 10000;
     let remainingText = text.substring(index, index + processingLimit);
     let chunks = [];
     let lastSplit = 0;
@@ -2368,6 +3182,8 @@ async function resumeReadingFromIndex(index, startPaused = false, forceExactPosi
     let testLang = getSelectedLanguage();
     let testShort = testLang ? testLang.split('-')[0].toLowerCase() : 'en';
 
+    if (playPauseBtn) playPauseBtn.innerHTML = startPaused ? "▶ <span>Resume</span>" : "⏸ <span>Pause</span>";
+    
     if (testShort !== 'en' || isEmotionModeActive) {
         playFallbackAudioQueue(chunks, chunkOffset, testShort, startPaused);
         return;
@@ -2518,6 +3334,7 @@ async function resetReadingSession() {
     isReadingAloud = false;
     isPaused = false;
     stopReading();
+    stopStudyTimer();
     globalReadingText = "";
     globalTextNodes = [];
     globalNodeOffsets = [];
@@ -2574,7 +3391,7 @@ async function togglePlayPause() {
             // from the current index, and any stale callbacks are invalidated.
             window.forceResumeScroll = true; // FORCE JUMP BACK TO PAUSE POINT
             await resumeReadingFromIndex(currentAbsoluteCharIndex, false, true);
-            if (playPauseBtn) playPauseBtn.innerText = "Pause ⏸";
+            if (playPauseBtn) playPauseBtn.innerHTML = "⏸ <span>Pause</span>";
         } else {
             // PAUSE
             isPaused = true;
@@ -2584,7 +3401,7 @@ async function togglePlayPause() {
             // TRACK PROGRESS: currentAbsoluteCharIndex is updated live by syncHighlight/onboundary event listeners.
             // We cancel the speech to free resources and prepare for a clean restart.
             window.speechSynthesis.cancel();
-            if (playPauseBtn) playPauseBtn.innerText = "Resume ▶";
+            if (playPauseBtn) playPauseBtn.innerHTML = "▶ <span>Resume</span>";
         }
     }
 }
@@ -2648,6 +3465,12 @@ function initializeReader() {
     // Reader Interaction Handler
     if (reader) {
         reader.addEventListener("click", function (e) {
+            // 🛡️ DRAG-LOCK: Ignore click if we just finished a drag/pan operation
+            if (window.isRecentlyPanned) {
+                window.isRecentlyPanned = false; // Reset for next time
+                return;
+            }
+            
             // REBUILD MAP: Always ensure we have a fresh map for plain documents
             const isPlain = (totalPages === 0 || !document.querySelector('[id^="pdf-page-"]'));
             if (!globalReadingText || globalTextNodes.length === 0 || isPlain) {
@@ -2920,7 +3743,8 @@ async function summarizeSelectedText() {
             },
             body: JSON.stringify({
                 text: selectedText,
-                book_id: currentBookId
+                book_id: currentBookId,
+                target_lang: document.getElementById('langSelect')?.value || 'orig'
             })
         });
 
@@ -3220,7 +4044,7 @@ function getSelectedLanguage() {
 
     // Use the auto-detected language if 'Original' is selected
     if (lang === 'orig') {
-        lang = window.currentBookDetectedLangCode || 'en';
+        lang = currentBookDetectedLangCode || 'en';
     }
 
     // Map standard codes to standard BCP-47 Speech Synthesis tags for the reader
@@ -3359,8 +4183,8 @@ async function translatePage(pageEl, targetLang, job) {
     }
 
     // CONCURRENCY & BATCHING: Optimized for massive documents
-    const CONCURRENCY_LIMIT = 2; 
-    const BATCH_SIZE = 80; 
+    const CONCURRENCY_LIMIT = 2; // Reduced from 4 to prevent browser connection saturation
+    const BATCH_SIZE = 500; // Increased from 150 to reduce total requests significantly
     const batches = [];
     for (let i = 0; i < nodes.length; i += BATCH_SIZE) {
         batches.push(nodes.slice(i, i + BATCH_SIZE));
@@ -3451,8 +4275,9 @@ async function translateBook() {
     
     showTranslationLoader(`Translating Current Page (${startPageIdx + 1})...`);
     
-    // PHASE 1: Priority Spread (Current + Next 2)
-    const priorityPages = pages.slice(startPageIdx, startPageIdx + 3);
+    // PHASE 1: Priority Spread (Current Page Only)
+    // Reducing from 3 pages to 1 allows narration to start nearly instantly on language change.
+    const priorityPages = pages.slice(startPageIdx, startPageIdx + 1);
     for (const p of priorityPages) {
         await translatePage(p, window.currentTargetLang, window.activeTranslationJob);
     }
@@ -3469,12 +4294,12 @@ async function translateBook() {
         const jobId = window.activeTranslationJob;
         const totalPages = pages.length;
         
-        // SPEED BOOST: Group into larger blocks (4 pages) to maximize sidecar throughput
-        for (let i = 0; i < totalPages; i += 4) {
+        // SPEED BOOST: Group into smaller blocks (2 pages) to avoid blocking narration
+        for (let i = 0; i < totalPages; i += 2) {
             // Cancellation Check: Stop if language changed or book switched
             if (window.activeTranslationJob !== jobId || window.currentTargetLang === 'orig') break;
             
-            const segment = pages.slice(i, i + 4);
+            const segment = pages.slice(i, i + 2);
             try {
                 // Parallelize within the segment; if one page fails, the rest continue
                 await Promise.all(segment.map(p => translatePage(p, window.currentTargetLang, jobId).catch(e => console.error("Page BG Error:", e))));
@@ -3488,8 +4313,10 @@ async function translateBook() {
                 rebuildReadingNodeMap();
             }
 
-            // Minimal yield to keep UI smooth during background crunching
-            await new Promise(r => setTimeout(r, 20));
+            // DYNAMIC THROTTLING: If user is reading aloud, slow down background translation
+            // to 1.5 seconds per block to ensure narration audio requests have priority.
+            const delay = isReadingAloud ? 1500 : 300;
+            await new Promise(r => setTimeout(r, delay));
         }
         
         if (window.activeTranslationJob === jobId) {
@@ -3508,26 +4335,11 @@ let fallbackQueue = [];
 function playFallbackAudioQueue(chunks, startOffset, shortLang, startPaused) {
     fallbackQueue = [];
     let currentAbsOffset = startOffset;
+    const allSentenceTexts = [];
 
-    // REDUCED LAG: We no longer pre-fetch the whole book's emotion at once.
-    // Instead, we build the queue instantly and fetch emotions lazily.
-
-    // SHARED PREFETCH LOGIC: Move cache higher to prevent redundant fetches
-    const prefetchEmotion = (text) => {
-        if (!text || text.length < 2) return Promise.resolve('neutral');
-        if (emotionCache.has(text)) return emotionCache.get(text);
-        
-        let p = fetch("/analyze_emotion", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ text })
-        }).then(res => res.json()).catch(() => 'neutral');
-        
-        emotionCache.set(text, p);
-        return p;
-    };
-
-    chunks.forEach((chunk, chunkIdx) => {
+    let hasStarted = false;
+    // PHASE 1: Build the basic queue structure (FAST)
+    chunks.forEach((chunk) => {
         if (!chunk.trim()) {
             currentAbsOffset += chunk.length;
             return;
@@ -3537,20 +4349,24 @@ function playFallbackAudioQueue(chunks, startOffset, shortLang, startPaused) {
         while (start < chunk.length) {
             let end = start + 195;
             if (end < chunk.length) {
-                // Find nearest natural break (. , ! ? ; or newline)
                 let breakIdx = -1;
-                const naturalBreakers = [". ", "! ", "? ", ", ", "; ", "\n", " "];
+                const naturalBreakers = [". ", "! ", "? ", "। ", "।", ". ", "! ", "? ", ", ", "; ", "\n", ". ", " "];
                 for (let breaker of naturalBreakers) {
                     let found = chunk.lastIndexOf(breaker, end);
-                    if (found > start + 50) {
+                    if (found > start + 30) { 
                         breakIdx = found + breaker.length;
                         break;
                     }
                 }
                 if (breakIdx !== -1) end = breakIdx;
                 else {
-                    let lastSpace = chunk.lastIndexOf(' ', end);
-                    if (lastSpace > start) end = lastSpace;
+                    // Final fallback to any punctuation if no space/standard breaker exists
+                    let lastPunc = chunk.search(/[.!?;:]/);
+                    if (lastPunc > start && lastPunc < end) end = lastPunc + 1;
+                    else {
+                        let lastSpace = chunk.lastIndexOf(' ', end);
+                        if (lastSpace > start) end = lastSpace;
+                    }
                 }
             } else {
                 end = chunk.length;
@@ -3562,48 +4378,66 @@ function playFallbackAudioQueue(chunks, startOffset, shortLang, startPaused) {
             let sc = trimmedPart.trimEnd();
 
             if (sc) {
-                // Immediately kick off analysis for the current chunk (async)
-                prefetchEmotion(sc);
-
+                allSentenceTexts.push(sc);
                 let url = `/tts?lang=${shortLang}&text=${encodeURIComponent(sc)}&gender=${currentNarratorGender}`;
-
-                // LAZY EMOTION: Now uses the pre-fetched cache for instant resolution
-                const lazyEmotion = () => {
-                    if (!isEmotionModeActive) return Promise.resolve('neutral');
-                    return prefetchEmotion(sc);
-                };
-
-                fallbackQueue.push({
+                
+                const item = {
                     url,
                     text: sc,
-                    offset: currentAbsOffset + start + leadingSpaces,
-                    getEmotion: lazyEmotion
-                });
+                    offset: currentAbsOffset + start + leadingSpaces
+                };
+
+                fallbackQueue.push(item);
+
+                // ULTRA-FAST STARTUP: Trigger the first audio request IMMEDIATELY 
+                // while we continue building the rest of the queue in the background.
+                if (!hasStarted && fallbackQueue.length === 1 && !startPaused) {
+                    hasStarted = true;
+                    item.audioObj = new Audio(item.url);
+                    item.audioObj.preload = "auto";
+                    item.audioObj.load();
+                    // Don't even wait for the loop to finish - start playing the first chunk now
+                    setTimeout(() => playNextFallback(false), 10);
+                } else if (fallbackQueue.length <= 6) {
+                    // Pre-fetch the next few sentences in parallel during queue construction
+                    setTimeout(() => {
+                        item.audioObj = new Audio(item.url);
+                        item.audioObj.preload = "auto";
+                        item.audioObj.load();
+                    }, 50);
+                }
             }
             start = end;
+            if (fallbackQueue.length > 150) break; 
         }
         currentAbsOffset += chunk.length;
-
-        // LIMIT INITIAL QUEUE: For performance, but only return from the inner block
-        if (fallbackQueue.length > 100) return;
     });
 
     if (startPaused) {
         isPaused = true;
     }
 
-    // Start playback immediately for zero-lag experience
-    playNextFallback(startPaused);
-    
-    // PRE-FETCH FIRST 3 CHUNKS: Warm up the network cache immediately
-    // This removes the initial 'click-to-start' delay for non-English books.
-    for (let i = 0; i < Math.min(3, fallbackQueue.length); i++) {
-        const item = fallbackQueue[i];
-        if (!item.audioObj) {
-            item.audioObj = new Audio(item.url);
-            item.audioObj.preload = "auto";
-            item.audioObj.load();
-        }
+    // ENSURE START: If it didn't start in the loop (e.g. empty first chunks), start now
+    if (!isPaused && !hasStarted && fallbackQueue.length > 0) {
+        hasStarted = true;
+        playNextFallback(false);
+    }
+
+    // PHASE 3: FETCH EMOTIONS IN BACKGROUND
+    if (isEmotionModeActive && allSentenceTexts.length > 0) {
+        // Optimize: Batch the first 50 results together
+        const emotionBatch = allSentenceTexts.slice(0, 50);
+        fetch("/analyze_emotion", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ texts: emotionBatch })
+        }).then(res => res.json()).then(emotions => {
+            if (Array.isArray(emotions)) {
+                emotions.forEach((em, i) => {
+                    if (fallbackQueue[i]) emotionCache.set(fallbackQueue[i].text, em.emotion || 'neutral');
+                });
+            }
+        }).catch(e => console.warn("Background Emotion Batching Failed:", e));
     }
 }
 
@@ -3732,9 +4566,10 @@ function highlightReadingWord(absoluteWordPosition, charLength, sentenceStart = 
                     let text = node.nodeValue || "";
                     let localEnd = Math.min(nodeLen, endChar - nodeStart);
                     
-                    // Expand localEnd to next non-word character if it looks like we clipped a word
-                    if (localEnd < nodeLen && /\w/.test(text[localEnd - 1]) && /\w/.test(text[localEnd])) {
-                        while (localEnd < nodeLen && /\w/.test(text[localEnd])) {
+                    // Expand localEnd to next non-word character if it looks like we clipped a word (Unicode-aware)
+                    const letterRegex = /[\p{L}\p{M}]/u;
+                    if (localEnd < nodeLen && letterRegex.test(text[localEnd - 1]) && letterRegex.test(text[localEnd])) {
+                        while (localEnd < nodeLen && letterRegex.test(text[localEnd])) {
                             localEnd++;
                         }
                     }
@@ -3806,6 +4641,7 @@ function highlightReadingWord(absoluteWordPosition, charLength, sentenceStart = 
 
 function playNextFallback(startPaused = false, isRetry = false) {
     const entryJobId = currentNarrationJobId;
+    const playPauseBtn = document.getElementById("playPauseBtn");
 
     if (!isReadingAloud || isPaused) return;
 
@@ -3840,6 +4676,15 @@ function playNextFallback(startPaused = false, isRetry = false) {
 
     if (!item) return;
 
+    // PREVENT INFINITE RETRY LOOPS: If this specific item has failed 3 times, skip it.
+    item.retryCount = (item.retryCount || 0);
+    if (isRetry) item.retryCount++;
+    if (item.retryCount > 3) {
+        console.error("Narration Failure: Skipping stalled item after 3 retries", item.text.substring(0, 30));
+        playNextFallback(false, false);
+        return;
+    }
+
     // USE PRE-FETCHED OBJECT: If background pre-fetching already started this request,
     // we use the existing DOM object to skip the initial connection handshake.
     let audio = item.audioObj || new Audio(item.url);
@@ -3848,46 +4693,17 @@ function playNextFallback(startPaused = false, isRetry = false) {
     currentAbsoluteCharIndex = item.offset;
     removeReadingMarks();
 
-    window.speechSynthesis.cancel();
+    // Only cancel native speech on the FIRST attempt to avoid AbortError loops on retries
+    if (!isRetry) window.speechSynthesis.cancel();
     const jobId = entryJobId;
 
-    // JIT EMOTION: Fetch emotion without blocking the start of playback
+    // JIT EMOTION: Use pre-fetched cache or fallback to neutral instantly
     let emotion = 'neutral';
-    let ePromise = item.getEmotion ? item.getEmotion() : (item.emotionPromise || Promise.resolve('neutral'));
-
-    function applyEmotionToUI(res) {
-        if (jobId !== currentNarrationJobId || !isReadingAloud) return;
-        const em = (typeof res === 'string') ? res : (res.emotion || 'neutral');
-        updateReaderMood(em);
-        
-        // If it's fallback audio (Edge TTS), we can live-adjust the rate
-        if (currentFallbackAudio && !window.speechSynthesis.speaking) {
-            if (em === 'happy') currentFallbackAudio.playbackRate = 1.05 * currentSpeed;
-            else if (em === 'excited') currentFallbackAudio.playbackRate = 1.15 * currentSpeed;
-            else if (em === 'sad') currentFallbackAudio.playbackRate = 0.85 * currentSpeed;
-            else if (em === 'angry') currentFallbackAudio.playbackRate = 1.1 * currentSpeed;
-            else if (em === 'fear') currentFallbackAudio.playbackRate = 0.9 * currentSpeed;
-            else if (em === 'peaceful') currentFallbackAudio.playbackRate = 0.8 * currentSpeed;
-            else currentFallbackAudio.playbackRate = 1.0 * currentSpeed;
-        }
-    }
-
-    // Update UI when ready, but don't wait for it to start audio
-    ePromise.then(applyEmotionToUI);
-
-    // Get current best emotion if already cached for immediate pitch setting
     if (item.text && emotionCache.has(item.text)) {
-        let cachedData = emotionCache.get(item.text);
-        if (typeof cachedData === 'string') emotion = cachedData;
+        const cached = emotionCache.get(item.text);
+        emotion = (typeof cached === 'string') ? cached : (cached.emotion || 'neutral');
     }
-
-    // SEQUENTIAL PRE-FETCH: Fetch the next chunk's emotion while current one plays
-    if (fallbackQueue.length > 0) {
-        const nextItem = fallbackQueue[0];
-        if (!nextItem.emotionPromise && nextItem.getEmotion) {
-            nextItem.emotionPromise = nextItem.getEmotion();
-        }
-    }
+    updateReaderMood(emotion);
 
     const targetLang = getSelectedLanguage() || 'en-US';
     const shortLang = targetLang.split("-")[0].toLowerCase();
@@ -3932,6 +4748,17 @@ function playNextFallback(startPaused = false, isRetry = false) {
         } else {
             utterance.pitch = basePitch;
             utterance.rate = 1.0 * currentSpeed;
+        }
+
+        // Apply dynamic rate to Edge-TTS fallback audio
+        if (currentFallbackAudio && !window.speechSynthesis.speaking) {
+            if (emotion === 'happy') currentFallbackAudio.playbackRate = 1.05 * currentSpeed;
+            else if (emotion === 'excited') currentFallbackAudio.playbackRate = 1.15 * currentSpeed;
+            else if (emotion === 'sad') currentFallbackAudio.playbackRate = 0.85 * currentSpeed;
+            else if (emotion === 'angry') currentFallbackAudio.playbackRate = 1.1 * currentSpeed;
+            else if (emotion === 'fear') currentFallbackAudio.playbackRate = 0.9 * currentSpeed;
+            else if (emotion === 'peaceful') currentFallbackAudio.playbackRate = 0.8 * currentSpeed;
+            else currentFallbackAudio.playbackRate = 1.0 * currentSpeed;
         }
 
         let utteranceStartTime = Date.now();
@@ -4029,7 +4856,9 @@ function playNextFallback(startPaused = false, isRetry = false) {
         const syncHighlight = () => {
             if (jobId !== currentNarrationJobId || !isReadingAloud || isPaused || !currentFallbackAudio) return;
             let duration = audio.duration;
-            if (isNaN(duration) || duration === Infinity || duration <= 0) duration = totalChunkLength / 14; 
+            // More conservative duration estimation for non-English (usually slower)
+            const charsPerSec = (langSelect.value === 'en' || !langSelect.value) ? 14 : 9;
+            if (isNaN(duration) || duration === Infinity || duration <= 0) duration = totalChunkLength / charsPerSec; 
             if (audio.currentTime > 0) {
                 let progress = audio.currentTime / duration;
                 if (progress > 1.0) progress = 1.0;
@@ -4044,6 +4873,12 @@ function playNextFallback(startPaused = false, isRetry = false) {
                     lastEmotionItemProgress = foundWord.startOffset - item.offset;
                     currentAbsoluteCharIndex = foundWord.startOffset;
                     highlightReadingWord(foundWord.startOffset, foundWord.length, item.offset, item.text.length);
+                    
+                    const progEl = document.getElementById("readingProgress");
+                    if (progEl && globalReadingText && globalReadingText.length > 0) {
+                        const prog = Math.round((currentAbsoluteCharIndex / globalReadingText.length) * 100);
+                        progEl.innerText = `| ${prog}% Read`;
+                    }
                 }
             }
             requestAnimationFrame(syncHighlight);
@@ -4051,25 +4886,30 @@ function playNextFallback(startPaused = false, isRetry = false) {
 
         audio.onplay = () => {
             if (jobId !== currentNarrationJobId) return;
+            if (playPauseBtn) playPauseBtn.innerHTML = "⏸ <span>Pause</span>";
             requestAnimationFrame(syncHighlight);
         };
 
         audio.onended = () => {
             if (jobId !== currentNarrationJobId) return;
+            // SYNC LOCK: Force progress to the end of this sentence to prevent re-reading on sync/drift
+            currentAbsoluteCharIndex = item.offset + item.text.length;
             removeReadingMarks();
             if (isReadingAloud && !isPaused) playNextFallback();
         };
 
         audio.onerror = () => {
-            if (jobId === currentNarrationJobId) setTimeout(() => playNextFallback(false, false), 500);
+            if (jobId === currentNarrationJobId) {
+                if (playPauseBtn) playPauseBtn.innerHTML = "▶ <span>Retry</span>";
+                setTimeout(() => playNextFallback(false, false), 500);
+            }
         };
 
-        // PRE-FETCH ENGINE: Fetch next 3 sentences in the background
-        const PREFETCH_LOOKAHEAD = 3;
+        // PRE-FETCH ENGINE: Fetch next 4 sentences in the background
+        const PREFETCH_LOOKAHEAD = 4;
         for (let i = 0; i < Math.min(PREFETCH_LOOKAHEAD, fallbackQueue.length); i++) {
             const nextItem = fallbackQueue[i];
             if (!nextItem.audioObj) {
-                // Initialize background fetch
                 nextItem.audioObj = new Audio(nextItem.url);
                 nextItem.audioObj.preload = "auto";
                 nextItem.audioObj.load();
@@ -4077,6 +4917,15 @@ function playNextFallback(startPaused = false, isRetry = false) {
         }
 
         audio.play().catch(e => {
+            // AbortError is common if play() was interrupted by a pause() or state-sync; 
+            // we should not skip the sentence in this case, just retry that exact sentence.
+            if (e.name === 'AbortError') {
+                console.warn("Playback aborted by browser/sync, retrying...", item.text.substring(0, 20));
+                if (jobId === currentNarrationJobId) setTimeout(() => {
+                    if (isReadingAloud && !isPaused) playNextFallback(false, true); 
+                }, 100);
+                return;
+            }
             console.error("Playback failed:", e);
             if (jobId === currentNarrationJobId) setTimeout(() => playNextFallback(false, false), 500);
         });
@@ -4116,6 +4965,9 @@ function updateReaderMood(emotion) {
 async function closeBookAction() {
     if (!currentBookId) return;
 
+    // Stop and save final pulse if needed
+    stopReadingPulse();
+
     // Ask for bookmark if progress made
     if (currentAbsoluteCharIndex > 0) {
         showConfirmModal(
@@ -4147,6 +4999,7 @@ async function executeClosingSequence() {
     }
 
     window.speechSynthesis.cancel();
+    stopStudyTimer();
     if (currentFallbackAudio) {
         currentFallbackAudio.pause();
         currentFallbackAudio = null;
@@ -4181,13 +5034,24 @@ async function executeClosingSequence() {
     }
 
     document.getElementById("bookTitle").innerText = "Select a book from your library";
+    
+    // Clear sidebar highlights and button states
+    document.querySelectorAll("#booklist tr").forEach(row => {
+        row.classList.remove("active-book-row");
+        const openBtn = row.querySelector(".btn-open");
+        if (openBtn && !openBtn.classList.contains("processing-btn")) {
+            openBtn.classList.remove("active-pulse");
+            openBtn.innerText = "Open";
+        }
+    });
+
     currentBookId = null;
     currentBookText = "";
     totalPages = 0;
     updatePagesList();
 }
 
-function scrollToIndex(index) {
+function scrollToIndex(index, behavior = 'smooth') {
     let reader = document.getElementById("reader");
     if (!reader) return;
 
@@ -4224,11 +5088,11 @@ function scrollToIndex(index) {
             
             reader.scrollTo({
                 top: targetY,
-                behavior: 'smooth'
+                behavior: behavior
             });
         } catch (e) {
             // Fallback to simple scrollIntoView if range fails
-            targetNode.parentNode.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            targetNode.parentNode.scrollIntoView({ behavior: behavior, block: 'center' });
         }
     }
 }
@@ -4419,9 +5283,22 @@ function applyZoom() {
 
 
 window.onload = () => {
-    loadBooks();
+    loadBooks().then(() => {
+        // Auto-Open Deep Link Logic: Handle books shared via ?open=ID
+        const urlParams = new URLSearchParams(window.location.search);
+        const openId = urlParams.get('open');
+        if (openId && activeBooksList) {
+            const bookToOpen = activeBooksList.find(b => b[0] == openId);
+            if (bookToOpen) {
+                 openBook(bookToOpen[0], bookToOpen[1]);
+                 // Strip param after opening to avoid repeat opens on refresh
+                 window.history.replaceState({}, document.title, window.location.pathname);
+            }
+        }
+    });
     initDragging();
 };
+
 
 function initDragging() {
     let reader = document.getElementById("reader");
@@ -4430,7 +5307,8 @@ function initDragging() {
     let startY;
     let scrollLeft;
     let scrollTop;
-    let moved = false; // Track if mouse actually moved (to distinguish from clicks)
+    let moved = false; 
+    window.isRecentlyPanned = false; 
 
     function updatePannableState() {
         // We no longer add a grab cursor by default to preserve text selection.
@@ -4464,6 +5342,12 @@ function initDragging() {
     });
 
     reader.addEventListener('mouseup', () => {
+        if (isDown && moved) {
+            // Mark that we just finished a drag so the 'click' event can be ignored
+            window.isRecentlyPanned = true;
+            // Safety timeout to clear it just in case the click event doesn't fire as expected
+            setTimeout(() => { window.isRecentlyPanned = false; }, 100);
+        }
         isDown = false;
         moved = false;
         reader.classList.remove('grabbing');
@@ -4577,21 +5461,30 @@ function explainImage(imgElement) {
             src: src,
             book_id: currentBookId,
             context: contextText
-        })
+        }),
+        signal: AbortSignal.timeout(45000) // Increase timeout to 45s for heavy OCR/Vision tasks
     })
         .then(res => res.json())
         .then(data => {
             if (data.explanation) {
                 typeWriterEffect(textEl, data.explanation);
             } else if (data.error) {
-                textEl.innerHTML = `<span style="color: #ef4444; font-weight: 500;">❌ Analysis Failed: ${data.error}</span>`;
+                if (data.error.includes("downloading") || data.error.includes("loading")) {
+                    textEl.innerHTML = `<span style="color: var(--primary); font-weight: 500;">🧠 Vision Engine is warming up...</span><br><p style="font-size: 0.9rem; opacity: 0.7; margin-top: 8px;">The AI model is being prepared for its first run. This usually takes 30-60 seconds. Please try again in a moment.</p>`;
+                } else {
+                    textEl.innerHTML = `<span style="color: #ef4444; font-weight: 500;">❌ Analysis Failed: ${data.error}</span>`;
+                }
             } else {
                 textEl.innerText = "The AI couldn't formulate a clear explanation for this image. Try another section.";
             }
         })
         .catch(err => {
             console.error("Explain image error:", err);
-            textEl.innerHTML = `<span style="color: #ef4444; font-weight: 500;">🔌 Network Error: Check your server connection.</span>`;
+            if (err.name === 'TimeoutError') {
+                textEl.innerHTML = `<span style="color: #f59e0b; font-weight: 500;">⏳ Connection Timed Out.</span><br><p style="font-size: 0.85rem; opacity: 0.7; margin-top: 5px;">Analyzing complex visuals can take a moment. If the image is very large, try a smaller section.</p>`;
+            } else {
+                textEl.innerHTML = `<span style="color: #ef4444; font-weight: 500;">🔌 Connection to Vision Engine lost.</span><br><p style="font-size: 0.85rem; opacity: 0.7; margin-top: 5px;">Check if the server is running or try refreshing the page.</p>`;
+            }
         });
 }
 
@@ -4786,13 +5679,48 @@ async function processVoiceCommand(command) {
     if (command.includes("speed")) {
         const match = command.match(/speed(?:(?:\s+to)?\s+)?(\d+(?:\.\d+)?)/i);
         if (match && match[1]) {
-            let targetSpeed = parseFloat(match[1]);
-            let delta = targetSpeed - currentSpeed;
-            changeSpeed(delta);
-            const speedMsg = `Speed set to ${currentSpeed.toFixed(1)}x.`;
-            feedback.innerText = speedMsg;
-            speakAIResponse(speedMsg);
-            return;
+            const newSpeed = parseFloat(match[1]);
+            if (newSpeed >= 0.5 && newSpeed <= 3.0) {
+                playbackRate = newSpeed;
+                const speedInput = document.getElementById('speedRange');
+                if (speedInput) speedInput.value = newSpeed;
+                feedback.innerText = `Setting speed to ${newSpeed}x...`;
+                speakAIResponse(`Speed set to ${newSpeed} times.`);
+                return;
+            }
+        }
+    }
+
+    // 6. LANGUAGE CONTROL (Translation)
+    const langMap = {
+        "tamil": "ta",
+        "hindi": "hi",
+        "english": "en",
+        "original": "orig",
+        "french": "fr",
+        "german": "de",
+        "spanish": "es",
+        "kannada": "kn",
+        "telugu": "te",
+        "malayalam": "ml"
+    };
+
+    const lowerCommand = command.toLowerCase();
+    for (let langName in langMap) {
+        if (lowerCommand.includes(langName) || (lowerCommand.includes("translate to") && lowerCommand.includes(langName))) {
+            const langCode = langMap[langName];
+            const select = document.getElementById('langSelect');
+            if (select) {
+                select.value = langCode;
+                feedback.innerText = `Switching language to ${langName.charAt(0).toUpperCase() + langName.slice(1)}...`;
+                speakAIResponse(`Switching language to ${langName}.`);
+                
+                // Trigger translation
+                if (typeof translateBook === 'function') {
+                    translateBook();
+                }
+                return;
+            }
         }
     }
     
@@ -4868,6 +5796,54 @@ async function processVoiceCommand(command) {
             speakAIResponse("Okay, pausing the reading.");
         }
         return;
+    }
+
+    // 9. LANGUAGE CONTROL (Tamil, Hindi, English, etc.)
+    const languages = {
+        "tamil": "ta",
+        "hindi": "hi",
+        "english": "en",
+        "bengali": "bn",
+        "telugu": "te",
+        "marathi": "mr",
+        "urdu": "ur",
+        "gujarati": "gu",
+        "kannada": "kn",
+        "malayalam": "ml",
+        "punjabi": "pa",
+        "odia": "or",
+        "korean": "ko",
+        "thai": "th",
+        "chinese": "zh-CN",
+        "japanese": "ja",
+        "french": "fr",
+        "german": "de",
+        "spanish": "es",
+        "original": "orig",
+        "default": "orig"
+    };
+
+    for (let langName in languages) {
+        if (command.includes(langName)) {
+            const langCode = languages[langName];
+            const langSelect = document.getElementById('langSelect');
+            if (langSelect) {
+                langSelect.value = langCode;
+                const capitalizedLang = langName.charAt(0).toUpperCase() + langName.slice(1);
+                feedback.innerText = `Switching to ${capitalizedLang}...`;
+                speakAIResponse(`Switching language to ${langName}.`);
+                
+                // 1. Trigger Book Translation
+                translateBook(); 
+
+                // 2. Refresh open tools if they are visible
+                if (document.getElementById('notebookModal')?.style.display === 'flex') renderNotebook();
+                if (document.getElementById('revisionModal')?.style.display === 'flex') generateRevision();
+                if (document.getElementById('quizModal')?.style.display === 'flex') generateQuiz();
+                
+                return;
+            }
+        }
     }
 
     // 9. EXIT CONTROL
@@ -4999,17 +5975,28 @@ async function explainImage(element) {
                 src: img.getAttribute('src'),
                 ocr_text: ocrText,
                 book_id: currentBookId
-            })
+            }),
+            signal: AbortSignal.timeout(45000)
         });
         
         const data = await res.json();
         if (data.explanation && textOutput) {
             textOutput.innerText = data.explanation;
         } else if (data.error && textOutput) {
-            textOutput.innerText = "❌ Analysis failed: " + data.error;
+            if (data.error.includes("downloading") || data.error.includes("loading")) {
+                 textOutput.innerText = "🧠 Vision Engine is warming up. Please try again in a moment.";
+            } else {
+                 textOutput.innerText = "❌ Analysis failed: " + data.error;
+            }
         }
     } catch (e) {
-        if (textOutput) textOutput.innerText = "❌ Connection to Vision Engine lost.";
+        if (textOutput) {
+            if (e.name === 'TimeoutError') {
+                textOutput.innerText = "⏳ Connection Timed Out. High-resolution analysis is taking longer than expected.";
+            } else {
+                textOutput.innerText = "❌ Connection to Vision Engine lost.";
+            }
+        }
     }
 }
 
@@ -5190,51 +6177,66 @@ async function openBookmarks() {
 }
 
 function jumpToBookmark(page, scrollY, isAuto = false, charIndex = 0) {
-    if (isAuto && isReadingAloud) return; // DON'T HIJACK SCREEN ON STARTING BOOK
+    if (isAuto && isReadingAloud) return; 
     closeBookmarks();
     
-    // If we have a precise charIndex (non-zero), use it for scrolling
-    if (charIndex > 0) {
-        scrollToIndex(charIndex);
-        if (!isAuto) {
-            showUploadToast(`📍 Resumed @ Exact Location`, "success");
-        }
+    const targetId = `pdf-page-${page - 1}`;
+    const targetPage = document.getElementById(targetId);
+
+    // If the page is NOT yet rendered (Lazy Loading), we need a fallback
+    if (!targetPage && page > 0) {
+        console.warn(`📍 Target page ${page} not in DOM yet. Forcing jump to page.`);
+        // Note: In this version, we wait for renderBatch to hit the page.
+        // We set it as pending so the auto-resume logic picks it up.
+        window._pendingBookmarkResume = { page, scrollY, charIndex };
+        showUploadToast(`⏳ Navigating to Page ${page}...`, "info");
         return;
     }
 
-    // Fallback: Jump to page (sync)
-    jumpToPage(page);
-    
-    // 2. Adjust scrolling
-    setTimeout(() => {
-        const reader = document.getElementById('reader');
-        if (reader) {
-            reader.scrollTo({
-                top: scrollY,
-                behavior: isAuto ? 'auto' : 'smooth'
-            });
-            if (!isAuto) {
-                showUploadToast(`📍 Resumed at Page ${page}`, "success");
-            }
+    // Precision character-based jumping (Center the specific text)
+    if (charIndex > 0) {
+        scrollToIndex(charIndex, isAuto ? 'auto' : 'smooth');
+        if (!isAuto) {
+            showUploadToast(`📍 Exact Location Reached`, "success");
         }
-    }, isAuto ? 100 : 600);
+        // Ensure icon is visible immediately
+        setTimeout(renderBookmarkIcons, 100);
+        return;
+    }
+
+    // Page-based jumping
+    if (targetPage) {
+        targetPage.scrollIntoView({ behavior: isAuto ? 'auto' : 'smooth', block: 'start' });
+        if (scrollY > 0) {
+            const reader = document.getElementById('reader');
+            // If scrollIntoView isn't enough (e.g. we want specific Y inside the page)
+            setTimeout(() => {
+                reader.scrollTo({ top: scrollY, behavior: isAuto ? 'auto' : 'smooth' });
+            }, 100);
+        }
+        if (!isAuto) {
+            showUploadToast(`📍 Page ${page} reached`, "success");
+        }
+        // Ensure icons are visible
+        setTimeout(renderBookmarkIcons, 100);
+    }
 }
 
 function renderBookmarkIcons() {
     const reader = document.getElementById('reader');
     if (!reader || !currentBookId) return;
 
-    // 1. CLEAR existing icons BEFORE rebuilding the map to ensure character accuracy
-    reader.querySelectorAll('.bookmark-symbol').forEach(el => el.remove());
-    if (bookmarkHighlight) bookmarkHighlight.clear();
-
-    // 2. FORCE REBUILD MAP: Now that icons are gone, the offsets will be perfect
-    rebuildReadingNodeMap();
-
     fetch(`/bookmarks/${currentBookId}`)
         .then(r => r.json())
         .then(bookmarks => {
+            // 1. CLEAR existing icons ONLY AFTER we have new data to show
+            reader.querySelectorAll('.bookmark-symbol').forEach(el => el.remove());
+            if (bookmarkHighlight) bookmarkHighlight.clear();
+
             if (!bookmarks || bookmarks.length === 0) return;
+
+            // 2. FORCE REBUILD MAP: Now that icons are gone, the offsets will be perfect
+            rebuildReadingNodeMap();
 
             // Use character index for precision symbol placement
             bookmarks.forEach(bm => {
@@ -5242,6 +6244,9 @@ function renderBookmarkIcons() {
                     placeSymbolAtIndex(bm.char_index, bm.id, bm.node_index, bm.node_offset);
                 }
             });
+        })
+        .catch(err => {
+            console.error("Failed to fetch bookmarks for rendering:", err);
         });
 }
 
@@ -5256,6 +6261,9 @@ function placeSymbolAtIndex(charIndex, id, nodeIndex = -1, nodeOffset = 0) {
     // We only use node-relative mapping as a rescue for translated docs where offsets shifted.
     const isTranslated = typeof window.currentTargetLang !== 'undefined' && window.currentTargetLang !== 'orig';
     
+    let node;
+    let offsetInNode;
+
     if (!isTranslated || nodeIndex < 0 || nodeIndex >= globalTextNodes.length) {
         // Absolute Mapping: Best for 'orig' language and for recovery
         let bestIdx = -1;
@@ -5441,21 +6449,376 @@ function rebuildRemainingFallbackQueue() {
 }
 
 // --- MOBILE UI HELPERS ---
-function toggleSidebar() {
+function toggleSidebar(forceClose = false) {
     const sidebar = document.getElementById('sidebar');
-    const appLayout = document.getElementById('appLayout');
-    if (sidebar) {
+    if (!sidebar) return;
+    
+    if (forceClose === true) {
+        sidebar.classList.remove('active');
+    } else {
         sidebar.classList.toggle('active');
     }
 }
 
-// Auto-close sidebar on mobile when a book is opened
-const originalOpenBook = openBook;
-window.openBook = async function(bookId, bookName) {
-    if (window.innerWidth < 992) {
-        toggleSidebar(); 
+// Global click listener for sidebar interaction (auto-close on mobile)
+document.addEventListener('DOMContentLoaded', () => {
+    const sidebar = document.getElementById('sidebar');
+    if (sidebar) {
+        sidebar.addEventListener('click', (e) => {
+            // Check if we are on a mobile/tablet screen size
+            if (window.innerWidth < 992) {
+                // List of elements that should trigger a sidebar close
+                const isInteractive = e.target.closest('button') || 
+                                    e.target.closest('.profile-trigger') || 
+                                    e.target.closest('tr') ||
+                                    e.target.closest('.btn-mobile-action');
+                
+                // Don't close if clicking the search input or specific toggle buttons
+                const isSearchInput = e.target.tagName === 'INPUT';
+                const isMenuBtn = e.target.closest('.mobile-menu-btn');
+                
+                if (isInteractive && !isSearchInput && !isMenuBtn) {
+                    // Small timeout to allow the click action to register before the UI shifts
+                    setTimeout(() => toggleSidebar(true), 150);
+                }
+            }
+        });
     }
-    return originalOpenBook(bookId, bookName);
-};
+});
 
 
+
+function toggleProfileModal() {
+    const modal = document.getElementById('profileModal');
+    if (modal) {
+        const isOpening = modal.style.display !== 'flex';
+        modal.style.display = isOpening ? 'flex' : 'none';
+        
+        if (isOpening) {
+            // Initial state when opening
+            document.getElementById('removePhotoFlag').value = "0";
+        } else {
+            // Modal is closing (Dismiss clicked or Saved)
+            // Reset preview to user's CURRENT profile image (from the sidebar icon)
+            const sidebarPic = document.querySelector('#userProfileIcon img');
+            if (sidebarPic) {
+                document.getElementById('profilePreview').src = sidebarPic.src;
+            }
+            // Clear inputs
+            document.getElementById('profileUpload').value = "";
+            document.getElementById('removePhotoFlag').value = "0";
+        }
+    }
+}
+
+
+function previewProfileImage(input) {
+    if (input.files && input.files[0]) {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            document.getElementById('profilePreview').src = e.target.result;
+            // If they chose a new photo, they definitely don't want to "remove" it anymore
+            document.getElementById('removePhotoFlag').value = "0";
+        };
+        reader.readAsDataURL(input.files[0]);
+    }
+}
+
+function removeProfilePhoto() {
+    // 1. Update preview to default placeholder or avatar API
+    const userFullName = document.getElementById('displayFullName').innerText;
+    document.getElementById('profilePreview').src = `https://ui-avatars.com/api/?name=${encodeURIComponent(userFullName)}&background=6366f1&color=fff`;
+    
+    // 2. Set the removal flag for the backend
+    document.getElementById('removePhotoFlag').value = "1";
+    
+    // 3. Clear any pending file upload
+    document.getElementById('profileUpload').value = "";
+}
+
+function createReadingRoom() {
+    if (!currentBookId) {
+        showUploadToast("Open a book first to create a room!", "error");
+        return;
+    }
+    if (!currentRoom && socket) {
+        currentRoom = `room_${currentBookId}_${Math.random().toString(36).substring(7)}`;
+        socket.emit('join_room', { room: currentRoom });
+    }
+    const inviteLink = `${window.location.origin}/?id=${currentBookId}&room=${currentRoom}`;
+    document.getElementById('roomLink').innerText = inviteLink;
+    document.getElementById('roomModal').style.display = 'flex';
+    
+    // Check for Native Share API support (Mobile/Modern Browsers)
+    if (navigator.share) {
+        document.getElementById('webShareBtn').style.display = 'block';
+    }
+}
+
+function copyRoomLink() {
+    const link = document.getElementById('roomLink').innerText;
+    navigator.clipboard.writeText(link).then(() => {
+        showUploadToast("📋 Invite link copied!", "success");
+    });
+}
+
+async function shareRoomLink() {
+    const link = document.getElementById('roomLink').innerText;
+    const shareData = {
+        title: 'AI Book Reader - Join my Reading Room!',
+        text: 'Join me to read together in real-time!',
+        url: link
+    };
+    try {
+        await navigator.share(shareData);
+        showUploadToast("📤 Shared successfully!", "success");
+    } catch (err) {
+        console.log('Share failed:', err);
+        copyRoomLink(); // Fallback to copy
+    }
+}
+
+function closeRoomModal() {
+    document.getElementById('roomModal').style.display = 'none';
+}
+
+function sendDirectInvite() {
+    const identity = document.getElementById('inviteIdentity').value;
+    if (!identity) {
+        showUploadToast("Please enter a username or email", "error");
+        return;
+    }
+    fetch('/send_invite', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({receiver_identity: identity, book_id: currentBookId})
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) showUploadToast(data.error, "error");
+        else {
+            showUploadToast(data.message || "Invitation sent!", "success");
+            document.getElementById('inviteIdentity').value = "";
+        }
+    });
+}
+
+function showInvitationsModal() {
+    document.getElementById('invitationsModal').style.display = 'flex';
+    loadInvitations();
+}
+
+function hideInvitationsModal() {
+    document.getElementById('invitationsModal').style.display = 'none';
+}
+
+function loadInvitations() {
+    fetch('/get_invites')
+    .then(r => r.json())
+    .then(data => {
+        const container = document.getElementById('invitationsList');
+        if (data.length === 0) {
+            container.innerHTML = '<p style="text-align: center; color: var(--text-light); font-style: italic; opacity: 0.7;">No pending requests.</p>';
+            document.getElementById('inviteCountBadge').style.display = 'none';
+            return;
+        }
+        
+        document.getElementById('inviteCountBadge').innerText = data.length;
+        document.getElementById('inviteCountBadge').style.display = 'flex';
+        
+        container.innerHTML = data.map(inv => {
+            let notice = inv.already_has ? `
+                <div style="font-size: 0.75rem; color: #ff9f43; background: rgba(255, 159, 67, 0.1); padding: 8px 12px; border-radius: 10px; margin-bottom: 15px; border: 1px solid rgba(255, 159, 67, 0.2); line-height: 1.3; text-align: left;">
+                    💡 <strong>Note:</strong> You already have this book in your library. Accepting will add a collaborative copy.
+                </div>` : '';
+            
+            return `
+            <div class="glass-panel" style="padding: 18px; border-radius: 20px; border: 1px solid var(--glass-border); background: rgba(255,255,255,0.03);">
+                <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px;">
+                    <div style="width: 40px; height: 40px; border-radius: 50%; background: var(--primary); display: flex; align-items: center; justify-content: center; font-weight: 800; color: white;">
+                        ${inv.sender[0].toUpperCase()}
+                    </div>
+                    <div style="text-align: left;">
+                        <p style="margin: 0; color: var(--text-white); font-weight: 700; font-size: 0.95rem;">${inv.sender_name}</p>
+                        <p style="margin: 0; color: var(--text-light); font-size: 0.8rem;">@${inv.sender}</p>
+                    </div>
+                </div>
+                <p style="text-align: left; color: var(--text-light); font-size: 0.9rem; margin-bottom: 18px; line-height: 1.4;">
+                    Wants to read <strong style="color: var(--primary);">"${inv.book_name}"</strong> together with you.
+                </p>
+                ${notice}
+                <div style="display: flex; gap: 10px;">
+                    <button class="btn-primary" onclick="respondToInvite(${inv.id}, 'accept')" style="flex: 1; padding: 10px; font-size: 0.85rem;">Accept & Join</button>
+                    <button class="btn-secondary" onclick="respondToInvite(${inv.id}, 'reject')" style="flex: 1; padding: 10px; font-size: 0.85rem; background: rgba(239, 68, 68, 0.1); color: #ef4444; border-color: rgba(239, 68, 68, 0.2);">Decline</button>
+                </div>
+            </div>
+        `; }).join('');
+    });
+}
+
+function triggerDashboardUpload() {
+    const input = document.getElementById('dashboardFileInput');
+    if (input) input.click();
+}
+
+async function uploadDashboardBook() {
+    const input = document.getElementById('dashboardFileInput');
+    if (!input || !input.files || input.files.length === 0) return;
+
+    // Use a temporary swap to reuse the existing upload() function's logic
+    const originalFileInput = document.getElementById('file');
+    if (originalFileInput) {
+        // We can't easily swap files due to security, so we'll just implement a direct call
+        const file = input.files[0];
+        const formData = new FormData();
+        formData.append("file", file);
+
+        showUploadToast(`🚀 Uploading ${file.name}...`, "info");
+        
+        try {
+            const res = await fetch("/upload", {
+                method: "POST",
+                body: formData
+            });
+            const data = await res.json();
+            if (data.error) {
+                showUploadToast(data.error, "error");
+            } else {
+                showUploadToast("✅ Book added to library!", "success");
+                loadBooks(); // Refresh the list
+                input.value = ""; // Reset
+            }
+        } catch (err) {
+            showUploadToast("Connection failed", "error");
+        }
+    } else {
+        // Fallback or handle if the main file input is missing (unlikely)
+        upload(); 
+    }
+}
+
+function filterDashboardMobile(val) {
+    const desktopSearch = document.getElementById('dashboardSearch');
+    if (desktopSearch) desktopSearch.value = val;
+    filterDashboard();
+}
+
+function respondToInvite(inviteId, action) {
+    fetch('/respond_invite', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({invite_id: inviteId, action: action})
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (action === 'accept') {
+            showUploadToast("Welcome to the Reading Room!", "success");
+            loadInvitations();
+            loadBooks(); // Refresh library
+        } else {
+            showUploadToast("Request declined", "info");
+            loadInvitations();
+        }
+    });
+}
+
+function loadCollaborations() {
+    fetch('/get_collaborations')
+    .then(r => r.json())
+    .then(data => {
+        const container = document.getElementById('activeCollabsList');
+        if (!container) return;
+        container.innerHTML = data.map(c => `
+            <div class="indicator-badge" style="background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); color: #10b981; padding: 6px 12px; border-radius: 10px; font-size: 0.8rem; display: flex; align-items: center; gap: 8px;">
+                👥 ${c.partner} (${c.role})
+                <button onclick="disconnectCollaboration(${c.id})" style="background: none; border: none; color: #ef4444; cursor: pointer; padding: 0; font-size: 1rem; display: flex; align-items: center;" title="Stop Collaborating">&times;</button>
+            </div>
+        `).join('');
+    });
+}
+
+function disconnectCollaboration(collabId) {
+    showConfirmModal(
+        "End Collaboration?",
+        "This will disconnect the shared reading link. Both you and your partner will keep your own personal copies of the book and your individual progress.",
+        "End Session",
+        "Keep Reading",
+        null,
+        () => {
+            fetch('/disconnect_collaboration', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({collab_id: collabId})
+            })
+            .then(r => r.json())
+            .then(() => {
+                showUploadToast("📍 Collaboration ended. Both users kept personal copies.", "info");
+                hideCollabsModal(); // Auto-close the list for a cleaner flow
+                loadBooks();
+            });
+        },
+        null,
+        null,
+        true
+    );
+}
+
+function showCollabsModal() {
+    document.getElementById('collabsModal').style.display = 'flex';
+    loadCollaborations();
+}
+
+function hideCollabsModal() {
+    document.getElementById('collabsModal').style.display = 'none';
+}
+
+function loadCollaborations() {
+    fetch('/get_collaborations')
+    .then(r => r.json())
+    .then(data => {
+        const container = document.getElementById('activeCollabsListFull');
+        if (!container) return;
+        if (data.length === 0) {
+            container.innerHTML = '<p style="text-align: center; color: var(--text-light); font-style: italic; opacity: 0.7;">No active collaborations.</p>';
+            return;
+        }
+        container.innerHTML = data.map(c => `
+            <div class="glass-panel" style="padding: 20px; border-radius: 20px; border: 1px solid var(--glass-border); background: rgba(255,255,255,0.03); display: flex; align-items: center; justify-content: space-between;">
+                <div style="text-align: left;">
+                    <p style="margin: 0; color: var(--text-white); font-weight: 700; font-size: 1rem;">${c.book_name}</p>
+                    <p style="margin: 4px 0 0 0; color: var(--text-light); font-size: 0.85rem;">
+                        Reading with <strong style="color: var(--primary);">@${c.partner}</strong> 
+                        <span style="margin-left: 10px; font-size: 0.75rem; background: rgba(99,102,241,0.1); padding: 2px 8px; border-radius: 6px; color: var(--primary); font-weight: 800; border: 1px solid rgba(99,102,241,0.2);">
+                            ${c.role === 'Owner' ? 'You Shared' : 'Shared with You'}
+                        </span>
+                    </p>
+                </div>
+                <button onclick="disconnectCollaboration(${c.id})" style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.2); color: #ef4444; cursor: pointer; padding: 8px 15px; border-radius: 10px; font-size: 0.85rem; font-weight: 600; transition: all 0.2s;">
+                    Stop
+                </button>
+            </div>
+        `).join('');
+    });
+}
+
+
+function checkForInvites() {
+    fetch('/get_invites').then(r => r.json()).then(data => {
+        const badge = document.getElementById('inviteCountBadge');
+        if (!badge) return;
+        if (data.length > 0) {
+            badge.innerText = data.length;
+            badge.style.display = 'flex';
+        } else {
+            badge.style.display = 'none';
+        }
+    });
+}
+
+// Auto-check for invites every 15 seconds if dashboard is open
+setInterval(() => {
+    const dashboard = document.getElementById('dashboardOverlay');
+    if (dashboard && dashboard.style.display !== 'none') {
+        checkForInvites();
+    }
+}, 15000);
