@@ -33,7 +33,18 @@ async function translateText(text, sourceLang, targetLang, attempt = 1) {
 
         const data = await response.json();
         if (data && data[0] && data[0][0]) {
-            return data[0].map(segment => segment[0]).join('');
+            let result = data[0].map(segment => segment[0]).join('');
+            
+            // 🚀 STUBBORN WORD FIX: If the translator returned the exact same English word 
+            // but we were translating to a non-English language, try forcing sl=en.
+            // This catches words like "venture" or "illustrated" that Google skips in 'auto' mode.
+            if (result.trim().toLowerCase() === text.trim().toLowerCase() && 
+                targetLang !== 'en' && 
+                /^[a-zA-Z\s.,!?-]+$/.test(text) && 
+                sl === 'auto') {
+                return translateText(text, 'en', targetLang, attempt + 1);
+            }
+            return result;
         }
     } catch (e) {
         if (attempt < 3) {
@@ -61,7 +72,7 @@ const server = http.createServer(async (req, res) => {
                 // exceed the translation API payload limits while maximizing efficiency.
                 const results = [];
                 const MAX_CHAR_PER_BATCH = 4500; // Optimal balance for Google Translate API limits
-                const PARALLE_BATCHES = 4; // Faster concurrency window
+                const PARALLE_BATCHES = 8; // Double concurrency for ultra-fast documents
                 const TAG = " [[~]] ";
 
                 const processBigBatch = async (batch) => {

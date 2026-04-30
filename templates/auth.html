@@ -23,6 +23,7 @@
             --text-dim: #94a3b8;
             --input-bg: rgba(255, 255, 255, 0.05);
             --hero-overlay: rgba(15, 23, 42, 0.6);
+            --auth-bg: url('/static/images/auth_dark.png');
         }
 
         [data-theme="light"] {
@@ -34,6 +35,7 @@
             --text-dim: #64748b;
             --input-bg: rgba(0, 0, 0, 0.03);
             --hero-overlay: rgba(255, 255, 255, 0.2);
+            --auth-bg: url('/static/images/auth_light.png');
         }
 
         body,
@@ -43,9 +45,9 @@
             height: 100vh;
             width: 100vw;
             font-family: 'Outfit', sans-serif;
-            background: url('/static/images/auth_hero.png') center/cover no-repeat fixed;
+            background: var(--auth-bg) center/cover no-repeat fixed;
             color: var(--text-main);
-            transition: background 0.3s, color 0.3s;
+            transition: background 0.8s ease-in-out, color 0.3s;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -57,7 +59,7 @@
             position: absolute;
             top: 0; left: 0; right: 0; bottom: 0;
             background: var(--hero-overlay);
-            backdrop-filter: blur(8px);
+            backdrop-filter: blur(2px); /* Reduced blur for clarity */
             z-index: 0;
         }
 
@@ -176,6 +178,7 @@
         .input-group input {
             width: 100%;
             padding: 14px 18px;
+            padding-right: 48px; /* Added padding to prevent text overlap with eye icon */
             background: var(--input-bg);
             border: 1px solid var(--glass-border);
             border-radius: 14px;
@@ -320,10 +323,64 @@
             -webkit-box-shadow: 0 0 0px 1000px var(--bg-card) inset;
             transition: background-color 5000s ease-in-out 0s;
         }
+
+        .password-toggle {
+            position: absolute;
+            right: 14px;
+            top: 40px; /* Aligned with the center of the input box */
+            cursor: pointer;
+            color: var(--text-dim);
+            transition: all 0.3s;
+            user-select: none;
+            z-index: 5;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0.6;
+        }
+
+        .password-toggle:hover {
+            color: var(--primary);
+            opacity: 1;
+        }
+
+        .password-toggle svg {
+            width: 20px;
+            height: 20px;
+        }
+
+        .forgot-link {
+            display: block;
+            margin-top: 10px;
+            text-align: right;
+            font-size: 0.85rem;
+            color: var(--text-dim);
+            text-decoration: none;
+            transition: color 0.3s;
+        }
+
+        .forgot-link:hover {
+            color: var(--primary);
+        }
+
+        .auth-back {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 20px;
+            color: var(--text-dim);
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 600;
+        }
+
+        .auth-back:hover {
+            color: var(--text-main);
+        }
     </style>
 </head>
 
-<body data-theme="dark" id="authContainer" data-error="{{ error or '' }}" data-success="{{ success or '' }}">
+<body data-theme="dark" id="authContainer" data-error="{{ error or '' }}" data-success="{{ success or '' }}" data-mode="{{ mode or '' }}">
     <button class="theme-toggle" onclick="toggleTheme()" title="Toggle Light/Dark Mode">
         <span id="themeIcon">🌙</span>
     </button>
@@ -363,8 +420,49 @@
                         <label for="login_pass">Password</label>
                         <input type="password" id="login_pass" name="password" placeholder="••••••••" required
                             autocomplete="current-password">
+                        <div class="password-toggle" onclick="togglePassword('login_pass')">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+                        </div>
+                        <a href="#" class="forgot-link" onclick="showAuth('forgot')">Forgot Password?</a>
                     </div>
                     <button type="submit" class="btn-primary">Unlock Library <span>→</span></button>
+                </form>
+
+                <!-- Forgot Password Form -->
+                <form id="forgotForm" action="/forgot_password" method="POST" style="display: none; max-width: 400px; margin: 0 auto;">
+                    <div class="auth-back" onclick="showAuth('login')">← Back to Login</div>
+                    <div class="input-group">
+                        <label for="forgot_email">Enter your Email</label>
+                        <input type="email" id="forgot_email" name="email" placeholder="john@example.com" required>
+                    </div>
+                    <p style="font-size: 0.85rem; color: var(--text-dim); margin-bottom: 20px;">
+                        We will verify your email before allowing you to reset your password.
+                    </p>
+                    <button type="submit" class="btn-primary">Verify Email <span>→</span></button>
+                </form>
+
+                <!-- Reset Password Form -->
+                <form id="resetForm" action="/reset_password" method="POST" style="display: none; max-width: 400px; margin: 0 auto;">
+                    <div class="auth-header" style="margin-bottom: 20px;">
+                        <h2 style="font-size: 1.5rem;">Reset Password</h2>
+                        <p style="font-size: 0.9rem;">Update credentials for {{ reset_email }}</p>
+                    </div>
+                    <input type="hidden" name="email" value="{{ reset_email }}">
+                    <div class="input-group">
+                        <label for="reset_pass">New Password</label>
+                        <input type="password" id="reset_pass" name="password" placeholder="New password" required>
+                        <div class="password-toggle" onclick="togglePassword('reset_pass')">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+                        </div>
+                    </div>
+                    <div class="input-group">
+                        <label for="reset_conf">Confirm Password</label>
+                        <input type="password" id="reset_conf" name="confirm_password" placeholder="Repeat password" required>
+                        <div class="password-toggle" onclick="togglePassword('reset_conf')">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn-primary">Update Password <span>✨</span></button>
                 </form>
 
                 <!-- Register Form -->
@@ -389,11 +487,17 @@
                             <label for="reg_pass">Password</label>
                             <input type="password" id="reg_pass" name="password" placeholder="Create password" required
                                 autocomplete="new-password">
+                            <div class="password-toggle" onclick="togglePassword('reg_pass')">
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+                            </div>
                         </div>
                         <div class="input-group">
                             <label for="reg_conf">Confirm Password</label>
                             <input type="password" id="reg_conf" name="confirm_password" placeholder="Repeat password"
                                 required autocomplete="new-password">
+                            <div class="password-toggle" onclick="togglePassword('reg_conf')">
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+                            </div>
                         </div>
                         <div class="full-width">
                             <button type="submit" class="btn-primary">Create Account <span>✨</span></button>
@@ -406,57 +510,99 @@
         function showAuth(type) {
             const loginForm = document.getElementById('loginForm');
             const registerForm = document.getElementById('registerForm');
+            const forgotForm = document.getElementById('forgotForm');
+            const resetForm = document.getElementById('resetForm');
+            
             const loginTab = document.getElementById('loginTab');
             const registerTab = document.getElementById('registerTab');
+            const tabsContainer = document.querySelector('.auth-tabs');
+            
             const authTitle = document.getElementById('authTitle');
             const authDesc = document.getElementById('authDesc');
 
+            // Hide everything first
+            loginForm.style.display = 'none';
+            registerForm.style.display = 'none';
+            forgotForm.style.display = 'none';
+            resetForm.style.display = 'none';
+            tabsContainer.style.display = 'flex';
+
             if (type === 'login') {
                 loginForm.style.display = 'block';
-                registerForm.style.display = 'none';
                 loginTab.classList.add('active');
                 registerTab.classList.remove('active');
                 authTitle.innerText = "Welcome Back";
                 authDesc.innerText = "Please enter your details to access your library.";
-            } else {
-                loginForm.style.display = 'none';
+            } else if (type === 'register') {
                 registerForm.style.display = 'block';
                 loginTab.classList.remove('active');
                 registerTab.classList.add('active');
                 authTitle.innerText = "Join the Library";
                 authDesc.innerText = "Start your journey today with our AI-powered reader.";
+            } else if (type === 'forgot') {
+                forgotForm.style.display = 'block';
+                tabsContainer.style.display = 'none';
+                authTitle.innerText = "Reset Password";
+                authDesc.innerText = "No worries, we'll help you get back in.";
+            } else if (type === 'reset') {
+                resetForm.style.display = 'block';
+                tabsContainer.style.display = 'none';
+                authTitle.innerText = "New Password";
+                authDesc.innerText = "Set a strong password to secure your account.";
+            }
+        }
+
+        function togglePassword(id) {
+            const input = document.getElementById(id);
+            const toggle = input.nextElementSibling;
+            
+            const eyeSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>`;
+            const eyeOffSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.52 13.52 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/></svg>`;
+
+            if (input.type === 'password') {
+                input.type = 'text';
+                toggle.innerHTML = eyeOffSVG;
+            } else {
+                input.type = 'password';
+                toggle.innerHTML = eyeSVG;
             }
         }
 
         function toggleTheme() {
-            const body = document.body;
+            const html = document.documentElement;
             const icon = document.getElementById('themeIcon');
-            const currentTheme = body.getAttribute('data-theme');
+            const currentTheme = html.getAttribute('data-theme');
 
-            if (currentTheme === 'dark') {
-                body.setAttribute('data-theme', 'light');
-                icon.innerText = '☀️';
-                localStorage.setItem('auth-theme', 'light');
-            } else {
-                body.setAttribute('data-theme', 'dark');
+            if (currentTheme === 'light') {
+                html.setAttribute('data-theme', 'dark');
                 icon.innerText = '🌙';
-                localStorage.setItem('auth-theme', 'dark');
+                localStorage.setItem('reader-theme', 'dark');
+            } else {
+                html.setAttribute('data-theme', 'light');
+                icon.innerText = '☀️';
+                localStorage.setItem('reader-theme', 'light');
             }
         }
 
         // Persistent theme
-        const savedTheme = localStorage.getItem('auth-theme');
-        if (savedTheme) {
-            document.body.setAttribute('data-theme', savedTheme);
-            document.getElementById('themeIcon').innerText = savedTheme === 'dark' ? '🌙' : '☀️';
-        }
+        (function initTheme() {
+            const savedTheme = localStorage.getItem('reader-theme') || 'dark';
+            document.documentElement.setAttribute('data-theme', savedTheme);
+            window.addEventListener('DOMContentLoaded', () => {
+                const icon = document.getElementById('themeIcon');
+                if (icon) icon.innerText = savedTheme === 'light' ? '☀️' : '🌙';
+            });
+        })();
 
-        // Auto-switch to register if there was a registration success/error that makes sense
+        // Auto-switch based on server state
         const authData = document.getElementById('authContainer');
         const serverError = authData.dataset.error;
         const serverSuccess = authData.dataset.success;
+        const serverMode = authData.dataset.mode;
 
-        if (serverError) {
+        if (serverMode === 'forgot') showAuth('forgot');
+        else if (serverMode === 'reset') showAuth('reset');
+        else if (serverError) {
             const errLow = serverError.toLowerCase();
             const isRegistrationError = errLow.includes("registration") ||
                 errLow.includes("username already exists") ||
@@ -467,7 +613,7 @@
             }
         }
 
-        if (serverSuccess) {
+        if (serverSuccess && !serverMode) {
             showAuth('login');
         }
     </script>

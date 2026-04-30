@@ -39,6 +39,7 @@ import subprocess
 import atexit
 import requests
 from bs4 import BeautifulSoup
+import edge_tts
 
 # --- GLOBAL CONFIG & TRANSLATION SIDECAR ---
 SIDECAR_PORT = 3001
@@ -78,6 +79,8 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(EXTRACTED_FOLDER, exist_ok=True)
 os.makedirs(os.path.join(UPLOAD_FOLDER, "extracted_assets"), exist_ok=True)
+TTS_CACHE = "tts_cache"
+os.makedirs(TTS_CACHE, exist_ok=True)
 
 # Global cache to store pre-tokenized sentences for the currently active book
 # Structure: { book_id: (timestamp, [sentences]) }
@@ -100,7 +103,8 @@ def load_vision_model_async():
     try:
         from transformers import pipeline
         print("🧠 Vision AI: Pre-loading captioning engine in background...")
-        app.image_captioner = pipeline("image-to-text", model="nlp-connect/vit-gpt2-image-captioning", device=-1)
+        # Using Salesforce/blip-image-captioning-base as it's already cached locally
+        app.image_captioner = pipeline("image-text-to-text", model="Salesforce/blip-image-captioning-base", device=-1)
         print("✅ Vision AI: Engine ready.")
     except Exception as e:
         print(f"⚠️ Vision AI: Engine failed to initialize: {e}")
@@ -351,7 +355,7 @@ def init_db():
             books_r = cur_r.fetchall()
             
             for b in books_r:
-                bid, fpath, epath, thumb, summary = b
+                bid, fpath, epath, thumb, summary, p_count = b
                 update_fields = {}
                 
                 # 1. Regenerate Thumbnail if missing
@@ -372,10 +376,10 @@ def init_db():
                             if new_summary: update_fields["summary"] = new_summary
                             
                             # 3. Backfill Page Count if missing
-                            if not b[5] or b[5] == 0:
+                            if not p_count or p_count == 0:
                                 p_count = str(html_data).count('lazy-page-container')
                                 if p_count > 0: update_fields["page_count"] = p_count
-                elif not b[5] or b[5] == 0:
+                elif not p_count or p_count == 0:
                     # Summary exists but page count is missing
                     if os.path.exists(epath):
                         with open(epath, "r", encoding="utf-8", errors="ignore") as f:
@@ -584,7 +588,7 @@ def build_clickable_img_wrapper(img_tag_str, img_cv, fast=True, skip_ocr=True):
     return wrapper
 
 
-def ocr_embedded_images(html):
+def ocr_embedded_images(html, bid=None):
     """
     Fast pass: extract raw text from embedded images for TTS/search purposes only.
     Uses regex and multithreading for high performance without BeautifulSoup overhead.
@@ -597,6 +601,10 @@ def ocr_embedded_images(html):
         
     def process_match_data(match_tuple):
         start, end, img_tag, src_data = match_tuple
+        # CHECK FOR CANCELLATION: If user switched books, stop processing immediately
+        global active_ocr_bid
+        if bid and active_ocr_bid != bid:
+            return start, end, None
         try:
             import cv2
             import numpy as np
@@ -616,7 +624,7 @@ def ocr_embedded_images(html):
 
     tasks = [(m.start(), m.end(), m.group(1), m.group(2)) for m in matches]
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(process_match_data, tasks))
         
     parts = []
@@ -624,10 +632,7 @@ def ocr_embedded_images(html):
     # Process results in sequential order of occurrence in the HTML
     results.sort(key=lambda x: x[0])
     for start, end, replacement in results:
-        # Check if we should abort mid-construction
-        global active_ocr_bid
-        # We don't have bid here, but we can check if a DIFFERENT bid has become active
-        # This is a bit tricky, so we'll just check if the global bid has changed since we started
+        if replacement is None: return html # Aborted
         parts.append(html[last_end:start])
         parts.append(replacement)
         last_end = end
@@ -636,7 +641,7 @@ def ocr_embedded_images(html):
     return "".join(parts)
 
 
-def extract_pdf_html(file_path, fast_mode=True):
+def extract_pdf_html(file_path, fast_mode=True, page_limit=None):
     """High-speed parallel PDF processing with watermark filtering and layout stabilization."""
     import fitz
     abs_path = os.path.abspath(file_path)
@@ -649,6 +654,7 @@ def extract_pdf_html(file_path, fast_mode=True):
         except: pass
     
     total_pages = len(pdf)
+    process_limit = min(total_pages, page_limit) if page_limit else total_pages
     
     def process_pdf_page(page_num):
         try:
@@ -711,23 +717,31 @@ def extract_pdf_html(file_path, fast_mode=True):
             seen_texts = set()
             for b in blocks:
                 if b.get("type", 0) == 0:
-                    lines_text = []
+                    block_lines = []
                     for line in b.get("lines", []):
-                        lines_text.append("".join([s.get("text", "") for s in line.get("spans", [])]))
-                    block_text = " ".join(lines_text).strip()
+                        line_text = "".join([s.get("text", "") for s in line.get("spans", [])]).strip()
+                        if not line_text: continue
+                        
+                        # GLOBAL DIALOGUE DETECTION: 
+                        # Handle both "Name :" at start of line AND inline speakers like "A: Hello B: Hi"
+                        # 1. Bold all patterns like "Name :"
+                        line_text = re.sub(r'\b([A-Z][A-Za-z\s]{2,20}\s*:)', r'<b>\1</b>', line_text)
+                        # 2. Force a line break before any bolded name that isn't at the very start
+                        line_text = re.sub(r'(?<!^)\s*<b>([A-Z][A-Za-z\s]{2,20}\s*:)</b>', r'<br/><b>\1</b>', line_text)
+                        
+                        block_lines.append(line_text)
+
+                    if not block_lines: continue
+                    full_text = " ".join(block_lines).replace(" <br/>", "<br/>").replace("<br/> ", "<br/>")
                     
-                    if not block_text or len(block_text) < 4: continue
-                    if block_text in seen_texts: continue
-                    l_text = " ".join(["".join([s.get("text", "") for s in line.get("spans", [])]) for line in b.get("lines", [])]).strip()
-                    if not l_text or len(l_text) < 4: continue
-                    if l_text in seen_texts: continue
-                    seen_texts.add(l_text)
+                    if full_text in seen_texts: continue
+                    seen_texts.add(full_text)
                     
-                    style = 'style="margin-bottom: 1.5em; line-height: 1.8; color: #334155; font-family: \'Georgia\', serif;"'
+                    style = 'style="margin-bottom: 1.2em; line-height: 1.6; color: #1e293b; font-family: \'Inter\', sans-serif; font-size: 1.02rem;"'
                     if is_scanned:
-                        # For scanned PDFs, show text as a clean, continuous flow below images
-                        style = 'style="margin-bottom: 1.5em; line-height: 1.8; color: #334155; font-family: \'Georgia\', serif; font-size: 1.1rem; max-width: 800px; margin-left: auto; margin-right: auto;"'
-                    text_html_parts.append(f'<p {style}>{l_text}</p>')
+                        style = 'style="margin-bottom: 1.2em; line-height: 1.6; color: #1e293b; font-family: \'Inter\', sans-serif; font-size: 1.05rem; max-width: 850px; margin-left: auto; margin-right: auto;"'
+                    
+                    text_html_parts.append(f'<p {style}>{full_text}</p>')
 
             # C. ASSEMBLY
             if img_html_parts:
@@ -741,14 +755,32 @@ def extract_pdf_html(file_path, fast_mode=True):
             local_pdf.close()
             return page_html
         except Exception as e:
-            return f'<div class="error">Page Error: {e}</div>'
+            # IMPORTANT: Still wrap errors in the lazy container so the page count is accurate
+            return f'<div id="pdf-page-{page_num}" class="lazy-page-container error-page" style="padding: 40px; background: #fff1f2; color: #991b1b; border: 1px solid #fecaca; border-radius: 8px;"><h3>⚠️ Page Error</h3><p>{e}</p></div>'
 
-    # Process all pages in parallel
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-        results = list(executor.map(process_pdf_page, range(total_pages)))
+    # Process pages according to limit
+    results = []
+    try:
+        # Use high-performance parallel processing
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(12, process_limit)) as executor:
+            results = list(executor.map(process_pdf_page, range(process_limit)))
+    except Exception as e:
+        print(f"Parallel PDF extraction failed for {file_path}, falling back to sync: {e}")
+        # FALLBACK: Synchronous extraction if threading hits OS limits
+        results = []
+        for i in range(process_limit):
+            results.append(process_pdf_page(i))
     
     pdf.close()
-    return "".join(results)
+    
+    final_html = "".join(results)
+    if not final_html.strip():
+        final_html = f"<div class='lazy-page-container' style='padding:40px;'>This PDF contains no readable text or images on its {total_pages} pages.</div>"
+    
+    return {
+        "html": final_html,
+        "total_pages": total_pages
+    }
 
 
 def extract_docx_html(file_path):
@@ -957,7 +989,7 @@ def extract_txt_html(file_path):
         return "\n".join(pages) if pages else "<div class='lazy-page-container' style='padding:100px; text-align:center;'>Empty Document</div>"
 
 
-def extract_book_html(file_path, fast_mode=True):
+def extract_book_html(file_path, fast_mode=True, bid=None, page_limit=None):
     ext = os.path.splitext(file_path)[1].lower()
     
     # 1. ROBUST EXTENSION DETECTION (MAGIC NUMBERS)
@@ -965,28 +997,42 @@ def extract_book_html(file_path, fast_mode=True):
     if not ext or ext not in [".pdf", ".docx", ".epub", ".pptx"]:
         try:
             with open(file_path, "rb") as f:
-                head = f.read(4)
-                if head == b"%PDF": ext = ".pdf"
-                elif head == b"PK\x03\x04":
+                # Read more header bytes to detect PDFs that might have offset headers or metadata
+                head = f.read(1024)
+                if b"%PDF" in head: ext = ".pdf"
+                elif b"PK\x03\x04" in head:
                     # It's a zip-based format (EPUB, DOCX, PPTX)
                     # We can't immediately tell which, but we can try EBOPUB logic first
                     ext = ".epub" 
         except: pass
 
     # 2. MATCH AND EXTRACT
+    res = {"html": "", "total_pages": 1}
     if ext == ".pdf":
-        html = extract_pdf_html(file_path)
-        return ocr_embedded_images(html) if not fast_mode else html
+        raw_res = extract_pdf_html(file_path, fast_mode=fast_mode, page_limit=page_limit)
+        if isinstance(raw_res, dict):
+            html = raw_res["html"]
+            res["total_pages"] = raw_res["total_pages"]
+        else:
+            html = raw_res
+        
+        final_html = ocr_embedded_images(html, bid=None) if not fast_mode else html
+        res["html"] = final_html
+        return res
     elif ext == ".docx":
         html = extract_docx_html(file_path)
-        return ocr_embedded_images(html) if not fast_mode else html
+        res["html"] = ocr_embedded_images(html) if not fast_mode else html
+        res["total_pages"] = str(res["html"]).count("lazy-page-container") or 1
+        return res
     elif ext == ".epub":
         try:
             html = extract_epub_html(file_path)
             # If EPUB extraction produced literal nothing, fallback to TXT
             if not html or len(str(html).strip()) < 10:
                 raise Exception("Empty EPUB")
-            return ocr_embedded_images(html) if not fast_mode else html
+            res["html"] = ocr_embedded_images(html) if not fast_mode else html
+            res["total_pages"] = str(res["html"]).count("lazy-page-container") or 1
+            return res
         except Exception:
             # Fallback to structural TXT extraction as a last resort
             return extract_txt_html(file_path)
@@ -1113,6 +1159,45 @@ def register():
         return render_template("auth.html", error="Username already exists")
     conn.close()
     return render_template("auth.html", success="Registration successful! Please login.")
+
+@app.route("/forgot_password", methods=["POST"])
+def forgot_password():
+    email = request.form.get("email", "").strip()
+    if not email:
+        return render_template("auth.html", error="Please enter your email", mode="forgot")
+        
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT username FROM users WHERE email=?", (email,))
+    row = cur.fetchone()
+    conn.close()
+    
+    if row:
+        # Email exists, show the reset form
+        return render_template("auth.html", reset_email=email, mode="reset")
+    else:
+        return render_template("auth.html", error="Email address not found", mode="forgot")
+
+@app.route("/reset_password", methods=["POST"])
+def reset_password():
+    email = request.form.get("email", "").strip()
+    new_password = request.form.get("password", "")
+    confirm_password = request.form.get("confirm_password", "")
+    
+    if not email or not new_password:
+        return render_template("auth.html", error="Missing details", mode="reset", reset_email=email)
+        
+    if new_password != confirm_password:
+        return render_template("auth.html", error="Passwords do not match", mode="reset", reset_email=email)
+        
+    conn = get_conn()
+    cur = conn.cursor()
+    hashed = generate_password_hash(new_password)
+    cur.execute("UPDATE users SET password=? WHERE email=?", (hashed, email))
+    conn.commit()
+    conn.close()
+    
+    return render_template("auth.html", success="Password updated successfully! Please login.")
 
 @app.route("/logout")
 @login_required
@@ -1309,12 +1394,15 @@ def background_ocr_upgrade_task(fpath, epath, bid=None):
     global active_ocr_bid
     if bid: active_ocr_bid = bid
     
-    try:
-        # Check if we should even start (user might have switched already)
-        if bid and active_ocr_bid != bid:
-            print(f"Skipping background OCR for {bid}: user switched books.")
-            return
+    import time
+    time.sleep(3) # Give the main thread 3 seconds of peace to finish loading the first book
+    
+    # Check if we should even start (user might have switched already)
+    if bid and active_ocr_bid != bid:
+        print(f"Skipping background OCR for {bid}: user switched books.")
+        return
 
+    try:
         # 1. Generate thumbnail early in the background
         thumb = generate_thumbnail(bid, fpath) if bid else None
         
@@ -1323,7 +1411,7 @@ def background_ocr_upgrade_task(fpath, epath, bid=None):
 
         # 2. Perform the heavy-duty OCR now (no fast mode)
         # This enhances the initial fast extraction with searchable image text
-        final_html = extract_book_html(fpath, fast_mode=False)
+        final_html = extract_book_html(fpath, fast_mode=False, bid=bid)
         
         # Check one last time before saving
         if bid and active_ocr_bid != bid: return
@@ -1331,18 +1419,24 @@ def background_ocr_upgrade_task(fpath, epath, bid=None):
         with open(epath, "w", encoding="utf-8") as f:
             f.write(str(final_html))
             
-        # 3. Finalize DB state: mark as 'ready'
+        # 3. Finalize DB state: mark as 'ready' and SYNC PAGE COUNT
         if bid:
+            # Re-calculate page count after deep OCR
+            final_page_count = str(final_html).count('lazy-page-container')
+            print(f"Deep OCR finished for {bid}. New page count: {final_page_count}")
+            
             conn = get_conn()
+            # Set to 'ready' only after FULL processing is done
             if thumb:
-                conn.execute("UPDATE books SET status='ready', thumbnail_path=? WHERE id=?", (thumb, bid))
+                conn.execute("UPDATE books SET status='ready', thumbnail_path=?, page_count=? WHERE id=?", (thumb, final_page_count, bid))
             else:
-                conn.execute("UPDATE books SET status='ready' WHERE id=?", (bid,))
+                conn.execute("UPDATE books SET status='ready', page_count=? WHERE id=?", (final_page_count, bid))
             conn.commit()
             conn.close()
         
         print(f"Background OCR upgrade complete for {bid if bid else 'unknown'}.")
     except Exception:
+        import traceback
         traceback.print_exc()
         # Ensure we don't leave it stuck in 'processing' if it technically finished or failed
         if bid:
@@ -1356,28 +1450,32 @@ def background_ocr_upgrade_task(fpath, epath, bid=None):
 def do_extract_task(fpath, epath, bid):
     """Phase 1: Fast Start (Structural extraction only for instant availability)"""
     try:
-        # 1. Quickly extract structure and native text, skip heavy OCR for now
-        html = extract_book_html(fpath, fast_mode=True)
+        # 1. PHASE 0: ULTRA-FAST START (100 pages only for instant availability)
+        # This makes even 5000+ page books open in seconds.
+        res = extract_book_html(fpath, fast_mode=True, page_limit=100)
+        html_str = str(res["html"] if isinstance(res, dict) else res)
+        page_count = res.get("total_pages", 0) if isinstance(res, dict) else html_str.count('lazy-page-container')
         
-        # 1b. CAPTURE SUMMARY & PAGE COUNT: Extract first 200 chars and count page containers
+        # 1b. CAPTURE SUMMARY: Optimized for speed
+        # We only parse the FIRST 50k characters for the summary to prevent hanging on massive books.
         from bs4 import BeautifulSoup
-        soup = BeautifulSoup(str(html), "html.parser")
+        summary_sample = html_str[:50000]
+        soup = BeautifulSoup(summary_sample, "html.parser")
         clean_text = soup.get_text(separator=' ').strip()
         summary = (clean_text[:200] + '...') if len(clean_text) > 200 else clean_text
         
-        # Count the number of lazy-page-containers to get the total pages
-        page_count = str(html).count('lazy-page-container')
-        
         os.makedirs(os.path.dirname(epath), exist_ok=True)
         with open(epath, "w", encoding="utf-8") as f:
-            f.write(str(html))
+            f.write(html_str)
         
-        # 2. Mark book as ready so user can open it immediately
+        # 2. Mark book as 'ready' if we found pages, otherwise 'Analyzing'
         conn2 = get_conn()
-        conn2.execute("UPDATE books SET status='OCR Upgrade In Progress...', summary=?, page_count=? WHERE id=?", (summary, page_count, bid))
+        final_status = "ready" if page_count > 0 else "Analyzing Content..."
+        
+        conn2.execute("UPDATE books SET status=?, summary=?, page_count=? WHERE id=?", (final_status, summary, page_count, bid))
         conn2.commit()
         conn2.close()
-        print(f"Book {bid} is ready (Fast Mode).")
+        print(f"Book {bid} Phase 1 complete. Status: {final_status}, Pages: {page_count}")
 
         # Phase 2: Background Knowledge Mining (Async OCR and Thumbnails)
         threading.Thread(target=background_ocr_upgrade_task, args=(fpath, epath, bid), daemon=True).start()
@@ -1751,24 +1849,36 @@ def tts():
     
     if not text:
         return "No text", 400
+
+    # 🛡️ TTS ROBUSTNESS: Strip out problematic symbols that cause Edge-TTS to stall or stutter.
+    # We keep punctuation that contributes to natural speech pauses (. , ! ? ; : - ।)
+    # but remove symbols like @ # $ % ^ & * ( ) < > / \ _ + = | ~ `
+    import re
+    text = re.sub(r'[@#$%^&*<>\\\/_+=|~`\[\]{}]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+
+    if not text:
+        return "No speakable text", 400
     
     # Standardize language (ta-IN -> ta)
-    l = lang.split('-')[0].lower() if '-' in lang else lang.lower()
+    l_full = lang.lower()
+    l_short = lang.split('-')[0].lower() if '-' in lang else lang.lower()
     
     # Professional Neural Voice Map (Comprehensive)
     VOICE_MAP = {
         'en': { 'female': 'en-US-AriaNeural', 'male': 'en-US-GuyNeural' },
+        'en-us': { 'female': 'en-US-AriaNeural', 'male': 'en-US-GuyNeural' },
+        'en-gb': { 'female': 'en-GB-SoniaNeural', 'male': 'en-GB-ThomasNeural' },
         'ta': { 'female': 'ta-IN-PallaviNeural', 'male': 'ta-IN-ValluvarNeural' },
         'hi': { 'female': 'hi-IN-SwaraNeural', 'male': 'hi-IN-MadhurNeural' },
         'kn': { 'female': 'kn-IN-SapnaNeural', 'male': 'kn-IN-GaganNeural' },
         'te': { 'female': 'te-IN-ShrutiNeural', 'male': 'te-IN-MohanNeural' },
         'ml': { 'female': 'ml-IN-SobhanaNeural', 'male': 'ml-IN-MidhunNeural' },
-        'pa': { 'female': 'pa-IN-OjasNeural', 'male': 'pa-IN-GurumaNeural' },
         'gu': { 'female': 'gu-IN-DhwaniNeural', 'male': 'gu-IN-NiranjanNeural' },
         'mr': { 'female': 'mr-IN-AarohiNeural', 'male': 'mr-IN-ManoharNeural' },
         'bn': { 'female': 'bn-IN-TanishaaNeural', 'male': 'bn-IN-BashkarNeural' },
         'ur': { 'female': 'ur-PK-UzmaNeural', 'male': 'ur-PK-AsadNeural' },
-        'or': { 'female': 'hi-IN-SwaraNeural', 'male': 'hi-IN-MadhurNeural' }, # Odia fallback to Hindi because Edge-TTS lacks native Odia
+        'or': { 'female': 'hi-IN-SwaraNeural', 'male': 'hi-IN-MadhurNeural' }, 
         'ko': { 'female': 'ko-KR-SunHiNeural', 'male': 'ko-KR-InJoonNeural' },
         'ja': { 'female': 'ja-JP-NanamiNeural', 'male': 'ja-JP-KeitaNeural' },
         'th': { 'female': 'th-TH-PremwadeeNeural', 'male': 'th-TH-NiwatNeural' },
@@ -1776,19 +1886,44 @@ def tts():
         'es': { 'female': 'es-ES-ElviraNeural', 'male': 'es-ES-AlvaroNeural' },
         'de': { 'female': 'de-DE-KatjaNeural', 'male': 'de-DE-ConradNeural' },
         'it': { 'female': 'it-IT-ElsaNeural', 'male': 'it-IT-DiegoNeural' },
-        'zh': { 'female': 'zh-CN-XiaoxiaoNeural', 'male': 'zh-CN-YunxiNeural' }
+        'zh': { 'female': 'zh-CN-XiaoxiaoNeural', 'male': 'zh-CN-YunxiNeural' },
+        'zh-cn': { 'female': 'zh-CN-XiaoxiaoNeural', 'male': 'zh-CN-YunxiNeural' },
+        'zh-tw': { 'female': 'zh-TW-HsiaoChenNeural', 'male': 'zh-TW-YunJheNeural' },
+        'ru': { 'female': 'ru-RU-SvetlanaNeural', 'male': 'ru-RU-DmitryNeural' },
+        'ar': { 'female': 'ar-SA-ZariyahNeural', 'male': 'ar-SA-HamedNeural' },
+        'pt': { 'female': 'pt-BR-FranciscaNeural', 'male': 'pt-BR-AntonioNeural' },
+        'tr': { 'female': 'tr-TR-EmelNeural', 'male': 'tr-TR-AhmetNeural' },
+        'vi': { 'female': 'vi-VN-HoaiMyNeural', 'male': 'vi-VN-NamMinhNeural' },
+        'id': { 'female': 'id-ID-GadisNeural', 'male': 'id-ID-ArdiNeural' },
+        'pl': { 'female': 'pl-PL-ZofiaNeural', 'male': 'pl-PL-MarekNeural' },
+        'nl': { 'female': 'nl-NL-ColetteNeural', 'male': 'nl-NL-MaartenNeural' }
     }
     
     # HYBRID ENGINE: Edge Neural for major languages, gTTS for regional fallbacks
-    EDGE_SUPPORTED = ['en','ta','hi','bn','kn','te','ml','gu','mr','fr','es','de','it','zh','ur','ko','ja','th']
+    # Note: pa (Punjabi) is not currently supported by Edge-TTS, so it uses gTTS fallback.
+    EDGE_SUPPORTED = [k for k in VOICE_MAP.keys() if k != 'pa']
     
+    l = l_full if l_full in VOICE_MAP else l_short
+    
+    # DISK CACHE CHECK: Use pre-generated audio if available for instant playback
+    cache_key = hashlib.md5(f"{text}_{l}_{gender}".encode()).hexdigest()
+    cache_path = os.path.join(TTS_CACHE, f"{cache_key}.mp3")
+    if os.path.exists(cache_path):
+        return send_file(cache_path, mimetype="audio/mpeg")
+
     if l not in EDGE_SUPPORTED:
-        # PURE FALLBACK FOR UNSUPPORTED REGIONS
+        # PURE FALLBACK FOR UNSUPPORTED REGIONS (e.g. Punjabi)
         try:
             from gtts import gTTS
             tts_obj = gTTS(text=text, lang=l, slow=False)
             fp = io.BytesIO()
             tts_obj.write_to_fp(fp)
+            fp.seek(0)
+            # Save to disk for next time
+            try:
+                with open(cache_path, "wb") as f:
+                    f.write(fp.getbuffer())
+            except: pass
             fp.seek(0)
             return send_file(fp, mimetype="audio/mpeg")
         except Exception as e:
@@ -1797,28 +1932,39 @@ def tts():
     else:
         voice = VOICE_MAP.get(l, {}).get(gender, 'en-US-AriaNeural')
 
-
-    def generate_streaming_tts():
+    # EDGE-TTS GENERATION (Buffered for stability on Windows)
+    try:
+        import asyncio
         import edge_tts
+        
+        async def get_audio_bytes():
+            communicate = edge_tts.Communicate(text, voice)
+            audio_data = bytearray()
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    audio_data.extend(chunk["data"])
+            return audio_data
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        communicate = edge_tts.Communicate(text, voice)
-        async_gen = communicate.stream()
-        
-        while True:
-            try:
-                # We pull one chunk at a time from the async iterator
-                chunk = loop.run_until_complete(async_gen.__anext__())
-                if chunk["type"] == "audio":
-                    yield chunk["data"]
-            except StopAsyncIteration:
-                break
-            except Exception as e:
-                print(f"Streaming Error: {e}")
-                break
-        loop.close()
+        try:
+            audio_bytes = loop.run_until_complete(get_audio_bytes())
+        finally:
+            loop.close()
 
-    return Response(generate_streaming_tts(), mimetype="audio/mpeg")
+        if audio_bytes:
+            # Cache it
+            try:
+                with open(cache_path, "wb") as f:
+                    f.write(audio_bytes)
+            except: pass
+            
+            return send_file(io.BytesIO(audio_bytes), mimetype="audio/mpeg")
+        
+    except Exception as e:
+        print(f"Edge-TTS Failed for {l}/{voice}: {e}")
+        
+    return "TTS generation failed", 500
 
 @app.route("/export_audiobook/<int:book_id>")
 def export_audiobook(book_id):
@@ -1849,8 +1995,10 @@ def export_audiobook(book_id):
         if not text: return "No text found to narate", 400
 
         # Voice mapping (Simplified for the export route)
+        # Voice mapping (Comprehensive)
         VOICE_MAP = {
             'en': { 'female': 'en-US-AriaNeural', 'male': 'en-US-GuyNeural' },
+            'en-us': { 'female': 'en-US-AriaNeural', 'male': 'en-US-GuyNeural' },
             'ta': { 'female': 'ta-IN-PallaviNeural', 'male': 'ta-IN-ValluvarNeural' },
             'hi': { 'female': 'hi-IN-SwaraNeural', 'male': 'hi-IN-MadhurNeural' },
             'kn': { 'female': 'kn-IN-SapnaNeural', 'male': 'kn-IN-GaganNeural' },
@@ -1861,6 +2009,7 @@ def export_audiobook(book_id):
             'mr': { 'female': 'mr-IN-AarohiNeural', 'male': 'mr-IN-ManoharNeural' },
             'bn': { 'female': 'bn-IN-TanishaaNeural', 'male': 'bn-IN-BashkarNeural' },
             'ur': { 'female': 'ur-PK-UzmaNeural', 'male': 'ur-PK-AsadNeural' },
+            'or': { 'female': 'hi-IN-SwaraNeural', 'male': 'hi-IN-MadhurNeural' },
             'ko': { 'female': 'ko-KR-SunHiNeural', 'male': 'ko-KR-InJoonNeural' },
             'ja': { 'female': 'ja-JP-NanamiNeural', 'male': 'ja-JP-KeitaNeural' },
             'th': { 'female': 'th-TH-PremwadeeNeural', 'male': 'th-TH-NiwatNeural' },
@@ -1868,22 +2017,32 @@ def export_audiobook(book_id):
             'es': { 'female': 'es-ES-ElviraNeural', 'male': 'es-ES-AlvaroNeural' },
             'de': { 'female': 'de-DE-KatjaNeural', 'male': 'de-DE-ConradNeural' },
             'it': { 'female': 'it-IT-ElsaNeural', 'male': 'it-IT-DiegoNeural' },
-            'zh': { 'female': 'zh-CN-XiaoxiaoNeural', 'male': 'zh-CN-YunxiNeural' }
+            'zh': { 'female': 'zh-CN-XiaoxiaoNeural', 'male': 'zh-CN-YunxiNeural' },
+            'zh-cn': { 'female': 'zh-CN-XiaoxiaoNeural', 'male': 'zh-CN-YunxiNeural' },
+            'zh-tw': { 'female': 'zh-TW-HsiaoChenNeural', 'male': 'zh-TW-YunJheNeural' }
         }
         
         # Language Selection / Detection
-        target_l = lang.split('-')[0].lower() if '-' in lang else lang.lower()
+        l_full = lang.lower()
+        l_short = lang.split('-')[0].lower() if '-' in lang else lang.lower()
+        target_l = l_full if l_full in VOICE_MAP else l_short
         
         # If 'Original' is selected, we must detect the actual language of the book content
         # to pick the correct narrator voice.
         if target_l == "orig":
             detect_sample = text[:5000]
             if re.search(r'[\u0B80-\u0BFF]', detect_sample): target_l = 'ta'
-            elif re.search(r'[\u0900-\u097F]', detect_sample): target_l = 'hi'
+            elif re.search(r'[\u0900-\u097F]', detect_sample): target_l = 'hi' # Hindi/Marathi
             elif re.search(r'[\u0C00-\u0C7F]', detect_sample): target_l = 'te'
             elif re.search(r'[\u0C80-\u0CFF]', detect_sample): target_l = 'kn'
             elif re.search(r'[\u0D00-\u0D7F]', detect_sample): target_l = 'ml'
             elif re.search(r'[\u0980-\u09FF]', detect_sample): target_l = 'bn'
+            elif re.search(r'[\u0600-\u06FF]', detect_sample): target_l = 'ur'
+            elif re.search(r'[\u0A00-\u0A7F]', detect_sample): target_l = 'pa'
+            elif re.search(r'[\u0A80-\u0AFF]', detect_sample): target_l = 'gu'
+            elif re.search(r'[\u0B00-\u0B7F]', detect_sample): target_l = 'or'
+            elif re.search(r'[\uAC00-\uD7AF\u1100-\u11FF]', detect_sample): target_l = 'ko'
+            elif re.search(r'[\u0E00-\u0E7F]', detect_sample): target_l = 'th'
             elif re.search(r'[\u3040-\u309F\u30A0-\u30FF]', detect_sample): target_l = 'ja'
             elif re.search(r'[\u4E00-\u9FFF]', detect_sample): target_l = 'zh'
             else: target_l = 'en'
@@ -2012,11 +2171,12 @@ def open_book(book_id):
                     text = f.read()
                 threading.Thread(target=background_ocr_upgrade_task, args=(file_path, extracted_path, book_id), daemon=True).start()
             else:
-                # Must extract at least once if missing
-                text = extract_book_html(file_path, fast_mode=True)
+                # Must extract at least once if missing (Fast 100-page preview first)
+                res = extract_book_html(file_path, fast_mode=True, page_limit=100)
+                text = str(res["html"] if isinstance(res, dict) else res)
                 os.makedirs(os.path.dirname(extracted_path), exist_ok=True)
                 with open(extracted_path, "w", encoding="utf-8") as f:
-                    f.write(str(text))
+                    f.write(text)
                 threading.Thread(target=background_ocr_upgrade_task, args=(file_path, extracted_path, book_id), daemon=True).start()
         else:
             # OPTIMIZED PATH: Direct read
@@ -2038,11 +2198,26 @@ def open_book(book_id):
             elif re.search(r'[\u0980-\u09FF]', sample_text): detected_lang = 'bn'
             elif re.search(r'[\u0A00-\u0A7F]', sample_text): detected_lang = 'pa'
             elif re.search(r'[\u0A80-\u0AFF]', sample_text): detected_lang = 'gu'
-            elif re.search(r'[\u0D80-\u0DFF]', sample_text): detected_lang = 'si'
+            elif re.search(r'[\u0B00-\u0B7F]', sample_text): detected_lang = 'or'
+            elif re.search(r'[\u0600-\u06FF]', sample_text): detected_lang = 'ur'
+            elif re.search(r'[\uAC00-\uD7AF\u1100-\u11FF]', sample_text): detected_lang = 'ko'
+            elif re.search(r'[\u0E00-\u0E7F]', sample_text): detected_lang = 'th'
             elif re.search(r'[\u3040-\u309F\u30A0-\u30FF]', sample_text): detected_lang = 'ja'
             elif re.search(r'[\u4E00-\u9FFF]', sample_text): detected_lang = 'zh'
         except Exception:
             pass
+
+        # 🚀 HYPER-FAST OPEN: For massive books, only send the first 300 pages initially.
+        # This makes the "Open" action instant regardless of book length (e.g. 5000+ pages).
+        total_extracted_pages = text.count('lazy-page-container')
+        has_more = False
+        if total_extracted_pages > 300:
+            # Safely slice the text after the 300th page container
+            marker = 'lazy-page-container'
+            parts = text.split(marker)
+            # Reconstruct the first 300 pages (index 300 because parts[0] is the text BEFORE the first marker)
+            text = marker.join(parts[:301]) + "</div>" # Close the last container just in case
+            has_more = True
 
         return jsonify({
             "name": name,
@@ -2050,7 +2225,9 @@ def open_book(book_id):
             "file_name": file_name,
             "detected_lang": detected_lang,
             "reading_time": reading_time,
-            "is_favorite": is_favorite
+            "is_favorite": is_favorite,
+            "has_more": has_more,
+            "total_pages": total_extracted_pages
         })
     except Exception as e:
         traceback.print_exc()
@@ -2058,7 +2235,21 @@ def open_book(book_id):
 
 
 
-@app.route("/save_highlight", methods=["POST"])
+@app.route("/book/<int:book_id>/full")
+def get_full_book_content(book_id):
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT extracted_path FROM books WHERE id = ?", (book_id,))
+        res = cur.fetchone()
+        conn.close()
+        if not res or not os.path.exists(res[0]):
+            return jsonify({"error": "Content not ready"}), 404
+        
+        with open(res[0], "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+    except Exception as e:
+        return str(e), 500
 def save_highlight():
     data = request.get_json()
 
@@ -2308,43 +2499,19 @@ def translate_text():
                 return translator.translate_batch(batch)
             except Exception as e:
                 print(f"Batch translation failed ({e}). Attempting granular recovery...")
-                results = []
-                # 2. INDIVIDUAL FALLBACK: Ensure one bad node doesn't kill the whole batch
-                for s in batch:
-                    # Clean input (strip whitespace but remember it for return)
-                    clean_s = s.strip()
-                    if not clean_s:
-                        results.append(s)
-                        continue
-                        
-                    # Individual Retry with small backoff
-                    success = False
-                    for attempt in range(2):
-                        try:
-                            time.sleep(attempt * 0.5) 
-                            translated = translator.translate(clean_s)
-                            if translated:
-                                # Preserve original casing/spacing style where possible
-                                results.append(translated)
-                                success = True
-                                break
-                        except:
-                            continue
-                    if not success:
-                        results.append(s) # Safety: Return original if even individual fail
-                return results
+                # 2. PARALLEL INDIVIDUAL FALLBACK: Ensure one bad node doesn't kill the whole batch
+                # and do it in parallel for speed!
+                with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                    futures = [executor.submit(translator.translate, s) for s in batch]
+                    return [f.result() for f in futures]
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
-            batch_results = list(executor.map(translate_single_batch, batches))
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(translate_single_batch, b) for b in batches]
+            for f in futures:
+                results.extend(f.result())
             
-        translated_texts = [item for sublist in batch_results for item in sublist]
-
-        # Force identical array lengths to ensure DOM mapping doesn't break
-        if len(translated_texts) != len(texts):
-            print(f"CRITICAL MISMATCH after fallback: {len(translated_texts)} vs {len(texts)}")
-            return jsonify(texts)
-
-        return jsonify(translated_texts)
+        return jsonify(results)
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -2457,13 +2624,19 @@ def summarize():
         if target_lang == "orig":
             # Detect dominant script using a 10k character sample
             sample_text = text[:10000]
-            ta_count = len(re.findall(r'[\u0B80-\u0BFF]', sample_text))
-            hi_count = len(re.findall(r'[\u0900-\u097F]', sample_text))
-            
-            if ta_count > 20: actual_target = 'ta'
-            elif hi_count > 20: actual_target = 'hi'
+            if re.search(r'[\u0B80-\u0BFF]', sample_text): actual_target = 'ta'
+            elif re.search(r'[\u0900-\u097F]', sample_text): actual_target = 'hi'
             elif re.search(r'[\u0C00-\u0C7F]', sample_text): actual_target = 'te'
             elif re.search(r'[\u0C80-\u0CFF]', sample_text): actual_target = 'kn'
+            elif re.search(r'[\u0D00-\u0D7F]', sample_text): actual_target = 'ml'
+            elif re.search(r'[\u0980-\u09FF]', sample_text): actual_target = 'bn'
+            elif re.search(r'[\u0A00-\u0A7F]', sample_text): actual_target = 'pa'
+            elif re.search(r'[\u0A80-\u0AFF]', sample_text): actual_target = 'gu'
+            elif re.search(r'[\u0B00-\u0B7F]', sample_text): actual_target = 'or'
+            elif re.search(r'[\u0600-\u06FF]', sample_text): actual_target = 'ur'
+            elif re.search(r'[\uAC00-\uD7AF\u1100-\u11FF]', sample_text): actual_target = 'ko'
+            elif re.search(r'[\u0E00-\u0E7F]', sample_text): actual_target = 'th'
+            elif re.search(r'[\u3040-\u309F\u30A0-\u30FF]', sample_text): actual_target = 'ja'
             elif re.search(r'[\u4E00-\u9FFF]', sample_text): actual_target = 'zh'
             else: actual_target = 'en'
 
@@ -2969,20 +3142,18 @@ def generate_quiz():
         if target_lang == "orig":
             # Detect language using a larger sample to avoid getting tripped up by English prefaces
             sample_text = text[:15000]
-            # Count occurrences of specific scripts to find the dominant language
-            ta_count = len(re.findall(r'[\u0B80-\u0BFF]', sample_text))
-            hi_count = len(re.findall(r'[\u0900-\u097F]', sample_text))
-            te_count = len(re.findall(r'[\u0C00-\u0C7F]', sample_text))
-            
-            if ta_count > 30: actual_target = 'ta'
-            elif hi_count > 30: actual_target = 'hi'
-            elif te_count > 30: actual_target = 'te'
+            if re.search(r'[\u0B80-\u0BFF]', sample_text): actual_target = 'ta'
+            elif re.search(r'[\u0900-\u097F]', sample_text): actual_target = 'hi'
+            elif re.search(r'[\u0C00-\u0C7F]', sample_text): actual_target = 'te'
             elif re.search(r'[\u0C80-\u0CFF]', sample_text): actual_target = 'kn'
             elif re.search(r'[\u0D00-\u0D7F]', sample_text): actual_target = 'ml'
             elif re.search(r'[\u0980-\u09FF]', sample_text): actual_target = 'bn'
             elif re.search(r'[\u0A00-\u0A7F]', sample_text): actual_target = 'pa'
             elif re.search(r'[\u0A80-\u0AFF]', sample_text): actual_target = 'gu'
-            elif re.search(r'[\u0D80-\u0DFF]', sample_text): actual_target = 'si'
+            elif re.search(r'[\u0B00-\u0B7F]', sample_text): actual_target = 'or'
+            elif re.search(r'[\u0600-\u06FF]', sample_text): actual_target = 'ur'
+            elif re.search(r'[\uAC00-\uD7AF\u1100-\u11FF]', sample_text): actual_target = 'ko'
+            elif re.search(r'[\u0E00-\u0E7F]', sample_text): actual_target = 'th'
             elif re.search(r'[\u3040-\u309F\u30A0-\u30FF]', sample_text): actual_target = 'ja'
             elif re.search(r'[\u4E00-\u9FFF]', sample_text): actual_target = 'zh'
             else: actual_target = 'en'
@@ -3003,7 +3174,11 @@ def generate_quiz():
                 r'है', r'का\s+अर्थ', r'कहते\s+हैं', # Hindi
                 r'అంటే', r'అనేది', # Telugu
                 r'ఎಂದರೆ', r'ಎನ್ನುವುದು', # Kannada
-                r'মানে', r'হল' # Bengali
+                r'মানে', r'হল', # Bengali
+                r'ਹੈ', r'ਦਾ\s+ਮਤਲਬ', # Punjabi
+                r'છે', r'એટલે', # Gujarati
+                r'ଅଟେ', r'ମାନେ', # Odia
+                r'ہے', r'کا\s+مطلب' # Urdu
             ]
             pattern = '|'.join(regex_markers)
             candidates = [s for s in sentences if re.search(pattern, s, re.I)]
@@ -3337,55 +3512,66 @@ def define_word():
             combined_def = ""
             for i in range(min(len(definition_sentences), 2)):
                 combined_def += str(definition_sentences[i]) + " "
-            return jsonify({"answer": combined_def.strip()})
             
-        # 2. Try Dictionary Definitions first (High signal)
+            combined_def = combined_def.strip()
+            
+            # 🚀 MULTILINGUAL CONTEXTUAL DEFINITION: 
+            # If we found the meaning in the text, also provide the English bridge for clarity.
+            if lang != 'en':
+                try:
+                    detect_url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={lang}&tl=en&dt=t&q={word}"
+                    res_word = requests.get(detect_url, timeout=3).json()
+                    english_word = res_word[0][0][0] if res_word[0] and res_word[0][0] else word
+                    
+                    trans_url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={lang}&tl=en&dt=t&q={combined_def}"
+                    res_def = requests.get(trans_url, timeout=3).json()
+                    en_parts = [p[0] for p in res_def[0] if p[0]]
+                    en_def = "".join(en_parts)
+                    
+                    return jsonify({"answer": f"{word} ({english_word}): {combined_def} (En: {en_def})"})
+                except:
+                    return jsonify({"answer": combined_def})
+            else:
+                return jsonify({"answer": combined_def})
+            
+        # 2. Try Dictionary Definitions (High signal)
         try:
-            # First try: Direct definition in the word's own language
-            dict_url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={lang}&tl={lang}&dt=md&q={word}"
-            res = requests.get(dict_url, timeout=5)
-            if res.ok:
-                dict_data = res.json()
-                if len(dict_data) > 12 and dict_data[12]:
-                    defs = []
-                    for entry in dict_data[12]:
-                        if len(entry) > 1 and entry[1]:
-                            for subentry in entry[1]:
-                                if subentry[0]: defs.append(subentry[0])
-                    if defs: 
-                        combined_dict_def = ""
-                        for i in range(min(len(defs), 2)):
-                            combined_dict_def += str(defs[i]) + "; "
-                        return jsonify({"answer": " 📖 Definition: " + combined_dict_def.strip("; ")})
-
-            # Second try: Transliterated/English fallback
+            # For non-English, we almost always want to know the English equivalent + the definition in the native language
+            english_word = ""
             if lang != 'en':
                 detect_url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q={word}"
                 res = requests.get(detect_url, timeout=3)
                 if res.ok:
                     data = res.json()
                     english_word = data[0][0][0] if data[0] and data[0][0] else word
-                    en_dict_url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=en&dt=md&q={english_word}"
-                    res_en = requests.get(en_dict_url, timeout=3)
-                    if res_en.ok:
-                        en_data = res_en.json()
-                        if len(en_data) > 12 and en_data[12]:
-                            en_defs = [s[0] for e in en_data[12] if len(e) > 1 and e[1] for s in e[1] if s[0]]
-                            if en_defs:
-                                joined_en = "; ".join(en_defs[:2])
-                                final_res = requests.get(f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl={lang}&dt=t&q={joined_en}", timeout=3)
-                                if final_res.ok:
-                                    back_parts = []
-                                    raw_parts = final_res.json()[0]
-                                    for p in raw_parts:
-                                        if p[0]: back_parts.append(str(p[0]))
-                                    trans_back = "".join(back_parts)
-                                    
-                                    # Fallback slice removal
-                                    limit_defs = []
-                                    for i in range(min(len(en_defs), 2)): limit_defs.append(en_defs[i])
-                                    
-                                    return jsonify({"answer": f" 📖 Definition ({english_word}): " + trans_back})
+
+            # Try to get the definition (using English as the bridge for maximum accuracy)
+            query_word = english_word if english_word else word
+            en_dict_url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=en&dt=md&q={query_word}"
+            res_en = requests.get(en_dict_url, timeout=3)
+            
+            if res_en.ok:
+                en_data = res_en.json()
+                if len(en_data) > 12 and en_data[12]:
+                    en_defs = [s[0] for e in en_data[12] if len(e) > 1 and e[1] for s in e[1] if s[0]]
+                    if en_defs:
+                        joined_en = "; ".join(en_defs[:2])
+                        
+                        # Translate definition back to the original language
+                        if lang != 'en':
+                            final_res = requests.get(f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl={lang}&dt=t&q={joined_en}", timeout=3)
+                            if final_res.ok:
+                                back_parts = []
+                                raw_parts = final_res.json()[0]
+                                for p in raw_parts:
+                                    if p[0]: back_parts.append(str(p[0]))
+                                trans_back = "".join(back_parts)
+                                
+                                # FORMAT: Word (English) : Translated Meaning (English Meaning)
+                                return jsonify({"answer": f"📖 {word} ({english_word}): {trans_back} (En: {joined_en})"})
+                        else:
+                            return jsonify({"answer": "📖 Definition: " + joined_en})
+
         except Exception as e:
             print("Advanced Dict Fallback Error:", e)
 
@@ -3529,7 +3715,7 @@ def explain_image():
         
         # --- Hybrid Explanation Strategy ---
         explanation = ""
-        ocr_text = ""
+        ocr_text = data.get("ocr_text", "")
         ai_caption = ""
         faces = []
         
@@ -3580,9 +3766,34 @@ def explain_image():
             captioner = getattr(app, "image_captioner", None)
             if captioner and captioner != "FAILED":
                 # Only run if not still downloading/initializing
-                res = captioner(img_pil, max_new_tokens=25)
-                if res and len(res) > 0 and 'generated_text' in res[0]:
-                    ai_caption = res[0]['generated_text'].capitalize().strip()
+                try:
+                    res = captioner(img_pil, max_new_tokens=40)
+                    if res and len(res) > 0 and 'generated_text' in res[0]:
+                        ai_caption = res[0]['generated_text'].capitalize().strip()
+                        # If the caption is too short/generic, it might have missed details
+                        if len(ai_caption.split()) < 3:
+                            ai_caption = ""
+                except: pass
+                
+            # --- DETAILED VISUAL PROFILING ---
+            # 1. Lighting & Atmosphere
+            brightness = np.mean(gray)
+            lighting = "dimly lit or nocturnal" if brightness < 80 else ("brightly lit" if brightness > 180 else "naturally lit")
+            
+            # 2. Spatial Composition
+            h, w = img_np.shape[:2]
+            aspect = w / h
+            composition = "portrait (vertical)" if aspect < 0.8 else ("landscape (horizontal)" if aspect > 1.2 else "square-framed")
+            
+            # 3. Color Palette Analysis
+            # Sample 5 points for dominant colors
+            colors = []
+            for y, x in [(h//4, w//4), (h//4, 3*w//4), (h//2, h//2), (3*h//4, w//4), (3*h//4, 3*w//4)]:
+                b, g, r = img_np[min(y, h-1), min(x, w-1)]
+                colors.append((r, g, b))
+            
+            avg_color = np.mean(colors, axis=0)
+            color_vibe = "warm/golden" if avg_color[0] > avg_color[2] + 20 else ("cool/bluish" if avg_color[2] > avg_color[0] + 20 else "neutral/balanced")
                 
             # --- Fallback: Advanced Heuristics if AI fails ---
             if not ai_caption:
@@ -3622,41 +3833,34 @@ def explain_image():
         # 3. Analyze and Combine (Detailed Visual Logic)
         is_diagram = any(kw in (ocr_text + ai_caption).lower() for kw in ["diagram", "chart", "graph", "figure", "fig.", "illustration", "table", "cycle", "process", "thank you", "slide", "presentation"])
         
-        # --- Visual Reasoning Logic ---
+        # --- Visual Reasoning Construction ---
+        sections = []
+        
+        # A. THE SCENE (AI Vision)
         if ai_caption:
-            visual_desc = f"🖼️ AI VISUAL SUMMARY: {ai_caption}."
-            if context:
-                visual_desc += f"\n\n📚 VIEWPOINT: This appears in a passage discussing: '{context[:150]}...'."
-            
-            if ocr_text:
-                if is_diagram:
-                    explanation = f"{visual_desc}\n\n🔍 KEY DETAILS: This graphic functions as a diagram or chart with labels including: \"{ocr_text[:300]}...\""
-                else:
-                    explanation = f"{visual_desc}\n\n📝 EMBEDDED TEXT: It contains the text: \"{ocr_text[:150]}...\""
-            else:
-                explanation = visual_desc
-                
-        elif ocr_text:
-            # Smart Title Card & Cover Detection
-            words = ocr_text.split()
-            u_ocr = ocr_text.upper()
-            
-            # If it's short, uppercase-heavy, and high-contrast, it's a Title Card
-            is_title_card = len(words) < 25 and (sum(1 for w in words if w.isupper()) / max(1, len(words)) > 0.6)
-            
-            if is_title_card:
-                explanation = f"🎨 SECTION HEADER: This is a high-impact title card or section header.\n\n📖 CONTENT: \"{ocr_text}\"\n\nIt likely serves as a visual break or a thematic introduction to the next part of the book."
-            else:
-                explanation = f"🔍 DOCUMENT SNAPSHOT: This image contains significant textual data or instructions.\n\n📝 EXTRACTED TEXT:\n\"{ocr_text[:600]}...\"\n\n"
-                
-            # Contextual Enrichment
-            cleaned_context = re.sub(r'[:;{}[]]', '', context[:150]).strip()
-            if cleaned_context and not is_title_card:
-                explanation += f"\n🚀 CONTEXTUAL LINK: This visual is supporting the following discussion: '{cleaned_context}...'"
-            elif not is_title_card:
-                 explanation += "\nNote: Vision AI is currently analyzing visual patterns via high-precision OCR."
+            sections.append(f"🎭 SCENE & ACTION: {ai_caption}.")
         else:
-            explanation = "🖼️ VISUAL ELEMENT: This appears to be an illustration, photo, or decorative graphic without readable text.\n\n💡 TIP: Try highlighting the text around this image—I can then use that context to better explain what this specific visual represents in your book!"
+            sections.append(f"🖼️ VISUAL TYPE: This appears to be a {composition} image with a {color_vibe} color palette, set in a {lighting} environment.")
+
+        # B. TEXT & DETAILS (OCR)
+        if ocr_text:
+            if is_diagram:
+                sections.append(f"📊 DATA & LABELS: This functions as a diagram containing technical labels: \"{ocr_text[:400]}\"")
+            else:
+                sections.append(f"📝 READABLE TEXT: The image contains embedded text: \"{ocr_text[:250]}\"")
+        
+        # C. PLACEMENT & CONTEXT (Semantic Link)
+        if context:
+            sections.append(f"📚 STORY CONTEXT: This visual supports the discussion regarding: \"{context[:180]}...\"")
+
+        # D. ATMOSPHERE (CV Heuristics)
+        sections.append(f"💡 ATMOSPHERE: A {lighting}, {color_vibe} composition.")
+
+        explanation = "\n\n".join(sections)
+        
+        # Final cleanup for "nothing found"
+        if len(explanation) < 30:
+            explanation = "🖼️ MINIMAL VISUAL: I can see a visual element here, but it's quite abstract or low-contrast. It serves as a decorative graphic for this section."
 
         return jsonify({"explanation": explanation})
 
@@ -3684,19 +3888,35 @@ def analyze_emotion():
         
         # Fast Rule-based pass for all texts
         emotion_rules = {
-            "happy": ["happy", "joy", "wonderful", "delighted", "smile", "laugh", "cheerful", "magic", "sunshine", "hope", "love", "friend", "proud", "achieved"],
-            "sad": ["sad", "cried", "tear", "unhappy", "lost", "death", "lonely", "darkness", "misery", "sorrow", "alone", "grave", "hurt", "pain", "hopeless"],
-            "angry": ["angry", "rage", "hate", "fight", "shout", "mad", "fury", "annoyed", "bitter", "punch", "strike", "vengeance"],
-            "fear": ["fear", "scared", "terrified", "ghost", "dark", "shadow", "unknown", "scary", "shiver", "beast", "creepy", "dangerous", "nervous"],
+            "happy": ["happy", "joy", "wonderful", "delighted", "smile", "laugh", "cheerful", "magic", "sunshine", "hope", "love", "friend", "proud", "achieved", "excellent", "great", "victory"],
+            "sad": ["sad", "cried", "tear", "unhappy", "lost", "death", "lonely", "darkness", "misery", "sorrow", "alone", "grave", "hurt", "pain", "hopeless", "mourning", "regret", "depressed"],
+            "angry": ["angry", "rage", "hate", "fight", "shout", "mad", "fury", "annoyed", "bitter", "punch", "strike", "vengeance", "furious", "disgusting", "scold", "enemy"],
+            "fear": ["fear", "scared", "terrified", "ghost", "dark", "shadow", "unknown", "scary", "shiver", "beast", "creepy", "dangerous", "nervous", "anxiety", "panic", "threat"],
+            "serious": ["important", "must", "strictly", "law", "truth", "fact", "science", "evidence", "proven", "required", "mandatory", "necessary", "solemn", "grave", "urgent", "critical"]
         }
 
         for t in texts:
+            t_clean = t.strip().lower()
+            
+            # 1. EXPRESSION TRIGGERS (Strongest for Dialogue)
+            if any(ex in t_clean for ex in ["hoo", "wow", "oh!", "gosh", "hey!", "aha", "strange!", "what!", "really!"]):
+                results.append({"emotion": "surprised"})
+                continue
+
+            # 2. PUNCTUATION TRIGGERS 
+            if "?" in t:
+                results.append({"emotion": "question"})
+                continue
+            if "!" in t:
+                results.append({"emotion": "energetic"})
+                continue
+
             text_lower = t.lower()
             words = text_lower.split()
             found_counts = {emotion: sum(1 for word in words if word in keywords) for emotion, keywords in emotion_rules.items()}
             
             max_emotion = "neutral"
-            max_val = -1
+            max_val = 0
             for em, val in found_counts.items():
                 if val > max_val:
                     max_val = val
@@ -3706,20 +3926,22 @@ def analyze_emotion():
                 results.append({"emotion": max_emotion})
                 continue
 
-            # Model Fallback (only if rules failed)
+            # 2. MODEL FALLBACK (Contextual Analysis)
             if analyzer:
-                res = analyzer(t[:512])[0]
-                results.append({"emotion": "happy" if res['label'] == 'POSITIVE' else "fear"})
+                try:
+                    # Model detects POSITIVE/NEGATIVE
+                    res = analyzer(t[:512])[0]
+                    # Map simple sentiment to specific narrator tones
+                    results.append({"emotion": "happy" if res['label'] == 'POSITIVE' else "sad"})
+                except:
+                    results.append({"emotion": "neutral"})
             else:
                 results.append({"emotion": "neutral"})
 
         return jsonify(results)
     except Exception as e:
-        print(f"Emotion analysis batch error: {e}")
-        return jsonify([{"emotion": "neutral"}] * len(texts))
-    except Exception as e:
         print(f"Emotion analysis error: {e}")
-        return jsonify({"emotion": "neutral"})
+        return jsonify([{"emotion": "neutral"}] * (len(texts) if 'texts' in locals() else 1))
 
 @app.route("/get_recommendations", methods=["POST"])
 def get_recommendations():
@@ -3832,7 +4054,8 @@ def get_recommendations():
 def download_external():
     data = request.json
     title = data.get("title")
-    source_url = data.get("url") # Now we receive a real URL
+    source_url = data.get("url") 
+    cover_url = data.get("cover_url")
     
     if not source_url or not title:
         return jsonify({"error": "Missing Source Information"}), 400
@@ -3852,27 +4075,38 @@ def download_external():
         if is_html:
             soup = BeautifulSoup(book_content, "html.parser")
             
-            # 1. Fix relative URLs for images and links
+            # 1. AGGRESSIVE CLEANING: Remove website UI elements (the "chrome" or link clutter)
+            # This ensures only the BOOK content remains, not the website's headers/nav/ads.
+            for noise in soup.find_all(['nav', 'header', 'footer', 'aside', 'script', 'style', 'iframe', 'noscript', 'form', 'button', 'input']):
+                noise.decompose()
+
+            # 2. Fix URLs for images and links (Ensuring HTTPS for browser security)
             for tag in soup.find_all(['img', 'a']):
                 attr = 'src' if tag.name == 'img' else 'href'
                 val = tag.get(attr)
-                if val and not val.startswith(('http', 'data:', '#', 'mailto:')):
-                    tag[attr] = urljoin(source_url, val)
+                if val:
+                    if not val.startswith(('http', 'data:', '#', 'mailto:')):
+                        tag[attr] = urljoin(source_url, val)
+                    # Force HTTPS to prevent "Mixed Content" blocks where images don't show
+                    if tag[attr].startswith('http://'):
+                        tag[attr] = tag[attr].replace('http://', 'https://', 1)
             
-            # 2. Extract title if better one found
+            # 3. Extract title if better one found
             t_tag = soup.find('title')
             if t_tag: 
                 new_title = t_tag.get_text().strip()
                 if new_title and len(new_title) > 3: title = new_title
 
-            # 3. Clean up boilerplate (optional but makes it feel more premium)
-            # Remove giant Gutenberg header/footer blocks if they are distinct
-            for noise in soup.find_all(['style', 'script']):
-                noise.decompose()
-
-            # 4. Safe Split into Pages
+            # 4. Find the "Main" Content (Targeting the meat of the book)
+            # We look for standard content containers first
+            body = soup.find('main') or soup.find('article') or soup.find(id='content') or soup.find(class_='content') or soup.find('body') or soup
+            
+            # Remove any remaining site-specific sidebars or meta info
+            for meta in body.find_all(class_=re.compile(r'sidebar|menu|nav|social|ad-', re.I)):
+                meta.decompose()
+            
+            # 5. Safe Split into Pages
             # We iterate through blocks and group them
-            body = soup.find('body') or soup
             current_page = []
             current_len = 0
             
@@ -3916,13 +4150,29 @@ def download_external():
         final_html = ""
         if not pages:
             # Fallback
-            final_html = f"<div id='pdf-page-0' class='lazy-page-container' style='padding: 60px; max-width: 900px; margin: 0 auto; background: white;'>{book_content}</div>"
+            final_html = f"<div id='pdf-page-0' class='lazy-page-container' style='padding: 60px; max-width: 900px; margin: 0 auto; background: var(--bg-panel);'>{book_content}</div>"
         else:
             for i, p_content in enumerate(pages):
-                # We use the marker <div id="pdf-page- which the frontend looks for
-                final_html += f'<div id="pdf-page-{i}" class="lazy-page-container" style="padding: 60px; max-width: 900px; margin: 0 auto 40px auto; background: var(--bg-paper); border-radius: 4px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); min-height: 800px; color: #333; font-family: \'Georgia\', serif; font-size: 1.15rem;">\n'
+                # Using a more premium, responsive style for external books
+                final_html += f'''
+<div id="pdf-page-{i}" class="lazy-page-container" style="
+    padding: 60px; 
+    max-width: 850px; 
+    margin: 0 auto 40px auto; 
+    background: #ffffff; 
+    border-radius: 8px; 
+    box-shadow: 0 10px 40px rgba(0,0,0,0.1); 
+    min-height: 1000px; 
+    color: #1a1a1a; 
+    font-family: 'Outfit', 'Inter', sans-serif; 
+    font-size: 1.15rem;
+    line-height: 1.8;
+    position: relative;
+    border: 1px solid rgba(0,0,0,0.05);
+">
+'''
                 if i == 0:
-                    final_html += f'<h1 style="text-align: center; margin-bottom: 50px; color: #2c3e50;">{title}</h1>\n'
+                    final_html += f'<h1 style="text-align: center; margin-bottom: 50px; color: #2c3e50; font-weight: 800; font-size: 2.2rem;">{title}</h1>\n'
                 final_html += p_content
                 final_html += '\n</div>'
 
@@ -3933,11 +4183,26 @@ def download_external():
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(final_html)
             
+        # 6. Handle Thumbnail
+        thumb_path = None
+        if cover_url:
+            try:
+                t_res = requests.get(cover_url, timeout=10)
+                if t_res.ok:
+                    t_dir = os.path.join(UPLOAD_FOLDER, "thumbnails")
+                    os.makedirs(t_dir, exist_ok=True)
+                    thumb_filename = f"thumb_{int(time.time())}_{secure_filename(title)[:50]}.jpg"
+                    with open(os.path.join(t_dir, thumb_filename), "wb") as f:
+                        f.write(t_res.content)
+                    thumb_path = thumb_filename
+            except Exception as te:
+                print(f"Thumb error: {te}")
+
         conn = get_conn()
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO books(name, path, extracted_path, status, user_id) VALUES (?, ?, ?, ?, ?)",
-            (title, filepath, extracted_path, "processing", current_user.id)
+            "INSERT INTO books(name, path, extracted_path, status, user_id, thumbnail_path) VALUES (?, ?, ?, ?, ?, ?)",
+            (title, filepath, extracted_path, "processing", current_user.id, thumb_path)
         )
         book_id = cur.lastrowid
         conn.commit()
