@@ -293,7 +293,7 @@ function renderDashboard(data) {
             <div class="card-thumbnail">
                 ${thumbContent}
                 <button class="btn-favorite ${is_fav ? 'active' : ''}" onclick="toggleFavorite(${id}, this)" title="${is_fav ? 'Unfavorite' : 'Add to Favorites'}">
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="${is_fav ? '#ef4444' : 'none'}" stroke="${is_fav ? '#ef4444' : 'white'}" stroke-width="2">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="${is_fav ? '#ef4444' : 'none'}" stroke="${is_fav ? '#ef4444' : 'white'}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="overflow: visible;">
                         <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l8.84-8.84 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
                     </svg>
                 </button>
@@ -410,15 +410,19 @@ async function fetchUserStreak() {
         const data = await res.json();
 
         const streakEl = document.getElementById("userStreakCount");
+        const ribbonEl = document.getElementById("userStreakRibbon");
         const todayTimeEl = document.getElementById("todayReadingTime");
         const goalCircle = document.getElementById("dailyGoalCircle");
         const goalPercent = document.getElementById("dailyGoalPercent");
         const goalStatus = document.getElementById("goalStatus");
 
-        if (!streakEl) return;
-
         // Update Streak
-        streakEl.innerHTML = `🔥 ${data.streak} Day Streak`;
+        if (streakEl) {
+            streakEl.innerHTML = `<img src="/static/fire.gif" alt="Streak" style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px; object-fit: contain; mix-blend-mode: multiply;"> ${data.streak} Day Streak`;
+        }
+        if (ribbonEl) {
+            ribbonEl.setAttribute("data-streak", `${data.streak} Day Streak`);
+        }
 
         // Today's Time
         const mins = Math.floor(data.today_seconds / 60);
@@ -1462,9 +1466,14 @@ function toggleTheme() {
     document.documentElement.setAttribute('data-theme', newTheme);
     localStorage.setItem('reader-theme', newTheme);
 
+    const checkBoxes = document.querySelectorAll('.theme-switch__checkbox');
+    checkBoxes.forEach(cb => {
+        if (cb) cb.checked = (newTheme === 'dark');
+    });
+
     const icons = document.querySelectorAll('.themeIcon');
     icons.forEach(icon => {
-        if (icon) icon.innerText = isDark ? '☀️' : '🌙';
+        if (icon) icon.innerText = newTheme === 'light' ? '☀️' : '🌙';
     });
 }
 
@@ -1473,6 +1482,10 @@ function toggleTheme() {
     const saved = localStorage.getItem('reader-theme') || 'dark';
     document.documentElement.setAttribute('data-theme', saved);
     document.addEventListener('DOMContentLoaded', () => {
+        const checkBoxes = document.querySelectorAll('.theme-switch__checkbox');
+        checkBoxes.forEach(cb => {
+            if (cb) cb.checked = (saved === 'dark');
+        });
         const icons = document.querySelectorAll('.themeIcon');
         icons.forEach(icon => {
             if (icon) icon.innerText = saved === 'light' ? '☀️' : '🌙';
@@ -1571,12 +1584,14 @@ function setNarratorGender(gender) {
     const femaleBtn = document.getElementById("femaleVoiceBtn");
 
     if (maleBtn && femaleBtn) {
+        maleBtn.style.background = "";
+        femaleBtn.style.background = "";
         if (gender === "male") {
-            maleBtn.style.background = "#b45309";
-            femaleBtn.style.background = "none";
+            maleBtn.classList.add("active");
+            femaleBtn.classList.remove("active");
         } else {
-            femaleBtn.style.background = "#b45309";
-            maleBtn.style.background = "none";
+            femaleBtn.classList.add("active");
+            maleBtn.classList.remove("active");
         }
         updateStorytellerState();
     }
@@ -1662,6 +1677,18 @@ function updateStorytellerState(forcedGender = null) {
             img.style.display = (id === activeId) ? 'block' : 'none';
         }
     });
+
+    // 4. SYNC PLAY/PAUSE BUTTON TEXT
+    const playPauseBtn = document.getElementById("playPauseBtn");
+    if (playPauseBtn) {
+        if (!isReadingAloud) {
+            playPauseBtn.innerHTML = "🔊 <span>Read Full</span>";
+        } else if (isPaused) {
+            playPauseBtn.innerHTML = "▶ <span>Resume</span>";
+        } else {
+            playPauseBtn.innerHTML = "⏸ <span>Pause</span>";
+        }
+    }
 }
 
 function getBestVoice(voices, lang, gender = currentNarratorGender) {
@@ -1941,8 +1968,8 @@ function loadBooks() {
                     : `<button disabled class="btn-open processing-btn" style="opacity:0.6;cursor:not-allowed;">${isProcessing ? 'Wait...' : 'Open'}</button>`;
 
                 let downloadBtn = (!isProcessing && status !== "error")
-                    ? `<button class="btn-download" onclick="downloadBook(${book[0]}, '${book[1].replace(/'/g, "\\'")}')"><i class="fas fa-download"></i> Download</button>`
-                    : `<button disabled class="btn-download" style="opacity:0.4;cursor:not-allowed;"><i class="fas fa-download"></i> Download</button>`;
+                    ? `<button class="btn-download" onclick="downloadBook(${book[0]}, '${book[1].replace(/'/g, "\\'")}')" title="Download Book"><i class="fas fa-download"></i></button>`
+                    : `<button disabled class="btn-download" style="opacity:0.4;cursor:not-allowed;" title="Download Book"><i class="fas fa-download"></i></button>`;
 
                 tr.innerHTML = `
                 <td>
@@ -1951,7 +1978,7 @@ function loadBooks() {
                             <div class="book-title-row">
                                 <span class="book-name"><i class="fas fa-book" style="color:var(--primary); margin-right:10px; font-size:0.95rem; opacity:0.8;"></i>${cleanName}</span>
                                 <button class="btn-sidebar-fav ${is_fav ? 'active' : ''}" onclick="toggleFavorite(${id}, this)" title="${is_fav ? 'Unfavorite' : 'Add to Favorites'}">
-                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="${is_fav ? '#ef4444' : 'none'}" stroke="${is_fav ? '#ef4444' : 'var(--text-light)'}" stroke-width="2.5">
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="${is_fav ? '#ef4444' : 'none'}" stroke="${is_fav ? '#ef4444' : 'var(--text-light)'}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="overflow: visible;">
                                         <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l8.84-8.84 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
                                     </svg>
                                 </button>
@@ -1965,7 +1992,7 @@ function loadBooks() {
                         <div class="book-footer-actions">
                             ${openBtn}
                             ${downloadBtn}
-                            <button class="btn-delete" onclick="deleteBook(${id})"><i class="fas fa-trash-alt"></i> Delete</button>
+                            <button class="btn-delete" onclick="deleteBook(${id})" title="Delete Book"><i class="fas fa-trash-alt"></i></button>
                         </div>
                     </div>
                 </td>
@@ -2188,6 +2215,9 @@ function showConfirmModal(title, text, primaryText, secondaryText, tertiaryText,
 }
 
 function openBook(bookId) {
+    const placeholder = document.getElementById("emptyBookPlaceholder");
+    if (placeholder) placeholder.style.display = "none";
+
     // ⚡ INSTANT CANCELLATION: Kill everything from the previous book immediately
     // Don't wait for the new book's fetch to return.
     const myRenderJobId = Date.now();
@@ -2247,6 +2277,10 @@ function openBook(bookId) {
 
 
 function proceedToOpenBook(bookId) {
+    const placeholder = document.getElementById("emptyBookPlaceholder");
+    if (placeholder) placeholder.style.display = "none";
+    const voiceBtn = document.getElementById("voiceBtn");
+    if (voiceBtn) voiceBtn.style.display = "flex";
     showLoader();
     window._pendingBookmarkResume = null; // Clear old book's residue
     window._isRenderingFinished = false; // Track if rendering is done for late-arriving bookmarks
@@ -2664,6 +2698,9 @@ function deleteBook(bookId) {
                 resetReadingSession();
                 let playPauseBtn = document.getElementById("playPauseBtn");
                 if (playPauseBtn) playPauseBtn.innerHTML = "🔊 <span>Read Full</span>";
+
+                const voiceBtn = document.getElementById("voiceBtn");
+                if (voiceBtn) voiceBtn.style.display = "none";
 
                 document.getElementById("reader").innerHTML = '<div class="empty-state">Select a book from the sidebar to start reading.</div>';
                 document.getElementById("bookTitle").innerText = "No book selected";
@@ -3570,7 +3607,7 @@ function stopReading(isComplete = false) {
     }
 
     let playPauseBtn = document.getElementById("playPauseBtn");
-    if (playPauseBtn) playPauseBtn.innerText = "▶";
+    if (playPauseBtn) playPauseBtn.innerText = "Read Full ▶";
 
     updateStorytellerState();
 }
@@ -3643,8 +3680,6 @@ async function togglePlayPause() {
             window.forceResumeScroll = true; // FORCE JUMP BACK TO PAUSE POINT
             await resumeReadingFromIndex(currentAbsoluteCharIndex, false, true);
             updateStorytellerState();
-
-            if (playPauseBtn) playPauseBtn.innerHTML = "⏸ <span>Pause</span>";
         } else {
             // PAUSE
             isPaused = true;
@@ -3657,8 +3692,6 @@ async function togglePlayPause() {
             // We cancel the speech to free resources and prepare for a clean restart.
             window.speechSynthesis.cancel();
             updateStorytellerState();
-
-            if (playPauseBtn) playPauseBtn.innerHTML = "▶ <span>Resume</span>";
         }
     }
 }
@@ -3728,7 +3761,8 @@ function initializeReader() {
                 return;
             }
 
-            if (!globalReadingText) return;
+            // 🛡️ INITIALIZATION: If the book is open but not yet mapped, allow mapping now.
+            // (Removed the early return for empty globalReadingText)
 
             // Stop if selecting text
             const selection = window.getSelection();
@@ -3782,10 +3816,28 @@ function initializeReader() {
             window.currentReadingNode = targetNode;
             window.currentReadingOffsetInNode = offset;
 
+            // CRITICAL: For massive books, the clicked node might be outside the current mapped window.
+            // Force an immediate map rebuild centered on this click to ensure it's mapped correctly.
+            rebuildReadingNodeMap();
+
             let absoluteIndex = -1;
-            const nodeIdx = globalTextNodes.indexOf(targetNode);
+            let nodeIdx = globalTextNodes.indexOf(targetNode);
+
+            // EMERGENCY RECALIBRATION: If node isn't in map (rare sync issue), force a centered rebuild
+            if (nodeIdx === -1) {
+                rebuildReadingNodeMap();
+                nodeIdx = globalTextNodes.indexOf(targetNode);
+            }
+
             if (nodeIdx !== -1) {
                 absoluteIndex = globalNodeOffsets[nodeIdx] + offset;
+            } else {
+                // LAST RESORT: Search for the node by content if reference lost
+                const searchTxt = targetNode.nodeValue;
+                if (searchTxt) {
+                    absoluteIndex = globalReadingText.indexOf(searchTxt);
+                    if (absoluteIndex !== -1) absoluteIndex += offset;
+                }
             }
 
             if (absoluteIndex !== -1) {
@@ -3886,10 +3938,36 @@ function updatePagesList() {
 }
 
 function jumpToPage(pageNumber) {
-    if (!pageNumber || pageNumber < 1 || pageNumber > totalPages) return;
-    const targetPage = document.getElementById(`pdf-page-${pageNumber - 1}`);
+    const num = parseInt(pageNumber);
+    if (!num || num < 1) {
+        showUploadToast("⚠️ Invalid page number.", "info");
+        return;
+    }
+
+    if (num > totalPages) {
+        showUploadToast(`⚠️ Page ${num} is not available in this book. Going to last page instead.`, "info");
+        const lastPage = document.getElementById(`pdf-page-${totalPages - 1}`);
+        if (lastPage) {
+            lastPage.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            const input = document.getElementById('currentPageInput');
+            if (input) input.value = totalPages;
+        }
+        return;
+    }
+
+    const targetPage = document.getElementById(`pdf-page-${num - 1}`);
     if (targetPage) {
         targetPage.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        const input = document.getElementById('currentPageInput');
+        if (input) input.value = num;
+    } else {
+        // Fallback for missing elements
+        const allPages = document.querySelectorAll('.lazy-page-container');
+        if (num <= allPages.length) {
+            allPages[num - 1].scrollIntoView({ behavior: 'smooth', block: 'start' });
+        } else {
+            showUploadToast("⚠️ Page content is still loading or unavailable.", "info");
+        }
     }
 }
 
@@ -3900,6 +3978,31 @@ function readSelectedText() {
     let selectedText = selection.toString().trim();
     if (!selectedText) return;
 
+    // 🎯 SYNC: Map the selection to the global narrator engine to enable highlighting and smooth playback
+    try {
+        const range = selection.getRangeAt(0);
+        window.currentReadingNode = range.startContainer;
+        window.currentReadingOffsetInNode = range.startOffset;
+
+        rebuildReadingNodeMap();
+
+        const nodeIdx = globalTextNodes.indexOf(range.startContainer);
+        if (nodeIdx !== -1) {
+            const absIndex = globalNodeOffsets[nodeIdx] + range.startOffset;
+
+            // Clean up UI and start engine
+            let toolbar = document.getElementById("selectionToolbar");
+            if (toolbar) toolbar.style.display = "none";
+            selection.removeAllRanges();
+
+            resumeReadingFromIndex(absIndex, false, true);
+            return;
+        }
+    } catch (e) {
+        console.warn("Selection Sync Failed, falling back to basic TTS", e);
+    }
+
+    // FALLBACK: Basic TTS (no highlighting) if mapping fails
     window.speechSynthesis.resume();
     window.speechSynthesis.cancel();
     isReadingAloud = true;
@@ -3908,13 +4011,10 @@ function readSelectedText() {
     let playPauseBtn = document.getElementById("playPauseBtn");
     if (playPauseBtn) playPauseBtn.innerText = "Pause ⏸";
 
-
-
     let lang = getSelectedLanguage();
     let shortLang = lang ? lang.split('-')[0].toLowerCase() : 'en';
 
     if (shortLang !== 'en') {
-        // Route to the reliable Python gTTS backend for accurate foreign translations
         playFallbackAudioQueue([selectedText], 0, shortLang, false);
         return;
     }
@@ -3932,7 +4032,6 @@ function readSelectedText() {
             voices.find(v => v.name.toLowerCase().includes(langText));
         if (voice) {
             utterance.voice = voice;
-
         }
     }
 
@@ -4829,11 +4928,33 @@ function rebuildReadingNodeMap() {
 
     if (isMassive) {
         // Find current page based on scroll or snapshot
-        let currentIndex = 0;
+        let currentIndex = -1;
         if (snapshotNode) {
-            const currentP = snapshotNode.parentElement?.closest('.lazy-page-container, .reader-page');
-            currentIndex = allPages.indexOf(currentP);
+            // Robust parent search: check multiple layers to find the page container
+            let curr = snapshotNode.parentElement;
+            while (curr && curr !== reader) {
+                if (curr.classList.contains('lazy-page-container') || curr.classList.contains('reader-page') || curr.id.startsWith('pdf-page-')) {
+                    currentIndex = allPages.indexOf(curr);
+                    break;
+                }
+                curr = curr.parentElement;
+            }
         }
+
+        // Fallback to scroll position if node search failed
+        if (currentIndex === -1) {
+            const readerRect = reader.getBoundingClientRect();
+            let minDiff = Infinity;
+            allPages.forEach((p, idx) => {
+                const r = p.getBoundingClientRect();
+                const d = Math.abs(r.top - readerRect.top);
+                if (d < minDiff) {
+                    minDiff = d;
+                    currentIndex = idx;
+                }
+            });
+        }
+
         if (currentIndex === -1) currentIndex = 0;
 
         // Map a window: 10 pages back, 100 pages forward
@@ -5369,17 +5490,23 @@ async function executeClosingSequence() {
         let thankYou = document.getElementById("thankYouState");
         if (thankYou) {
             thankYou.style.display = "block";
-            // Auto-dismiss after 4 seconds
+            // Auto-dismiss after 1 second
             setTimeout(() => {
                 if (thankYou.style.display === "block") {
                     thankYou.style.display = "none";
                 }
-            }, 4000);
+            }, 1000);
         }
         reader.classList.remove('folding-exit');
     }
 
     document.getElementById("bookTitle").innerText = "Select a book from your library";
+
+    const voiceBtn = document.getElementById("voiceBtn");
+    if (voiceBtn) voiceBtn.style.display = "none";
+
+    const placeholder = document.getElementById("emptyBookPlaceholder");
+    if (placeholder) placeholder.style.display = "flex";
 
     // Clear sidebar highlights and button states
     document.querySelectorAll("#booklist tr").forEach(row => {
@@ -5630,16 +5757,23 @@ function applyZoom() {
 
 window.onload = () => {
     loadBooks().then(() => {
+        fetchUserStreak();
+        checkForInvites();
         // Auto-Open Deep Link Logic: Handle books shared via ?open=ID
         const urlParams = new URLSearchParams(window.location.search);
         const openId = urlParams.get('open');
+        const overlay = document.getElementById("dashboardOverlay");
         if (openId && activeBooksList) {
             const bookToOpen = activeBooksList.find(b => b[0] == openId);
             if (bookToOpen) {
                 openBook(bookToOpen[0], bookToOpen[1]);
-                // Strip param after opening to avoid repeat opens on refresh
+                if (overlay) overlay.style.display = "none";
                 window.history.replaceState({}, document.title, window.location.pathname);
+            } else {
+                if (overlay) overlay.style.display = "flex";
             }
+        } else {
+            if (overlay) overlay.style.display = "flex";
         }
     });
     initDragging();
@@ -6105,21 +6239,14 @@ async function processVoiceCommand(command) {
 
     // 7. NAVIGATION CONTROL (Go to page X)
     if (command.includes("page") || command.includes("scroll to") || command.includes("go to")) {
-        let match = command.match(/page\s*(\d+)/) || command.match(/to\s*(\d+)/);
+        let match = command.match(/(?:page|to|at)\s*(\d+)/i);
         if (match && match[1]) {
             let pageNum = parseInt(match[1]);
-            const pageId = (pageNum > 100) ? `pdf-page-${pageNum}` : `pdf-page-${pageNum - 1}`;
-            let pageEl = document.getElementById(pageId) || document.getElementById(`pdf-page-${pageNum}`);
-            if (pageEl) {
-                pageEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                const navMsg = `Scrolling to page ${pageNum}.`;
-                feedback.innerText = navMsg;
-                speakAIResponse(navMsg);
-                return;
-            } else {
-                speakAIResponse(`I couldn't find page ${pageNum} in this document.`);
-                return;
-            }
+            const navMsg = `Navigating to page ${pageNum}.`;
+            feedback.innerText = navMsg;
+            speakAIResponse(navMsg);
+            jumpToPage(pageNum);
+            return;
         }
     }
 

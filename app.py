@@ -1125,11 +1125,9 @@ def login():
                 login_user(user)
                 return redirect(url_for('index'))
             else:
-                print(f"Auth DEBUG: Password mismatch for user '{username}'")
+                return render_template("auth.html", error="Incorrect password", submitted_username=username)
         else:
-            print(f"Auth DEBUG: User '{username}' not found in database")
-            
-        return render_template("auth.html", error="Invalid username or password")
+            return render_template("auth.html", error="Username does not exist", submitted_username=username)
     return render_template("auth.html", error=None, success=None)
 
 @app.route("/register", methods=["POST"])
@@ -1162,38 +1160,45 @@ def register():
 
 @app.route("/forgot_password", methods=["POST"])
 def forgot_password():
+    username = request.form.get("username", "").strip()
     email = request.form.get("email", "").strip()
-    if not email:
-        return render_template("auth.html", error="Please enter your email", mode="forgot")
+    if not username or not email:
+        return render_template("auth.html", error="Please enter both username and email", mode="forgot")
         
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT username FROM users WHERE email=?", (email,))
+    cur.execute("SELECT email FROM users WHERE username=? AND email=?", (username, email))
     row = cur.fetchone()
     conn.close()
     
     if row:
-        # Email exists, show the reset form
-        return render_template("auth.html", reset_email=email, mode="reset")
+        # Both exist and match, show the reset form
+        return render_template("auth.html", reset_email=email, reset_username=username, mode="reset")
     else:
-        return render_template("auth.html", error="Email address not found", mode="forgot")
+        return render_template("auth.html", error="Account details do not match or username not found", mode="forgot")
 
 @app.route("/reset_password", methods=["POST"])
 def reset_password():
-    email = request.form.get("email", "").strip()
+    username = request.form.get("username", "").strip()
     new_password = request.form.get("password", "")
     confirm_password = request.form.get("confirm_password", "")
     
-    if not email or not new_password:
-        return render_template("auth.html", error="Missing details", mode="reset", reset_email=email)
+    if not username or not new_password:
+        return render_template("auth.html", error="Missing details", mode="reset", reset_username=username)
         
     if new_password != confirm_password:
-        return render_template("auth.html", error="Passwords do not match", mode="reset", reset_email=email)
+        return render_template("auth.html", error="Passwords do not match", mode="reset", reset_username=username)
         
     conn = get_conn()
     cur = conn.cursor()
+    cur.execute("SELECT id FROM users WHERE username=?", (username,))
+    user_row = cur.fetchone()
+    if not user_row:
+        conn.close()
+        return render_template("auth.html", error="Username does not exist", mode="forgot")
+
     hashed = generate_password_hash(new_password)
-    cur.execute("UPDATE users SET password=? WHERE email=?", (hashed, email))
+    cur.execute("UPDATE users SET password=? WHERE username=?", (hashed, username))
     conn.commit()
     conn.close()
     
@@ -2207,16 +2212,16 @@ def open_book(book_id):
         except Exception:
             pass
 
-        # 🚀 HYPER-FAST OPEN: For massive books, only send the first 300 pages initially.
-        # This makes the "Open" action instant regardless of book length (e.g. 5000+ pages).
+        # 🚀 HYPER-FAST OPEN: For massive books, only send the first 10000 pages initially.
+        # This makes the "Open" action instant regardless of book length.
         total_extracted_pages = text.count('lazy-page-container')
         has_more = False
-        if total_extracted_pages > 300:
-            # Safely slice the text after the 300th page container
+        if total_extracted_pages > 10000:
+            # Safely slice the text after the 10000th page container
             marker = 'lazy-page-container'
             parts = text.split(marker)
-            # Reconstruct the first 300 pages (index 300 because parts[0] is the text BEFORE the first marker)
-            text = marker.join(parts[:301]) + "</div>" # Close the last container just in case
+            # Reconstruct the first 10000 pages
+            text = marker.join(parts[:10001]) + "</div>" 
             has_more = True
 
         return jsonify({

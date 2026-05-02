@@ -1,621 +1,501 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Book Reader - Access</title>
+    <title>AI Book Reader - Interactive Access</title>
     <!-- Google Fonts -->
-    <link
-        href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Playfair+Display:wght@700;900&display=swap"
-        rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Playfair+Display:wght@700&display=swap" rel="stylesheet">
     <style>
         :root {
-            /* Dark Theme (Default) */
-            --primary: #6366f1;
-            --primary-hover: #4f46e5;
-            --primary-glow: rgba(99, 102, 241, 0.4);
-            --bg-body: #0f172a;
-            --bg-card: rgba(30, 41, 59, 0.7);
-            --glass-bg: rgba(255, 255, 255, 0.03);
-            --glass-border: rgba(255, 255, 255, 0.1);
-            --text-main: #f8fafc;
-            --text-dim: #94a3b8;
-            --input-bg: rgba(255, 255, 255, 0.05);
-            --hero-overlay: rgba(15, 23, 42, 0.6);
-            --auth-bg: url('/static/images/auth_dark.png');
+            /* ☕ Espresso Brown Dark Theme */
+            --primary: #f59e0b; 
+            --primary-glow: rgba(245, 158, 11, 0.3);
+            --bg-img: url('/static/images/auth_dark_mocha.png');
+            --card-bg: rgba(78, 52, 46, 0.95); 
+            --text-main: #f5ebe0;
+            --text-dim: #d6c0b3;
+            --input-bg: rgba(93, 64, 55, 0.8);
+            --border-radius-1x: 2px;
+            --border-radius-2x: 4px;
+            --spacing-half: 4px;
+            --spacing-1x: 8px;
+            --spacing-2x: 16px;
+            --spacing-4x: 32px;
+            --font-size-16: 16px;
+            --login-form-el-height: 48px;
+            --rive-bg: #4e342e;
         }
 
         [data-theme="light"] {
-            --bg-body: #f1f5f9;
-            --bg-card: rgba(255, 255, 255, 0.8);
-            --glass-bg: rgba(255, 255, 255, 0.5);
-            --glass-border: rgba(0, 0, 0, 0.08);
-            --text-main: #0f172a;
-            --text-dim: #64748b;
-            --input-bg: rgba(0, 0, 0, 0.03);
-            --hero-overlay: rgba(255, 255, 255, 0.2);
-            --auth-bg: url('/static/images/auth_light.png');
+            /* 🕯️ Premium Nude Palette */
+            --primary: #b58265; 
+            --primary-glow: rgba(181, 130, 101, 0.25);
+            --bg-img: url('/static/images/auth_light_nude.png');
+            --card-bg: #ffffff; 
+            --text-main: #3c3530;
+            --text-dim: #8d8076;
+            --input-bg: #fbf9f6;
+            --rive-bg: #f4ece1;
         }
 
-        body,
-        html {
+        * {
+            box-sizing: border-box;
             margin: 0;
             padding: 0;
-            height: 100vh;
-            width: 100vw;
+        }
+
+        body {
             font-family: 'Outfit', sans-serif;
-            background: var(--auth-bg) center/cover no-repeat fixed;
-            color: var(--text-main);
-            transition: background 0.8s ease-in-out, color 0.3s;
+            background: var(--bg-img) center/cover no-repeat fixed;
+            height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
             overflow: hidden;
+            color: var(--text-main);
         }
 
         body::before {
             content: '';
             position: absolute;
             top: 0; left: 0; right: 0; bottom: 0;
-            background: var(--hero-overlay);
-            backdrop-filter: blur(2px); /* Reduced blur for clarity */
+            background: rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(8px);
             z-index: 0;
         }
 
-        .auth-container {
-            width: 95%;
-            max-width: 800px;
-            padding: 40px;
-            background: var(--bg-card);
-            backdrop-filter: blur(20px);
-            border: 1px solid var(--glass-border);
-            border-radius: 32px;
-            box-shadow: 0 40px 100px rgba(0,0,0,0.5);
-            animation: fadeInScale 0.6s cubic-bezier(0.18, 0.89, 0.32, 1.28);
-            position: relative;
-            z-index: 10;
-        }
-
-        .auth-form-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 20px;
-            text-align: left;
-        }
-
-        .full-width {
-            grid-column: span 2;
-        }
-
-        @keyframes fadeInScale {
-            from {
-                opacity: 0;
-                transform: scale(0.95) translateY(10px);
-            }
-
-            to {
-                opacity: 1;
-                transform: scale(1) translateY(0);
-            }
-        }
-
-        .logo-mobile {
-            display: none;
-            font-family: 'Playfair Display', serif;
-            font-size: 2rem;
-            font-weight: 900;
-            margin-bottom: 30px;
-            text-align: center;
-            background: linear-gradient(135deg, var(--primary) 0%, #a5b4fc 100%);
-            background-clip: text;
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }
-
-        .auth-header {
-            margin-bottom: 35px;
-            text-align: left;
-        }
-
-        .auth-header h2 {
-            font-size: 2.2rem;
-            font-weight: 800;
-            margin: 0;
-            letter-spacing: -0.03em;
-        }
-
-        .auth-header p {
-            color: var(--text-dim);
-            margin: 10px 0 0 0;
-            font-size: 1rem;
-        }
-
-        .auth-tabs {
-            display: flex;
-            gap: 5px;
-            margin-bottom: 30px;
-            background: var(--input-bg);
-            padding: 5px;
-            border-radius: 16px;
-            border: 1px solid var(--glass-border);
-        }
-
-        .auth-tab {
-            flex: 1;
-            padding: 12px;
-            border-radius: 12px;
-            cursor: pointer;
-            font-weight: 600;
-            font-size: 0.95rem;
-            text-align: center;
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            color: var(--text-dim);
-        }
-
-        .auth-tab.active {
-            background: var(--primary);
-            color: white;
-            box-shadow: 0 4px 12px var(--primary-glow);
-        }
-
-        .input-group {
-            margin-bottom: 18px;
-            position: relative;
-        }
-
-        .input-group label {
-            display: block;
-            font-size: 0.8rem;
-            font-weight: 600;
-            color: var(--text-dim);
-            margin-bottom: 6px;
-            margin-left: 4px;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
-
-        .input-group input {
-            width: 100%;
-            padding: 14px 18px;
-            padding-right: 48px; /* Added padding to prevent text overlap with eye icon */
-            background: var(--input-bg);
-            border: 1px solid var(--glass-border);
-            border-radius: 14px;
-            color: var(--text-main);
-            font-size: 1rem;
+        .login-form-component-root {
             box-sizing: border-box;
-            transition: all 0.25s;
-            font-family: 'Outfit', sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-start;
+            font-size: 10px;
+            color: var(--text-main);
+            height: auto;
+            min-width: 500px;
+            max-width: 95vw;
+            max-height: 98vh; /* Almost full height */
+            margin: 0 auto;
+            z-index: 10;
+            background: var(--card-bg);
+            padding-top: 10px; /* Reduced padding */
+            padding-bottom: 20px;
+            border-radius: 40px;
+            box-shadow: 0 50px 100px rgba(0,0,0,0.6);
+            overflow: hidden; /* REMOVED SCROLLBAR */
+            border: 1px solid rgba(255,255,255,0.05);
+            transition: all 0.3s ease;
         }
 
-        .input-group input:focus {
+
+
+        .rive-wrapper {
+            width: 200px;
+            height: 200px;
+            background: var(--rive-bg);
+            border-radius: 50%;
+            margin: 5px auto 15px; /* Reduced top margin since flex-start has padding */
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            border: 4px solid rgba(255,255,255,0.1);
+            transition: all 0.3s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+            flex-shrink: 0;
+        }
+
+        .rive-container {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        #canvas {
+            width: 260px; 
+            height: 260px;
+            margin-top: 5px;
+            transition: all 0.3s cubic-bezier(0.18, 0.89, 0.32, 1.28);
+        }
+
+        /* Shrink bear slightly during registration to fit better */
+        .is-registering .rive-wrapper {
+            width: 130px;
+            height: 130px;
+            margin: 0 auto 10px;
+        }
+        .is-registering #canvas {
+            width: 170px;
+            height: 170px;
+            margin-top: 0;
+        }
+
+        .login-form-wrapper, .register-form-wrapper {
+            width: 100%;
+            padding: 0 40px;
+        }
+
+        .form-container {
+            background-color: transparent;
+            padding: 20px 0;
+            box-sizing: border-box;
+            width: 100%;
+        }
+
+        h1 {
+            font-family: 'Playfair Display', serif;
+            font-size: 2.2rem; /* Slightly smaller */
+            margin-bottom: 20px; /* Reduced margin */
+            text-align: center;
+            color: var(--text-main);
+        }
+
+        .form-container label {
+            display: block;
+            margin-bottom: 6px; /* Reduced margin */
+            font-size: 12px;
+            font-weight: 800;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            letter-spacing: 1px;
+        }
+
+        .form-container input {
+            height: var(--login-form-el-height);
+            width: 100%;
+            box-sizing: border-box;
+            font-size: 1rem;
+            color: var(--text-main);
+            background-color: var(--input-bg);
             outline: none;
+            padding: 0 20px;
+            border: 2px solid transparent;
+            border-radius: 16px;
+            transition: all 0.3s;
+        }
+
+        .form-container input:focus {
             border-color: var(--primary);
-            background: var(--bg-card);
+            background: rgba(255,255,255,0.05);
             box-shadow: 0 0 0 4px var(--primary-glow);
         }
 
-        .btn-primary {
-            width: 100%;
-            padding: 16px;
-            background: var(--primary);
-            border: none;
-            border-radius: 14px;
-            color: white;
-            font-size: 1.05rem;
-            font-weight: 700;
-            cursor: pointer;
-            transition: all 0.3s;
-            margin-top: 10px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 10px;
-        }
-
-        .btn-primary:hover {
-            background: var(--primary-hover);
-            transform: translateY(-2px);
-            box-shadow: 0 8px 20px var(--primary-glow);
-        }
-
-        .btn-primary:active {
-            transform: translateY(0);
-        }
-
-        .alert {
-            padding: 14px 18px;
-            border-radius: 14px;
-            margin-bottom: 25px;
-            font-size: 0.9rem;
-            font-weight: 500;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            animation: slideInDown 0.4s ease-out;
-        }
-
-        @keyframes slideInDown {
-            from {
-                opacity: 0;
-                transform: translateY(-20px);
-            }
-
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-
-        .alert-error {
-            background: rgba(239, 68, 68, 0.1);
-            color: #ef4444;
-            border: 1px solid rgba(239, 68, 68, 0.2);
-        }
-
-        .alert-success {
-            background: rgba(34, 197, 94, 0.1);
-            color: #22c55e;
-            border: 1px solid rgba(34, 197, 94, 0.2);
-        }
-
-        /* Theme Toggle */
-        .theme-toggle {
-            position: absolute;
-            top: 30px;
-            right: 30px;
-            width: 44px;
-            height: 44px;
-            border-radius: 12px;
-            background: var(--input-bg);
-            border: 1px solid var(--glass-border);
-            color: var(--text-main);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            transition: all 0.3s;
-            z-index: 100;
-        }
-
-        .theme-toggle:hover {
-            background: var(--primary);
-            color: white;
-            border-color: var(--primary);
-        }
-
-        /* Form Switching */
-        #registerForm {
-            display: none;
-        }
-
-        @media (max-width: 768px) {
-            .auth-container {
-                padding: 25px;
-            }
-
-            .auth-form-grid {
-                grid-template-columns: 1fr;
-                gap: 10px;
-            }
-
-            .full-width {
-                grid-column: span 1;
-            }
-        }
-
-        @media (max-width: 480px) {
-            .auth-container {
-                padding: 0 20px;
-            }
-
-            .auth-header h2 {
-                font-size: 1.8rem;
-            }
-        }
-
-        /* Fix auto-fill background color */
-        input:-webkit-autofill,
-        input:-webkit-autofill:hover,
-        input:-webkit-autofill:focus {
-            -webkit-text-fill-color: var(--text-main);
-            -webkit-box-shadow: 0 0 0px 1000px var(--bg-card) inset;
-            transition: background-color 5000s ease-in-out 0s;
-        }
-
-        .password-toggle {
-            position: absolute;
-            right: 14px;
-            top: 40px; /* Aligned with the center of the input box */
-            cursor: pointer;
-            color: var(--text-dim);
-            transition: all 0.3s;
-            user-select: none;
-            z-index: 5;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            opacity: 0.6;
-        }
-
-        .password-toggle:hover {
-            color: var(--primary);
-            opacity: 1;
-        }
-
-        .password-toggle svg {
-            width: 20px;
-            height: 20px;
-        }
-
-        .forgot-link {
+        .login-btn {
             display: block;
-            margin-top: 10px;
-            text-align: right;
-            font-size: 0.85rem;
+            border: none;
+            height: var(--login-form-el-height);
+            width: 100%;
+            text-align: center;
+            font-size: 1.1rem;
+            border-radius: 16px;
+            margin: 15px 0 10px; /* Reduced top margin */
+            cursor: pointer;
+            font-weight: 700;
+            background-color: var(--primary);
+            color: white;
+            transition: all 0.3s;
+            box-shadow: 0 10px 25px var(--primary-glow);
+        }
+
+        .login-btn:hover {
+            transform: translateY(-2px);
+            filter: brightness(1.1);
+            box-shadow: 0 15px 35px var(--primary-glow);
+        }
+
+        .switch-btn {
+            font-size: 14px;
             color: var(--text-dim);
             text-decoration: none;
-            transition: color 0.3s;
+            display: block;
+            text-align: center;
+            margin-top: 15px;
         }
 
-        .forgot-link:hover {
-            color: var(--primary);
-        }
+        .switch-btn b { color: var(--primary); cursor: pointer; text-decoration: underline; }
 
-        .auth-back {
+        .theme-btn {
+            position: fixed;
+            top: 25px;
+            right: 25px;
+            width: 55px;
+            height: 55px;
+            border-radius: 18px;
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(15px);
+            border: 1px solid rgba(255,255,255,0.1);
+            color: white;
             display: flex;
             align-items: center;
-            gap: 8px;
-            margin-bottom: 20px;
-            color: var(--text-dim);
+            justify-content: center;
             cursor: pointer;
-            font-size: 0.9rem;
-            font-weight: 600;
+            z-index: 200;
+            font-size: 1.4rem;
         }
 
-        .auth-back:hover {
-            color: var(--text-main);
-        }
+        .register-form-wrapper, .forgot-form-wrapper, .reset-form-wrapper { display: none; }
+        .is-registering .login-form-wrapper, .is-forgot .login-form-wrapper, .is-reset .login-form-wrapper { display: none; }
+        .is-registering .register-form-wrapper { display: block; }
+        .is-forgot .forgot-form-wrapper { display: block; }
+        .is-reset .reset-form-wrapper { display: block; }
     </style>
 </head>
 
-<body data-theme="dark" id="authContainer" data-error="{{ error or '' }}" data-success="{{ success or '' }}" data-mode="{{ mode or '' }}">
-    <button class="theme-toggle" onclick="toggleTheme()" title="Toggle Light/Dark Mode">
+<body id="authBody" data-error="{{ error or '' }}" data-success="{{ success or '' }}" data-mode="{{ mode or '' }}">
+    <button class="theme-btn" onclick="toggleTheme()">
         <span id="themeIcon">🌙</span>
     </button>
 
-    <div class="auth-container">
-        <div class="logo-mobile" style="display: block;">AI Book Reader</div>
-
-        <div class="auth-header">
-            <h2 id="authTitle">Welcome Back</h2>
-            <p id="authDesc">Please enter your details to access your library.</p>
+    <div class="login-form-component-root" id="authCard">
+        <div class="rive-wrapper">
+            <div class="rive-container">
+                <canvas id="canvas"></canvas>
+            </div>
         </div>
-
-                {% if error %}
-                <div class="alert alert-error">
-                    <span>⚠️</span> {{ error }}
-                </div>
-                {% endif %}
-                {% if success %}
-                <div class="alert alert-success">
-                    <span>✨</span> {{ success }}
-                </div>
-                {% endif %}
-
-                <div class="auth-tabs">
-                    <div id="loginTab" class="auth-tab active" onclick="showAuth('login')">Login</div>
-                    <div id="registerTab" class="auth-tab" onclick="showAuth('register')">Register</div>
-                </div>
-
-                <!-- Login Form -->
-                <form id="loginForm" action="/login" method="POST" style="max-width: 400px; margin: 0 auto;">
+        
+        <!-- Login Form Wrapper -->
+        <div class="login-form-wrapper" id="loginWrapper">
+            <div class="form-container">
+                <form action="/login" method="POST" autocomplete="off">
+                    <h1>Welcome Back</h1>
                     <div class="input-group">
-                        <label for="login_user">Username</label>
-                        <input type="text" id="login_user" name="username" placeholder="Enter username" required
-                            autocomplete="username">
+                        <label>Username</label>
+                        <input type="text" name="username" id="login_username" placeholder="Username" required autocomplete="off" value="{{ submitted_username or '' }}">
                     </div>
+                    <div style="height: 20px;"></div>
                     <div class="input-group">
-                        <label for="login_pass">Password</label>
-                        <input type="password" id="login_pass" name="password" placeholder="••••••••" required
-                            autocomplete="current-password">
-                        <div class="password-toggle" onclick="togglePassword('login_pass')">
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+                        <div style="display: flex; justify-content: space-between; align-items: baseline;">
+                            <label style="margin-bottom: 6px;">Password</label>
+                            <a href="#" onclick="toggleForms('forgot')" style="font-size: 12px; color: var(--primary); text-decoration: none; font-weight: 700; letter-spacing: 0.5px; transition: filter 0.2s;" onmouseover="this.style.filter='brightness(1.2)'" onmouseout="this.style.filter='none'">Forgot Password?</a>
                         </div>
-                        <a href="#" class="forgot-link" onclick="showAuth('forgot')">Forgot Password?</a>
-                    </div>
-                    <button type="submit" class="btn-primary">Unlock Library <span>→</span></button>
-                </form>
-
-                <!-- Forgot Password Form -->
-                <form id="forgotForm" action="/forgot_password" method="POST" style="display: none; max-width: 400px; margin: 0 auto;">
-                    <div class="auth-back" onclick="showAuth('login')">← Back to Login</div>
-                    <div class="input-group">
-                        <label for="forgot_email">Enter your Email</label>
-                        <input type="email" id="forgot_email" name="email" placeholder="john@example.com" required>
-                    </div>
-                    <p style="font-size: 0.85rem; color: var(--text-dim); margin-bottom: 20px;">
-                        We will verify your email before allowing you to reset your password.
-                    </p>
-                    <button type="submit" class="btn-primary">Verify Email <span>→</span></button>
-                </form>
-
-                <!-- Reset Password Form -->
-                <form id="resetForm" action="/reset_password" method="POST" style="display: none; max-width: 400px; margin: 0 auto;">
-                    <div class="auth-header" style="margin-bottom: 20px;">
-                        <h2 style="font-size: 1.5rem;">Reset Password</h2>
-                        <p style="font-size: 0.9rem;">Update credentials for {{ reset_email }}</p>
-                    </div>
-                    <input type="hidden" name="email" value="{{ reset_email }}">
-                    <div class="input-group">
-                        <label for="reset_pass">New Password</label>
-                        <input type="password" id="reset_pass" name="password" placeholder="New password" required>
-                        <div class="password-toggle" onclick="togglePassword('reset_pass')">
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+                        <div style="position: relative;">
+                            <input type="password" name="password" id="login_password" placeholder="••••••••" required autocomplete="off" style="padding-right: 40px; width: 100%;">
+                            <span onclick="togglePasswordVisibility('login_password', this)" style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); cursor: pointer; color: var(--primary); display: flex; align-items: center; justify-content: center; user-select: none;">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-eye"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                            </span>
                         </div>
                     </div>
-                    <div class="input-group">
-                        <label for="reset_conf">Confirm Password</label>
-                        <input type="password" id="reset_conf" name="confirm_password" placeholder="Repeat password" required>
-                        <div class="password-toggle" onclick="togglePassword('reset_conf')">
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
-                        </div>
-                    </div>
-                    <button type="submit" class="btn-primary">Update Password <span>✨</span></button>
-                </form>
-
-                <!-- Register Form -->
-                <form id="registerForm" action="/register" method="POST">
-                    <div class="auth-form-grid">
-                        <div class="input-group">
-                            <label for="reg_name">Full Name</label>
-                            <input type="text" id="reg_name" name="full_name" placeholder="John Doe" required
-                                autocomplete="name">
-                        </div>
-                        <div class="input-group">
-                            <label for="reg_email">Email Address</label>
-                            <input type="email" id="reg_email" name="email" placeholder="john@example.com" required
-                                autocomplete="email">
-                        </div>
-                        <div class="input-group">
-                            <label for="reg_user">Choose Username</label>
-                            <input type="text" id="reg_user" name="username" placeholder="johndoe123" required
-                                autocomplete="username">
-                        </div>
-                        <div class="input-group">
-                            <label for="reg_pass">Password</label>
-                            <input type="password" id="reg_pass" name="password" placeholder="Create password" required
-                                autocomplete="new-password">
-                            <div class="password-toggle" onclick="togglePassword('reg_pass')">
-                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
-                            </div>
-                        </div>
-                        <div class="input-group">
-                            <label for="reg_conf">Confirm Password</label>
-                            <input type="password" id="reg_conf" name="confirm_password" placeholder="Repeat password"
-                                required autocomplete="new-password">
-                            <div class="password-toggle" onclick="togglePassword('reg_conf')">
-                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
-                            </div>
-                        </div>
-                        <div class="full-width">
-                            <button type="submit" class="btn-primary">Create Account <span>✨</span></button>
-                        </div>
-                    </div>
+                    <button type="submit" class="login-btn">Unlock Library</button>
+                    <p class="switch-btn">New here? <b onclick="toggleForms('register')">Create Account</b></p>
                 </form>
             </div>
+        </div>
 
+        <!-- Register Form Wrapper -->
+        <div class="register-form-wrapper" id="registerWrapper">
+            <div class="form-container">
+                <form action="/register" method="POST">
+                <h1>Join Us</h1>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                    <div>
+                        <label>Full Name</label>
+                        <input type="text" name="full_name" id="reg_fullname" placeholder="Full Name" required autocomplete="off">
+                    </div>
+                    <div>
+                        <label>Email</label>
+                        <input type="email" name="email" id="reg_email" placeholder="example@gmail.com" required autocomplete="off">
+                    </div>
+                </div>
+                <div style="height: 10px;"></div>
+                <label>Username</label>
+                <input type="text" name="username" id="reg_username" placeholder="Username" required autocomplete="off">
+                <div style="height: 10px;"></div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                    <div>
+                        <label>Password</label>
+                        <div style="position: relative;">
+                            <input type="password" name="password" id="reg_password" placeholder="••••••••" required autocomplete="new-password" style="padding-right: 40px; width: 100%;">
+                            <span onclick="togglePasswordVisibility('reg_password', this)" style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); cursor: pointer; color: var(--primary); display: flex; align-items: center; justify-content: center; user-select: none;">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-eye"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                            </span>
+                        </div>
+                    </div>
+                    <div>
+                        <label>Confirm</label>
+                        <div style="position: relative;">
+                            <input type="password" name="confirm_password" id="reg_confirm" placeholder="••••••••" required autocomplete="new-password" style="padding-right: 40px; width: 100%;">
+                            <span onclick="togglePasswordVisibility('reg_confirm', this)" style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); cursor: pointer; color: var(--primary); display: flex; align-items: center; justify-content: center; user-select: none;">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-eye"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                <button type="submit" class="login-btn">Create Account</button>
+                <p class="switch-btn">Member? <b onclick="toggleForms('login')">Login Here</b></p>
+                </form>
+            </div>
+        </div>
+
+        <!-- Forgot Password Form Wrapper -->
+        <div class="forgot-form-wrapper" id="forgotWrapper">
+            <div class="form-container">
+                <form action="/forgot_password" method="POST">
+                    <h1>Reset Password</h1>
+                    <div class="input-group">
+                        <label>Username</label>
+                        <input type="text" name="username" id="forgot_username" placeholder="Enter your username" required autocomplete="username">
+                    </div>
+                    <div style="height: 10px;"></div>
+                    <div class="input-group">
+                        <label>Email Address</label>
+                        <input type="email" name="email" id="forgot_email" placeholder="example@gmail.com" required autocomplete="email">
+                    </div>
+                    <button type="submit" class="login-btn">Verify Account</button>
+                    <p class="switch-btn">Remembered? <b onclick="toggleForms('login')">Login Here</b></p>
+                </form>
+            </div>
+        </div>
+
+        <!-- Reset Password Form Wrapper -->
+        <div class="reset-form-wrapper" id="resetWrapper">
+            <div class="form-container">
+                <form action="/reset_password" method="POST">
+                    <h1>New Password</h1>
+                    <input type="hidden" name="username" value="{{ reset_username or '' }}">
+                    <input type="hidden" name="email" value="{{ reset_email or '' }}">
+                    <div class="input-group">
+                        <label>New Password</label>
+                        <div style="position: relative;">
+                            <input type="password" name="password" id="reset_password" placeholder="••••••••" required autocomplete="new-password" style="padding-right: 40px; width: 100%;">
+                            <span onclick="togglePasswordVisibility('reset_password', this)" style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); cursor: pointer; color: var(--primary); display: flex; align-items: center; justify-content: center; user-select: none;">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-eye"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                            </span>
+                        </div>
+                    </div>
+                    <div style="height: 10px;"></div>
+                    <div class="input-group">
+                        <label>Confirm Password</label>
+                        <div style="position: relative;">
+                            <input type="password" name="confirm_password" id="reset_confirm" placeholder="••••••••" required autocomplete="new-password" style="padding-right: 40px; width: 100%;">
+                            <span onclick="togglePasswordVisibility('reset_confirm', this)" style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); cursor: pointer; color: var(--primary); display: flex; align-items: center; justify-content: center; user-select: none;">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-eye"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                            </span>
+                        </div>
+                    </div>
+                    <button type="submit" class="login-btn">Change Password</button>
+                    <p class="switch-btn">Changed your mind? <b onclick="toggleForms('login')">Login Here</b></p>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Rive Runtime -->
+    <script src="https://unpkg.com/@rive-app/canvas@latest"></script>
     <script>
-        function showAuth(type) {
-            const loginForm = document.getElementById('loginForm');
-            const registerForm = document.getElementById('registerForm');
-            const forgotForm = document.getElementById('forgotForm');
-            const resetForm = document.getElementById('resetForm');
-            
-            const loginTab = document.getElementById('loginTab');
-            const registerTab = document.getElementById('registerTab');
-            const tabsContainer = document.querySelector('.auth-tabs');
-            
-            const authTitle = document.getElementById('authTitle');
-            const authDesc = document.getElementById('authDesc');
+        const r = new rive.Rive({
+            src: "https://public.rive.app/community/runtime-files/2244-4437-animated-login-screen.riv",
+            canvas: document.getElementById("canvas"),
+            autoplay: true,
+            stateMachines: "Login Machine",
+            onLoad: () => {
+                r.resizeDrawingSurfaceToCanvas();
+                const inputs = r.stateMachineInputs("Login Machine");
+                const isChecking = inputs.find(i => i.name === "isChecking");
+                const numLook = inputs.find(i => i.name === "numLook");
+                const isHandsUp = inputs.find(i => i.name === "isHandsUp");
 
-            // Hide everything first
-            loginForm.style.display = 'none';
-            registerForm.style.display = 'none';
-            forgotForm.style.display = 'none';
-            resetForm.style.display = 'none';
-            tabsContainer.style.display = 'flex';
+                const inputsToWatch = [
+                    { id: "login_username", type: "user" },
+                    { id: "login_password", type: "pass" },
+                    { id: "reg_fullname", type: "user" },
+                    { id: "reg_email", type: "user" },
+                    { id: "reg_username", type: "user" },
+                    { id: "reg_password", type: "pass" },
+                    { id: "reg_confirm", type: "pass" },
+                    { id: "forgot_username", type: "user" },
+                    { id: "forgot_email", type: "user" },
+                    { id: "reset_password", type: "pass" },
+                    { id: "reset_confirm", type: "pass" }
+                ];
 
-            if (type === 'login') {
-                loginForm.style.display = 'block';
-                loginTab.classList.add('active');
-                registerTab.classList.remove('active');
-                authTitle.innerText = "Welcome Back";
-                authDesc.innerText = "Please enter your details to access your library.";
-            } else if (type === 'register') {
-                registerForm.style.display = 'block';
-                loginTab.classList.remove('active');
-                registerTab.classList.add('active');
-                authTitle.innerText = "Join the Library";
-                authDesc.innerText = "Start your journey today with our AI-powered reader.";
-            } else if (type === 'forgot') {
-                forgotForm.style.display = 'block';
-                tabsContainer.style.display = 'none';
-                authTitle.innerText = "Reset Password";
-                authDesc.innerText = "No worries, we'll help you get back in.";
-            } else if (type === 'reset') {
-                resetForm.style.display = 'block';
-                tabsContainer.style.display = 'none';
-                authTitle.innerText = "New Password";
-                authDesc.innerText = "Set a strong password to secure your account.";
+                inputsToWatch.forEach(item => {
+                    const el = document.getElementById(item.id);
+                    if (el) {
+                        el.addEventListener("focus", () => {
+                            if (item.type === "pass") isHandsUp.value = true;
+                            else isChecking.value = true;
+                        });
+                        el.addEventListener("blur", () => {
+                            isHandsUp.value = false;
+                            isChecking.value = false;
+                        });
+                        if (item.type === "user") {
+                            el.addEventListener("input", (e) => {
+                                if (numLook) numLook.value = e.target.value.length * 2;
+                            });
+                        }
+                    }
+                });
             }
-        }
+        });
 
-        function togglePassword(id) {
-            const input = document.getElementById(id);
-            const toggle = input.nextElementSibling;
-            
-            const eyeSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>`;
-            const eyeOffSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.52 13.52 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/></svg>`;
-
-            if (input.type === 'password') {
-                input.type = 'text';
-                toggle.innerHTML = eyeOffSVG;
-            } else {
-                input.type = 'password';
-                toggle.innerHTML = eyeSVG;
-            }
+        function toggleForms(mode) {
+            const root = document.querySelector('.login-form-component-root');
+            root.classList.remove('is-registering', 'is-forgot', 'is-reset');
+            if (mode === 'register') root.classList.add('is-registering');
+            else if (mode === 'forgot') root.classList.add('is-forgot');
+            else if (mode === 'reset') root.classList.add('is-reset');
         }
 
         function toggleTheme() {
             const html = document.documentElement;
             const icon = document.getElementById('themeIcon');
-            const currentTheme = html.getAttribute('data-theme');
+            const newTheme = html.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+            html.setAttribute('data-theme', newTheme);
+            icon.innerText = newTheme === 'light' ? '☀️' : '🌙';
+            localStorage.setItem('reader-theme', newTheme);
+        }
 
-            if (currentTheme === 'light') {
-                html.setAttribute('data-theme', 'dark');
-                icon.innerText = '🌙';
-                localStorage.setItem('reader-theme', 'dark');
+        const eyeSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-eye"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>`;
+        const eyeOffSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-eye-off"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 19c-7 0-11-8-11-8a18.45 18.45 0 0 1 1.94-3.51M9.9 4.24A12.11 12.11 0 0 1 12 4c7 0 11 8 11 8a19.85 19.85 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>`;
+
+        function togglePasswordVisibility(inputId, toggleEl) {
+            const input = document.getElementById(inputId);
+            if (!input) return;
+            if (input.type === "password") {
+                input.type = "text";
+                toggleEl.innerHTML = eyeOffSvg;
             } else {
-                html.setAttribute('data-theme', 'light');
-                icon.innerText = '☀️';
-                localStorage.setItem('reader-theme', 'light');
+                input.type = "password";
+                toggleEl.innerHTML = eyeSvg;
             }
         }
 
-        // Persistent theme
-        (function initTheme() {
+        (function init() {
             const savedTheme = localStorage.getItem('reader-theme') || 'dark';
             document.documentElement.setAttribute('data-theme', savedTheme);
-            window.addEventListener('DOMContentLoaded', () => {
-                const icon = document.getElementById('themeIcon');
-                if (icon) icon.innerText = savedTheme === 'light' ? '☀️' : '🌙';
-            });
-        })();
+            const icon = document.getElementById('themeIcon');
+            if (icon) icon.innerText = savedTheme === 'light' ? '☀️' : '🌙';
 
-        // Auto-switch based on server state
-        const authData = document.getElementById('authContainer');
-        const serverError = authData.dataset.error;
-        const serverSuccess = authData.dataset.success;
-        const serverMode = authData.dataset.mode;
-
-        if (serverMode === 'forgot') showAuth('forgot');
-        else if (serverMode === 'reset') showAuth('reset');
-        else if (serverError) {
-            const errLow = serverError.toLowerCase();
-            const isRegistrationError = errLow.includes("registration") ||
-                errLow.includes("username already exists") ||
-                (errLow.includes("password") && !errLow.includes("invalid"));
-
-            if (isRegistrationError) {
-                showAuth('register');
+            const err = document.getElementById('authBody').dataset.error;
+            const succ = document.getElementById('authBody').dataset.success;
+            if (err && err !== '') {
+                alert(err);
             }
-        }
+            if (succ && succ !== '') {
+                alert(succ);
+            }
 
-        if (serverSuccess && !serverMode) {
-            showAuth('login');
-        }
+            const mode = document.getElementById('authBody').dataset.mode;
+            if (mode === 'register' || mode === 'forgot' || mode === 'reset') {
+                toggleForms(mode);
+            }
+
+            // Clean auto-fill values on normal page load / refresh
+            setTimeout(() => {
+                if (!err || err === '') {
+                    const u = document.getElementById('login_username');
+                    const p = document.getElementById('login_password');
+                    if (u && !u.matches(':focus')) u.value = '';
+                    if (p && !p.matches(':focus')) p.value = '';
+                }
+            }, 100);
+        })();
     </script>
 </body>
 
