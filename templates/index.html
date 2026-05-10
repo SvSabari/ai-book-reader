@@ -67,12 +67,26 @@
                 <p style="font-size: 0.75rem; color: var(--text-light); margin-bottom: 12px; font-weight: 500;">
 
                 </p>
-                <div class="file-input-wrapper">
-                    <label for="file" class="btn-upload-label">Choose File</label>
-                    <input type="file" id="file"
-                        onchange="document.querySelector('.btn-upload-label').innerText = this.files[0]?.name || 'Choose File'">
+                <div class="dashboard-upload-group" style="padding: 0; background: transparent; border: none; flex-direction: column; gap: 10px;">
+                    <button class="btn-choose-file" onclick="document.getElementById('file').click()" id="dashboardChooseFileBtnSidebar" style="width: 100%;">
+                        <span id="chosenFileNameSidebar">Choose File</span>
+                    </button>
+                    
+                    <div id="dashboardRenameWrapperSidebar" style="display: none; flex-direction: column; gap: 10px; width: 100%;">
+                        <input type="text" id="dashboardBookRenameInputSidebar" 
+                            style="width: 100%; background: rgba(255,255,255,0.05); border: 1px solid var(--primary); color: var(--text-white); padding: 12px; border-radius: 12px; font-size: 0.9rem; outline: none;"
+                            placeholder="Rename book...">
+                        
+                        <div style="display: flex; gap: 10px; width: 100%;">
+                            <button class="btn-primary" onclick="upload()" id="btnConfirmAddBookSidebar" style="flex: 1; margin: 0; height: 48px;">Upload Book</button>
+                            <button onclick="resetSidebarUpload()" title="Cancel Selection"
+                                style="background: rgba(239, 68, 68, 0.15); border: none; color: #f87171; width: 48px; height: 48px; border-radius: 12px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.3s;">
+                                <i class="fas fa-times"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <input type="file" id="file" onchange="handleSidebarFileSelection()" style="display: none;">
                 </div>
-                <button class="btn-primary" onclick="upload()">Upload Book</button>
             </div>
 
             <div class="library-list">
@@ -98,21 +112,23 @@
                         </svg>
                     </button>
                 </div>
-                <table id="booksTable">
-                    <thead>
-                        <tr>
-                            <th>Book Name</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="booklist">
-                        <!-- Loaded dynamically via JS -->
-                    </tbody>
-                </table>
+                <div class="sidebar-books-scroll" style="max-height: 500px; overflow-y: auto; overflow-x: hidden; margin-bottom: 10px; margin-top: 5px; border-radius: 12px; border: 1px solid rgba(0, 0, 0, 0.15); padding: 5px; background: transparent;">
+                    <table id="booksTable" style="margin-bottom: 0;">
+                        <thead>
+                            <tr>
+                                <th>Book Name</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="booklist">
+                            <!-- Loaded dynamically via JS -->
+                        </tbody>
+                    </table>
+                </div>
             </div>
 
             <!-- Discovery Hub (Sidebar Version) - Prompting the User -->
-            <div id="discoveryHub" style="margin-top: 40px; border-top: 1px solid var(--border); padding-top: 25px;">
+            <div id="discoveryHub" style="margin-top: 15px; border-top: 1px solid var(--border); padding-top: 15px;">
                 <h3
                     style="color: var(--text-white); font-family: 'Outfit', sans-serif; font-size: 1.1rem; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; gap: 10px;">
                     <div style="display: flex; align-items: center; gap: 10px;">
@@ -140,6 +156,9 @@
 
 
         </aside>
+        
+        <!-- Sidebar Resizer (Laptop Only) -->
+        <div id="sidebarResizer" class="sidebar-resizer"></div>
 
         <!-- Main Content / Reader Area -->
         <main class="main-content">
@@ -160,7 +179,8 @@
                         <select id="langSelect" class="lang-dropdown" onchange="translateBook()"
                             aria-label="Select translation language">
                             <option value="orig" selected> Select Language</option>
-                            <option value="en">English</option>
+                            <option value="en">English (US)</option>
+                            <option value="en-GB">English (UK)</option>
                             <option value="hi">Hindi</option>
                             <option value="bn">Bengali</option>
                             <option value="te">Telugu</option>
@@ -202,7 +222,7 @@
 
                     <button class="btn-icon"
                         onclick="document.getElementById('findBox').style.display='flex'; document.getElementById('findInput').focus();">
-                        🔍 <span>Find</span>
+                        <i class="fas fa-search"></i> <span>Find</span>
                     </button>
                     <!-- Universal Voice Selector (Man/Woman) -->
                     <div class="voice-toggle-pill">
@@ -223,11 +243,11 @@
                     </div>
                     <!-- Narrate / Play button -->
                     <button id="playPauseBtn" class="btn-icon" onclick="togglePlayPause()" title="Read Full Narration">
-                        🔊
+                        <i class="fas fa-volume-up"></i>
                     </button>
                     <div class="study-hub-container" style="position: relative;">
                         <button class="btn-icon study-hub-btn" onclick="toggleStudyHub()" title="Study Tools">
-                            🎓 <span>Study Hub</span>
+                            <i class="fas fa-graduation-cap"></i> <span>Study Hub</span>
                         </button>
                     </div>
                     <button class="close-btn" onclick="closeBookAction()" title="Close Book">✕</button>
@@ -243,7 +263,7 @@
                     <div class="modal-header"
                         style="background: #f8fafc; color: #1e293b; padding: 20px 40px; border-bottom: 2px solid #e2e8f0;">
                         <div>
-                            <h2 style="margin: 0; font-size: 1.5rem; font-weight: 800; color: #0f172a;">🚀 Revision
+                            <h2 style="margin: 0; font-size: 1.5rem; font-weight: 800; color: #0f172a;"><i class="fas fa-bolt" style="color: var(--primary);"></i> Revision
                                 Masterclass</h2>
                             <p style="margin: 2px 0 0 0; color: #64748b; font-size: 0.9rem;">Clean, focused insights
                                 distilled from the entire text.</p>
@@ -289,7 +309,7 @@
             <div id="reader-wrapper" style="position: relative;">
                 <!-- NEW: Floating Book Title Badge -->
                 <div id="bookBadge" class="floating-book-badge">
-                    <span class="badge-icon">📖</span>
+                    <span class="badge-icon"><i class="fas fa-book-open"></i></span>
                     <span id="bookTitle" class="badge-text">Opening Book...</span>
                     <button id="inviteFriendBtn" class="btn-fav-reader" style="margin-left: 5px;"
                         onclick="createReadingRoom()" title="Start Reading Room">
@@ -367,8 +387,8 @@
                 <!-- Empty Book Placeholder -->
                 <div id="emptyBookPlaceholder"
                     style="display: flex; flex-direction: column; align-items: center; justify-content: center; position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 40; background: var(--bg-app); border-radius: 12px; border: 1px solid var(--border); padding: 40px; text-align: center; isolation: auto;">
-                    <img src="/static/finger.gif" alt="Finger" width="120" height="120"
-                        style="object-fit: contain; mix-blend-mode: multiply !important; animation: float 3s ease-in-out infinite; margin-bottom: 20px;">
+                    <img src="/static/finger.gif" alt="Finger" width="120" height="120" class="empty-state-finger-gif"
+                        style="object-fit: contain; animation: float 3s ease-in-out infinite; margin-bottom: 20px;">
                     <p
                         style="color: var(--text-main); font-family: 'Outfit', sans-serif; font-weight: 400 !important; font-size: 1.25rem; margin-bottom: 8px; opacity: 0.85;">
                         Open a book from the library and start reading...</p>
@@ -377,6 +397,30 @@
                 <div id="reader" class="reader-box">
                     <!-- Book content injected here -->
                 </div>
+
+                <!-- Floating Draw Action Button and Toolbar -->
+                <button id="floatingDrawFab" onclick="event.stopPropagation(); toggleDrawingMode()" style="position: fixed; bottom: 100px; right: 50px; width: 48px; height: 48px; border-radius: 50%; background: #ffffff; border: 2px solid var(--primary); color: #1e293b; font-size: 20px; cursor: pointer; display: none; align-items: center; justify-content: center; box-shadow: 0 8px 25px rgba(99, 102, 241, 0.4); z-index: 2147483647; transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);" title="Doodle / Sketch Mode">
+                    <img src="/static/pencil.png" class="fab-img-pencil" style="width: 24px; height: 24px; object-fit: contain; mix-blend-mode: multiply;">
+                    <span id="drawStatusBadge" style="position: absolute; top: -2px; right: -2px; width: 16px; height: 16px; border-radius: 50%; background: #ef4444; border: 1.5px solid #ffffff; display: none; align-items: center; justify-content: center; font-size: 9px; color: white; font-weight: bold; box-shadow: 0 2px 5px rgba(0,0,0,0.25); z-index: 21;">✕</span>
+                </button>
+
+                <!-- Floating Draw Options Toolbar -->
+                <div id="drawingMiniToolbar" style="display: none; position: fixed; bottom: 95px; right: 45px; background: #ffffff; border: 2px solid var(--primary); padding: 8px; border-radius: 30px; flex-direction: column; gap: 8px; box-shadow: 0 15px 40px rgba(0,0,0,0.2); z-index: 2147483647; align-items: center; justify-content: center; animation: fadeInScale 0.2s ease-out;">
+                    <button onclick="activatePencilTool()" style="width: 42px; height: 42px; border-radius: 50%; background: #f8fafc; border: 1.5px solid #e2e8f0; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 16px; color: #1e293b; transition: all 0.2s;" title="Draw with Pencil" onmouseover="this.style.background='#eff6ff'" onmouseout="this.style.background='#f8fafc'">
+                        <i class="fas fa-pencil-alt"></i>
+                    </button>
+                    <button onclick="activateEraserTool()" style="width: 42px; height: 42px; border-radius: 50%; background: #f8fafc; border: 1.5px solid #e2e8f0; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 16px; color: #1e293b; transition: all 0.2s;" title="Erase Drawings" onmouseover="this.style.background='#eff6ff'" onmouseout="this.style.background='#f8fafc'">
+                        <i class="fas fa-eraser"></i>
+                    </button>
+                    <button onclick="clearDrawCanvas()" style="width: 42px; height: 42px; border-radius: 50%; background: #fef2f2; border: 1.5px solid #fee2e2; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 16px; color: #ef4444; transition: all 0.2s;" title="Clear All Drawings" onmouseover="this.style.background='#fee2e2'" onmouseout="this.style.background='#fef2f2'">
+                        <i class="fas fa-trash-alt"></i>
+                    </button>
+                    <button onclick="disableDrawingMode()" style="width: 42px; height: 42px; border-radius: 50%; background: #f8fafc; border: 1.5px solid #e2e8f0; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 16px; color: #64748b; transition: all 0.2s;" title="Close / Disable Mode" onmouseover="this.style.background='#f1f5f9'" onmouseout="this.style.background='#f8fafc'">
+                        <i class="fas fa-times"></i>
+                    </button>
+                </div>
+
+
 
 
                 <div id="thankYouState" onclick="this.style.display='none'"
@@ -393,27 +437,27 @@
                     <div class="toolbar-content">
                         <button id="addNoteBtn" class="toolbar-btn tooltip-trigger" onclick="saveAsNote()"
                             onmousedown="event.preventDefault()" title="Add to Notebook">
-                            <span class="btn-circle">📝</span>
+                            <span class="btn-circle"><i class="fas fa-sticky-note"></i></span>
                         </button>
                         <button id="addBookmarkBtn" class="toolbar-btn tooltip-trigger" onclick="saveBookmarkManual()"
                             onmousedown="event.preventDefault()" title="Add Bookmark Here">
-                            <span class="btn-circle">🔖</span>
+                            <span class="btn-circle"><i class="fas fa-bookmark"></i></span>
                         </button>
                         <button id="highlightBtn" class="toolbar-btn tooltip-trigger" onclick="saveHighlight()"
                             onmousedown="event.preventDefault()" title="Highlight Selection">
-                            <span class="btn-circle">🖋️</span>
+                            <span class="btn-circle"><i class="fas fa-highlighter"></i></span>
                         </button>
                         <button id="readSelectedBtn" class="toolbar-btn tooltip-trigger" onclick="readSelectedText()"
                             onmousedown="event.preventDefault()" title="Read Aloud">
-                            <span class="btn-circle">🔊</span>
+                            <span class="btn-circle"><i class="fas fa-volume-up"></i></span>
                         </button>
                         <button class="toolbar-btn tooltip-trigger" onclick="summarizeSelectedText()"
                             onmousedown="event.preventDefault()" title="Summarize Selection">
-                            <span class="btn-circle">📋</span>
+                            <span class="btn-circle"><i class="fas fa-clipboard-list"></i></span>
                         </button>
                         <button class="toolbar-btn tooltip-trigger" onclick="lookupSelectedText()"
                             onmousedown="event.preventDefault()" title="Dictionary Lookup">
-                            <span class="btn-circle">📖</span>
+                            <span class="btn-circle"><i class="fas fa-book"></i></span>
                         </button>
                     </div>
                 </div>
@@ -544,8 +588,8 @@
                                 <div class="quiz-card" onclick="startQuiz('mcq')"
                                     style="background: rgba(99, 102, 241, 0.05); border: 1px solid rgba(99, 102, 241, 0.2); padding: 24px; border-radius: 20px; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; gap: 20px;">
                                     <div
-                                        style="width: 56px; height: 56px; background: rgba(99, 102, 241, 0.1); border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 1.8rem;">
-                                        🎯</div>
+                                        style="width: 56px; height: 56px; background: rgba(99, 102, 241, 0.1); border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; color: #818cf8;">
+                                        <i class="fas fa-bullseye"></i></div>
                                     <div style="flex: 1;">
                                         <h4
                                             style="color: #818cf8; margin: 0 0 4px 0; font-size: 1.2rem; font-weight: 600;">
@@ -560,8 +604,8 @@
                                 <div class="quiz-card" onclick="startQuiz('short')"
                                     style="background: rgba(16, 185, 129, 0.05); border: 1px solid rgba(16, 185, 129, 0.2); padding: 24px; border-radius: 20px; cursor: pointer; transition: all 0.3s; display: flex; align-items: center; gap: 20px;">
                                     <div
-                                        style="width: 56px; height: 56px; background: rgba(16, 185, 129, 0.1); border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 1.8rem;">
-                                        📝</div>
+                                        style="width: 56px; height: 56px; background: rgba(16, 185, 129, 0.1); border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; color: #34d399;">
+                                        <i class="fas fa-file-alt"></i></div>
                                     <div style="flex: 1;">
                                         <h4
                                             style="color: #34d399; margin: 0 0 4px 0; font-size: 1.2rem; font-weight: 600;">
@@ -690,38 +734,25 @@
             <!-- Reading Room Modal -->
             <div id="roomModal" class="modal-overlay"
                 style="display: none; align-items: center; justify-content: center; z-index: 10000;">
-                <div class="modal-content"
+                <div class="modal-content room-modal-content"
                     style="max-width: 450px; padding: 40px; text-align: center; border-radius: 24px; background: var(--modal-bg); border: 1px solid var(--border);">
-                    <h2 style="color: var(--primary); margin-bottom: 15px;">🌐 Reading Room</h2>
-                    <p style="color: var(--text-light); margin-bottom: 25px; font-size: 0.95rem;">Share this link with a
-                        friend to synchronize your reading progress!</p>
-
-                    <div
-                        style="background: rgba(99, 102, 241, 0.05); padding: 20px; border-radius: 12px; border: 1px dashed var(--primary); margin-bottom: 25px; position: relative;">
-                        <p style="font-size: 0.8rem; color: var(--text-light); margin-bottom: 8px; font-weight: 600;">
-                            SHAREABLE LINK</p>
-                        <div id="roomLink"
-                            style="color: var(--primary); font-weight: 600; font-size: 0.85rem; word-break: break-all; margin-bottom: 15px; background: rgba(0,0,0,0.1); padding: 10px; border-radius: 8px;">
-                            Generating...</div>
-                        <div class="d-flex gap-2">
-                            <button class="btn-primary" onclick="copyRoomLink()" style="flex: 1; font-size: 0.9rem;">📋
-                                Copy Link</button>
-                            <button id="webShareBtn" class="btn-primary" onclick="shareRoomLink()"
-                                style="flex: 1; font-size: 0.9rem; display: none; background: #10b981; border-color: #10b981;">📤
-                                Share</button>
-                        </div>
-                    </div>
+                    <h2 style="color: var(--primary); margin-bottom: 15px; display: flex; align-items: center; justify-content: center; gap: 12px;">
+                        <i class="fas fa-globe-americas" style="font-size: 1.8rem; opacity: 0.9;"></i>
+                        Reading Room
+                    </h2>
+                    <p style="color: var(--text-light); margin-bottom: 25px; font-size: 0.95rem;">Invite a friend to synchronize your reading progress in real-time!</p>
 
                     <div style="text-align: left; margin-bottom: 25px;">
                         <p
                             style="font-size: 0.8rem; color: var(--text-light); margin-bottom: 12px; font-weight: 600; text-transform: uppercase;">
                             Direct App Invite</p>
-                        <div class="d-flex gap-2">
+                        <div class="d-flex gap-2 invite-row">
                             <input type="text" id="inviteIdentity" placeholder="Friend's Username or Email"
                                 style="flex: 1; background: var(--glass); border: 1px solid var(--glass-border); padding: 10px 14px; border-radius: 10px; color: var(--text-main); outline: none; font-size: 0.9rem;"
                                 aria-label="Friend's Username or Email" autocomplete="username">
-                            <button class="btn-primary" onclick="sendDirectInvite()" style="padding: 10px 20px;">Send
-                                Request</button>
+                            <button class="btn-primary" onclick="sendDirectInvite()" style="padding: 10px 20px; display: flex; align-items: center; gap: 8px;">
+                                <i class="fas fa-paper-plane"></i> Send Request
+                            </button>
                         </div>
                     </div>
                     <button class="btn-secondary" onclick="closeRoomModal()"
@@ -777,7 +808,7 @@
     <!-- Floating Voice Assistant Button -->
     <button id="voiceBtn" class="voice-btn" onclick="toggleVoiceAssistant()" title="Ask AI (Voice)" style="display: none;">
         <span class="mic-icon">
-            <img src="/static/microphone.gif" alt="Microphone" style="width: 48px; height: 48px; object-fit: contain; vertical-align: middle; mix-blend-mode: multiply;">
+            <img src="/static/microphone.gif" alt="Microphone" class="fab-img-mic" style="width: 36px; height: 36px; object-fit: contain; vertical-align: middle; mix-blend-mode: multiply;">
         </span>
     </button>
 
@@ -808,15 +839,14 @@
         .voice-btn {
             position: fixed;
             bottom: 35px;
-            right: 55px;
-            /* Moved left to prevent blocking the scrollbar */
-            width: 60px;
-            height: 60px;
+            right: 50px;
+            width: 48px;
+            height: 48px;
             border-radius: 50%;
             background: #ffffff;
             border: 2px solid var(--primary);
             color: white;
-            font-size: 24px;
+            font-size: 20px;
             cursor: pointer;
             box-shadow: 0 8px 25px rgba(99, 102, 241, 0.4);
             z-index: 90000;
@@ -831,9 +861,30 @@
         @media (max-width: 991px) {
             .voice-btn {
                 bottom: 25px;
-                right: 45px;
-                width: 54px;
-                height: 54px;
+                right: 35px;
+                width: 40px !important;
+                height: 40px !important;
+            }
+            .fab-img-mic {
+                width: 28px !important;
+                height: 28px !important;
+            }
+            #floatingDrawFab {
+                bottom: 75px !important;
+                right: 35px !important;
+                width: 40px !important;
+                height: 40px !important;
+            }
+            .fab-img-pencil {
+                width: 20px !important;
+                height: 20px !important;
+            }
+            #drawingMiniToolbar {
+                bottom: 70px !important;
+                right: 30px !important;
+            }
+            #playPauseBtn span {
+                display: none !important;
             }
         }
 
@@ -905,9 +956,263 @@
             70% {
                 box-shadow: 0 0 0 20px rgba(239, 68, 68, 0);
             }
-
             100% {
                 box-shadow: 0 0 0 0 rgba(239, 68, 68, 0);
+            }
+        }
+
+        /* Floating Dashboard Actions */
+        .dashboard-floating-actions {
+            position: fixed;
+            bottom: 40px;
+            right: 40px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            z-index: 2000000 !important; /* Above dashboard overlay (which is 999999 on mobile) */
+        }
+
+        .dashboard-fab {
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            background: var(--primary);
+            color: white;
+            border: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            text-decoration: none;
+        }
+
+        .dashboard-fab:hover {
+            transform: scale(1.15) translateY(-5px);
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.4);
+            filter: brightness(1.1);
+        }
+
+        .dashboard-fab i {
+            font-size: 24px;
+        }
+
+        .dashboard-fab.chat-fab {
+            background: #ffffff;
+            color: var(--primary);
+            border: 2px solid var(--primary);
+        }
+
+        .dashboard-fab.reader-fab {
+            background: linear-gradient(135deg, var(--primary), var(--accent));
+            font-size: 28px;
+            font-weight: 300;
+            animation: fab-pulse 2s infinite ease-in-out;
+            position: relative;
+        }
+
+        @keyframes fab-pulse {
+            0% { transform: scale(1); box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3); }
+            50% { transform: scale(1.1); box-shadow: 0 15px 40px rgba(245, 158, 11, 0.5); }
+            100% { transform: scale(1); box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3); }
+        }
+
+        /* FAB Tooltip - Left Side Pop */
+        .fab-tooltip-left {
+            position: absolute;
+            right: 80px; /* Distance from button */
+            top: 50%;
+            transform: translateY(-50%) translateX(15px);
+            opacity: 0;
+            background: linear-gradient(135deg, var(--primary), var(--accent));
+            color: white;
+            padding: 10px 18px;
+            border-radius: 14px;
+            font-size: 0.9rem;
+            font-weight: 800;
+            white-space: nowrap;
+            pointer-events: none;
+            transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            box-shadow: -5px 10px 25px rgba(0, 0, 0, 0.2);
+            z-index: 100005;
+        }
+
+        .fab-tooltip-left::after {
+            content: "";
+            position: absolute;
+            right: -6px;
+            top: 50%;
+            transform: translateY(-50%) rotate(45deg);
+            width: 12px;
+            height: 12px;
+            background: var(--accent);
+        }
+
+        .dashboard-fab:hover .fab-tooltip-left {
+            transform: translateY(-50%) translateX(0);
+            opacity: 1;
+        }
+
+        .dashboard-fab:hover i {
+            animation: fab-jello 0.7s both;
+        }
+
+        @keyframes fab-jello {
+            0% { transform: scale3d(1, 1, 1); }
+            30% { transform: scale3d(0.75, 1.25, 1); }
+            40% { transform: scale3d(1.25, 0.75, 1); }
+            50% { transform: scale3d(0.85, 1.15, 1); }
+            65% { transform: scale3d(1.05, 0.95, 1); }
+            75% { transform: scale3d(0.95, 1.05, 1); }
+            100% { transform: scale3d(1, 1, 1); }
+        }
+
+        /* Styled Action Buttons (Sign Out / Delete) - Smoother Version */
+        .uiverse-btn-container {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            align-items: center;
+            margin-top: 15px;
+        }
+
+        .uiverse-btn {
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            width: 50px;
+            height: 50px;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            position: relative;
+            overflow: hidden;
+            transition: all 0.4s cubic-bezier(0.23, 1, 0.32, 1); /* Ultra smooth ease-out */
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+            text-decoration: none;
+        }
+
+        .uiverse-btn.logout {
+            background: linear-gradient(135deg, #6366f1, #4f46e5);
+        }
+
+        .uiverse-btn.delete {
+            background: linear-gradient(135deg, #ef4444, #dc2626);
+        }
+
+        .uiverse-btn .sign {
+            width: 50px;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            transition: all 0.4s cubic-bezier(0.23, 1, 0.32, 1);
+        }
+
+        .uiverse-btn .sign i {
+            color: white;
+            font-size: 1.2rem;
+            transition: transform 0.3s ease;
+        }
+
+        .uiverse-btn .btn-text {
+            position: absolute;
+            left: 55px; /* Offset from the icon */
+            opacity: 0;
+            color: white;
+            font-size: 0.95rem;
+            font-weight: 700;
+            transition: all 0.4s cubic-bezier(0.23, 1, 0.32, 1);
+            white-space: nowrap;
+            letter-spacing: 0.02em;
+        }
+
+        .uiverse-btn:hover {
+            width: 190px;
+            border-radius: 15px;
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
+        }
+
+        .uiverse-btn:hover .sign {
+            width: 45px;
+        }
+
+        .uiverse-btn:hover .sign i {
+            transform: scale(1.1);
+        }
+
+        .uiverse-btn:hover .btn-text {
+            opacity: 1;
+            transform: translateX(0);
+        }
+
+        .uiverse-btn:active {
+            transform: scale(0.95);
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+        }
+
+        /* Dashboard Upload Group Styling */
+        .dashboard-upload-group {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            background: rgba(255, 255, 255, 0.03);
+            padding: 4px;
+            border-radius: 18px;
+            border: 1px solid var(--glass-border);
+        }
+
+        .btn-choose-file {
+            background: transparent;
+            border: 1px dashed var(--glass-border);
+            color: var(--text-light);
+            padding: 10px 18px;
+            border-radius: 14px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            max-width: 200px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .btn-choose-file:hover {
+            border-color: var(--primary);
+            color: var(--text-white);
+            background: rgba(99, 102, 241, 0.05);
+        }
+
+        .btn-choose-file.file-selected {
+            border-style: solid;
+            border-color: var(--primary);
+            color: var(--primary);
+            background: rgba(99, 102, 241, 0.1);
+        }
+
+        .btn-add-book-dashboard {
+            height: 48px;
+            min-width: 120px;
+        }
+
+        @media (max-width: 991px) {
+            .dashboard-floating-actions {
+                bottom: 25px;
+                right: 25px;
+                gap: 12px;
+            }
+            .dashboard-fab {
+                width: 54px;
+                height: 54px;
+            }
+            .fab-tooltip-left {
+                display: none;
             }
         }
     </style>
@@ -916,7 +1221,7 @@
     <div id="audiobookModal" class="modal-overlay" style="display: none;">
         <div class="modal-content glass-panel"
             style="max-width: 500px; text-align: center; padding: 40px; border-radius: 32px;">
-            <div style="font-size: 3rem; margin-bottom: 20px;">🎧</div>
+            <div style="font-size: 3rem; margin-bottom: 20px;"><i class="fas fa-headphones" style="color: var(--primary);"></i></div>
             <h2 style="color: var(--text-white); margin-bottom: 10px; font-weight: 800;">Neural Audiobook</h2>
             <p style="color: var(--text-light); margin-bottom: 25px; line-height: 1.6;">
                 Your high-quality neural narration is being prepared. Preview the audio below or download the full
@@ -935,7 +1240,7 @@
             <div style="display: flex; flex-direction: column; gap: 12px;">
                 <button id="btnDownloadAudiobookAction" class="btn-primary"
                     style="width: 100%; padding: 16px; font-weight: 700;">
-                    📥 Download Full MP3
+                    <i class="fas fa-download"></i> Download Full MP3
                 </button>
                 <button onclick="closeAudiobookModal()" class="btn-secondary"
                     style="width: 100%; padding: 14px; background: var(--glass); border: 1px solid var(--glass-border); color: var(--text-white);">
@@ -955,12 +1260,12 @@
                     <label for="profileUpload"
                         style="position: absolute; bottom: -5px; right: -5px; background: var(--primary); width: 32px; height: 32px; border-radius: 10px; display: flex; align-items: center; justify-content: center; cursor: pointer; border: 3px solid var(--bg-panel); font-size: 0.8rem; box-shadow: 0 5px 15px rgba(0,0,0,0.3);"
                         title="Change Photo">
-                        ✏️
+                        <i class="fas fa-pencil-alt" style="color: white;"></i>
                     </label>
                     <button type="button" onclick="removeProfilePhoto()"
                         style="position: absolute; top: -5px; right: -5px; background: #ef4444; width: 32px; height: 32px; border-radius: 10px; display: flex; align-items: center; justify-content: center; cursor: pointer; border: 3px solid var(--bg-panel); font-size: 0.8rem; box-shadow: 0 5px 15px rgba(0,0,0,0.3); color: white;"
                         title="Remove Photo">
-                        🗑️
+                        <i class="fas fa-trash-alt" style="color: white;"></i>
                     </button>
                 </div>
                 <div>
@@ -970,7 +1275,7 @@
                     <p style="color: var(--text-light); margin: 5px 0 0 0; opacity: 0.7; font-size: 0.9rem;">@{{
                         user.username }}</p>
                     <div style="display: flex; gap: 8px; margin-top: 15px;">
-                        <div class="indicator-badge" style="font-size: 0.7rem; padding: 4px 10px; height: auto;">📖 {{
+                        <div class="indicator-badge" style="font-size: 0.7rem; padding: 4px 10px; height: auto;"><i class="fas fa-book" style="margin-right: 4px;"></i> {{
                             user_books_count }} Books</div>
                         <div class="indicator-badge"
                             style="font-size: 0.7rem; padding: 4px 10px; height: auto; background: linear-gradient(45deg, #ff6b6b, #ff9f43); color: white; border: none; display: flex; align-items: center; gap: 4px;">
@@ -1000,13 +1305,24 @@
                         style="width: 100%; padding: 14px 20px; background: var(--glass); border: 1px solid var(--glass-border); border-radius: 18px; color: var(--text-light); font-size: 0.95rem; box-sizing: border-box; cursor: not-allowed;">
                 </div>
 
-                <div style="display: flex; flex-direction: column; gap: 12px;">
+                <div class="uiverse-btn-container">
                     <button type="submit" class="btn-primary"
                         style="width: 100%; padding: 16px; border-radius: 20px; font-weight: 700; font-size: 1rem;">Save
                         Profile Settings</button>
-                    <a href="/logout" class="btn-secondary"
-                        style="background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239,68,68,0.2); color: #f87171; padding: 14px; border-radius: 20px; text-decoration: none; display: inline-block; text-align: center; font-weight: 600; font-size: 0.9rem;">Sign
-                        Out</a>
+                    
+                    <div style="display: flex; gap: 20px; justify-content: center; width: 100%; padding-top: 10px;">
+                        <!-- Sign Out Button -->
+                        <a href="/logout" class="uiverse-btn logout" title="Sign Out">
+                            <div class="sign"><i class="fas fa-sign-out-alt"></i></div>
+                            <div class="btn-text">Sign Out</div>
+                        </a>
+
+                        <!-- Delete Account Button -->
+                        <button type="button" onclick="deleteAccount()" class="uiverse-btn delete" title="Delete Account">
+                            <div class="sign"><i class="fas fa-user-slash"></i></div>
+                            <div class="btn-text">Delete Account</div>
+                        </button>
+                    </div>
                 </div>
                 <button type="button" onclick="toggleProfileModal()"
                     style="width: 100%; margin-top: 15px; background: transparent; border: none; color: var(--text-dim); cursor: pointer; font-size: 0.85rem;">Dismiss</button>
@@ -1154,17 +1470,13 @@
                             <div class="theme-switch__clouds"></div>
                         </div>
                     </label>
-                    <button class="btn-glow-reader" onclick="toggleDashboard()">
-                        Go to Reader
-                        <span class="animation"></span>
-                    </button>
                     <button class="btn-primary" onclick="showCollabsModal()"
                         style="padding: 0 20px; width: auto; border-radius: 12px; font-size: 0.9rem; background: rgba(169, 114, 80, 0.15); color: var(--text-main); border: 1px solid var(--border); display: inline-flex; align-items: center; justify-content: center; gap: 8px; white-space: nowrap; height: 42px;">
-                        👥 Collaborations
+                        <i class="fas fa-users"></i> Collaborations
                     </button>
                     <button class="btn-primary" onclick="showInvitationsModal()"
                         style="padding: 0 20px; width: auto; border-radius: 12px; font-size: 0.9rem; position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 8px; white-space: nowrap; height: 42px; background: var(--primary); color: white; border: 1px solid var(--primary-hover);">
-                        🤝 Requests
+                        <i class="fas fa-handshake"></i> Requests
                         <span id="inviteCountBadge"
                             style="display: none; position: absolute; top: -5px; right: -5px; background: #ef4444; color: white; width: 22px; height: 22px; border-radius: 50%; font-size: 0.7rem !important; align-items: center; justify-content: center; font-weight: 800; border: 2px solid var(--bg-panel);">0</span>
                     </button>
@@ -1295,6 +1607,14 @@
                                 <!-- Bars injected by script.js -->
                             </div>
                         </div>
+                    <!-- Independent Standalone Voice Notes Section -->
+                    <div id="standaloneVoiceNotesSection" class="glass-panel" style="padding: 20px; border-radius: 24px; margin-top: 20px; display: none; max-height: 320px; overflow-y: auto;">
+                        <h3 style="margin: 0 0 12px 0; font-weight: 800; font-size: 1rem; color: var(--text-white); display: flex; align-items: center; gap: 8px;">
+                            <i class="fas fa-microphone-alt" style="color: var(--primary);"></i> Scratchpad Notes
+                        </h3>
+                        <div id="voiceNotesGrid" style="display: flex; flex-direction: column; gap: 10px;">
+                            <!-- Dynamically populated via script.js -->
+                        </div>
                     </div>
                 </aside>
 
@@ -1304,23 +1624,49 @@
                     <div class="search-bar-header desktop-only-header d-none d-lg-block">
                         <div class="dashboard-controls-container">
                             <div class="search-input-wrapper">
-                                <span class="search-icon">🔍</span>
+                                <span class="search-icon"><i class="fas fa-search"></i></span>
                                 <input type="text" id="dashboardSearch" placeholder="Search your library..."
                                     onkeyup="filterDashboard()" aria-label="Search library" autocomplete="off">
                             </div>
                             <div class="dashboard-actions-group">
+                                <div class="dashboard-upload-group">
+                                    <button class="btn-choose-file" onclick="triggerDashboardUpload()" id="dashboardChooseFileBtn">
+                                        <span id="chosenFileName">Choose File</span>
+                                    </button>
+                                    
+                                    <div id="dashboardRenameWrapper" style="display: none; align-items: center; gap: 10px; padding: 0 5px;">
+                                        <input type="text" id="dashboardBookRenameInput" 
+                                            style="background: rgba(255,255,255,0.05); border: 1px solid var(--primary); color: var(--text-white); padding: 8px 15px; border-radius: 12px; font-size: 0.85rem; width: 180px; outline: none;"
+                                            placeholder="Book Name">
+                                        
+                                        <button onclick="resetDashboardUpload()" title="Cancel Selection"
+                                            style="background: rgba(239, 68, 68, 0.15); border: none; color: #f87171; width: 32px; height: 32px; border-radius: 10px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.3s;">
+                                            <i class="fas fa-times"></i>
+                                        </button>
+                                    </div>
+
+                                    <button id="btnConfirmAddBook" class="btn-primary btn-add-book-dashboard" onclick="confirmDashboardUpload()" style="display: none;">
+                                        <span>Add Book</span>
+                                    </button>
+                                </div>
                                 <button id="btnFilterFavs" class="btn-dashboard-filter"
                                     onclick="toggleFavoritesFilter()" title="Toggle Favorites Only">
-                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                        stroke-width="2.5">
+                                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="overflow: visible;">
                                         <path
                                             d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l8.84-8.84 1.06-1.06a5.5 5.5 0 0 0 0-7.78z">
                                         </path>
                                     </svg>
                                     <span>Favorites</span>
                                 </button>
-                                <button class="btn-primary btn-add-book-dashboard" onclick="triggerDashboardUpload()">
-                                    <span>Add Book</span>
+                                <button class="btn-dashboard-filter" onclick="window._editingVoiceNoteId = null; openSpeechToText()" title="Speech to Text Converter" style="display: flex; gap: 8px; align-items: center; min-height: 52px; height: 52px; padding: 0 16px;">
+                                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
+                                        <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                                        <line x1="12" y1="19" x2="12" y2="23"></line>
+                                        <line x1="8" y1="23" x2="16" y2="23"></line>
+                                    </svg>
+                                    <span>Voice Notes</span>
                                 </button>
                             </div>
                         </div>
@@ -1330,36 +1676,61 @@
                     <div class="mobile-dashboard-header-modern d-lg-none">
                         <div class="mobile-add-book-card">
                             <h3>ADD NEW BOOK</h3>
-                            <div class="mobile-upload-actions">
-                                <button class="btn-choose-file-mobile" onclick="triggerDashboardUpload()">Choose
+                            <div class="mobile-upload-actions" style="display: flex; flex-direction: column; gap: 10px;">
+                                <button class="btn-choose-file-mobile" onclick="triggerDashboardUpload()" id="dashboardChooseFileBtnMobile">Choose
                                     File</button>
-                                <button class="btn-upload-book-mobile" onclick="uploadDashboardBook()">Upload
-                                    Book</button>
+                                
+                                <div id="dashboardRenameWrapperMobile" style="display: none; flex-direction: column; gap: 10px; width: 100%;">
+                                    <input type="text" id="dashboardBookRenameInputMobile" 
+                                        style="width: 100%; background: rgba(255,255,255,0.05); border: 1px solid var(--primary); color: var(--text-white); padding: 12px; border-radius: 12px; font-size: 0.9rem;"
+                                        placeholder="Rename book...">
+                                    
+                                    <div style="display: flex; gap: 10px;">
+                                        <button class="btn-upload-book-mobile" onclick="confirmDashboardUpload()" id="btnConfirmAddBookMobile" style="flex: 1;">Upload
+                                            Book</button>
+                                        <button onclick="resetDashboardUpload()" 
+                                            style="background: rgba(239, 68, 68, 0.15); border: none; color: #f87171; width: 52px; height: 52px; border-radius: 12px; cursor: pointer; display: flex; align-items: center; justify-content: center;">
+                                            <i class="fas fa-times"></i>
+                                        </button>
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
-                        <h3 class="mobile-library-title">YOUR LIBRARY</h3>
-                        <div class="mobile-search-row">
-                            <div class="mobile-search-container">
-                                <input type="text" id="dashboardSearchMobile" placeholder="Search books..."
-                                    onkeyup="filterDashboardMobile(this.value)" aria-label="Search library mobile"
-                                    autocomplete="off">
-                                <span class="mobile-magnifier">🔍</span>
+                        <button class="btn-dashboard-filter" onclick="window._editingVoiceNoteId = null; openSpeechToText()" title="Speech to Text Converter" style="display: flex; gap: 8px; align-items: center; justify-content: center; min-height: 52px; height: 52px; width: 100%; border-radius: 14px;">
+                            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
+                                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                                <line x1="12" y1="19" x2="12" y2="23"></line>
+                                <line x1="8" y1="23" x2="16" y2="23"></line>
+                            </svg>
+                            <span>Voice Notes</span>
+                        </button>
+
+                        <div style="position: sticky; top: 0; background: var(--bg-app); z-index: 100; padding-top: 10px; padding-bottom: 5px; margin-left: -15px; margin-right: -15px; padding-left: 15px; padding-right: 15px;">
+                            <h3 class="mobile-library-title">YOUR LIBRARY</h3>
+                            <div class="mobile-search-row">
+                                <div class="mobile-search-container">
+                                    <input type="text" id="dashboardSearchMobile" placeholder="Search books..."
+                                        onkeyup="filterDashboardMobile(this.value)" aria-label="Search library mobile"
+                                        autocomplete="off">
+                                    <span class="mobile-magnifier">🔍</span>
+                                </div>
+                                <button id="btnFilterFavsMobile" class="mobile-fav-toggle"
+                                    onclick="toggleFavoritesFilter()">
+                                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                        stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="overflow: visible;">
+                                        <path
+                                            d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l8.84-8.84 1.06-1.06a5.5 5.5 0 0 0 0-7.78z">
+                                        </path>
+                                    </svg>
+                                </button>
                             </div>
-                            <button id="btnFilterFavsMobile" class="mobile-fav-toggle"
-                                onclick="toggleFavoritesFilter()">
-                                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                                    stroke-width="2.5">
-                                    <path
-                                        d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l8.84-8.84 1.06-1.06a5.5 5.5 0 0 0 0-7.78z">
-                                    </path>
-                                </svg>
-                            </button>
                         </div>
                     </div>
 
                     <!-- Hidden common inputs -->
-                    <input type="file" id="dashboardFileInput" onchange="uploadDashboardBook()" style="display: none;"
+                    <input type="file" id="dashboardFileInput" onchange="handleDashboardFileSelection()" style="display: none;"
                         accept=".pdf,.txt,.epub">
 
                     <div class="dashboard-scroll-area">
@@ -1373,31 +1744,211 @@
                             </div>
                         </div>
                     </div>
+
                 </main>
             </div>
-        </div>
-    </div>
+        </div> <!-- Close dashboard-container -->
+
+    </div> <!-- Close dashboardOverlay -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
     <div id="studyHubDropdown" class="study-hub-content">
         <button onclick="generateRevision(); toggleStudyHub()" title="Convert whole book into key points">
-            <span class="study-icon">🚀</span> <span>Revision</span>
+            <span class="study-icon"><i class="fas fa-bolt"></i></span> <span>Revision</span>
         </button>
         <button onclick="generateQuiz(); toggleStudyHub()" title="Generate Quiz from this book">
-            <span class="study-icon">✍️</span> <span>Quiz</span>
+            <span class="study-icon"><i class="fas fa-question-circle"></i></span> <span>Quiz</span>
         </button>
         <button onclick="exportAudiobook(); toggleStudyHub()" title="Download whole book as MP3 Audiobook">
-            <span class="study-icon">🎧</span> <span>Export Audiobook</span>
+            <span class="study-icon"><i class="fas fa-headphones"></i></span> <span>Export Audiobook</span>
         </button>
         <button onclick="openNotebook(); toggleStudyHub()" title="View your collected notes">
-            <span class="study-icon">📝</span> <span>Notebook</span>
+            <span class="study-icon"><i class="fas fa-sticky-note"></i></span> <span>Notebook</span>
         </button>
         <button onclick="openBookmarks(); toggleStudyHub()" title="View your saved bookmarks">
-            <span class="study-icon">🔖</span> <span>Bookmarks</span>
+            <span class="study-icon"><i class="fas fa-bookmark"></i></span> <span>Bookmarks</span>
         </button>
         <button onclick="toggleStudyHub()" class="btn-secondary study-hub-close-btn">Close Drawer</button>
     </div>
-    <script src="/static/script.js?v=17"></script>
+
+    <!-- Voice to Text Modal -->
+    <div id="speechToTextModal" class="modal-overlay" style="display: none; align-items: center; justify-content: center; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 5000000; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(15px);">
+        <div class="modal-content glass-panel" style="max-width: 650px; width: 92%; padding: 35px; display: flex; flex-direction: column; border-radius: 28px; border: 1px solid var(--border); background: var(--modal-bg); box-shadow: var(--shadow-lg); animation: modalEnter 0.4s cubic-bezier(0.16, 1, 0.3, 1);">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <span style="font-size: 1.6rem; color: var(--primary);">❖</span>
+                    <h3 style="margin: 0; font-weight: 800; color: var(--text-white); font-size: 1.4rem; letter-spacing: -0.02em;">Voice to Text Converter</h3>
+                </div>
+                <button onclick="closeSpeechToText()" style="background: rgba(255, 255, 255, 0.05); border: 1px solid var(--border); color: var(--text-white); font-size: 1.1rem; width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.2s;">✕</button>
+            </div>
+            <p style="color: var(--text-light); font-size: 0.92rem; margin-top: 0; margin-bottom: 24px; opacity: 0.8; line-height: 1.5;">
+                Speak into the microphone to record your voice and convert it to editable text in real-time.
+            </p>
+
+            <div style="display: flex; gap: 8px; margin-bottom: 12px; align-items: center; width: 100%; flex-wrap: nowrap;">
+                <button id="btnStartS2T" onclick="toggleS2TRecording()" class="s2t-shiny-btn" style="flex: 1.5; height: 42px; border-radius: 12px; font-weight: 700; font-size: 0.88rem; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 0 10px; white-space: nowrap;">
+                    <span id="s2tMicIcon"><i class="fas fa-microphone"></i></span>
+                    <span id="s2tBtnText">Start Recording</span>
+                </button>
+                <button onclick="clearS2TText()" class="s2t-shiny-btn" style="flex: 1; height: 42px; border-radius: 12px; font-weight: 700; font-size: 0.88rem; background: var(--bg-panel); color: var(--text-main) !important; border: 1.5px solid var(--border); padding: 0 10px; white-space: nowrap;">
+                    Clear
+                </button>
+                <button onclick="copyS2TText()" class="s2t-shiny-btn" style="flex: 1; height: 42px; border-radius: 12px; font-weight: 700; font-size: 0.88rem; background: var(--bg-panel); color: var(--text-main) !important; border: 1.5px solid var(--border); padding: 0 10px; white-space: nowrap;">
+                    Copy Text
+                </button>
+            </div>
+
+            <!-- Language & Translation Section -->
+            <div style="display: grid; grid-template-columns: 1.5fr 1fr; gap: 8px; margin-bottom: 14px; width: 100%; padding-top: 8px; border-top: 1px solid rgba(255, 255, 255, 0.06);">
+                <select id="s2tTargetLang" class="lang-dropdown" style="height: 42px; border-radius: 12px; background: rgba(0, 0, 0, 0.2); border: 1px solid var(--border); color: var(--text-white); padding: 0 12px; font-weight: 600; font-size: 0.88rem; outline: none; box-shadow: inset 0 1px 3px rgba(0,0,0,0.1); cursor: pointer; transition: all 0.2s;">
+                    <option value="orig" selected>Translate to...</option>
+                    <option value="en">English (US)</option>
+                    <option value="en-GB">English (UK)</option>
+                    <option value="hi">Hindi</option>
+                    <option value="bn">Bengali</option>
+                    <option value="te">Telugu</option>
+                    <option value="mr">Marathi</option>
+                    <option value="ta">Tamil</option>
+                    <option value="ur">Urdu</option>
+                    <option value="gu">Gujarati</option>
+                    <option value="kn">Kannada</option>
+                    <option value="ml">Malayalam</option>
+                    <option value="pa">Punjabi</option>
+                    <option value="or">Odia</option>
+                </select>
+                <button id="s2tTranslateBtn" onclick="translateS2TText()" class="s2t-shiny-btn" style="height: 42px; border-radius: 12px; font-weight: 700; font-size: 0.88rem; display: flex; align-items: center; justify-content: center; gap: 8px;">
+                    <i class="fas fa-language" style="font-size: 1.1rem;"></i> Translate
+                </button>
+            </div>
+
+            <div style="position: relative; margin-bottom: 14px;">
+                <textarea id="s2tTranscriptArea" rows="7" style="width: 100%; border-radius: 16px; border: 1px solid var(--border); background: rgba(0, 0, 0, 0.2); color: var(--text-white); padding: 16px; font-size: 1rem; outline: none; line-height: 1.6; resize: vertical; box-shadow: inset 0 2px 6px rgba(0,0,0,0.2); transition: all 0.2s;" placeholder="Your converted text will appear here..."></textarea>
+                <div id="s2tStatusBadge" style="display: none; position: absolute; bottom: 16px; right: 16px; background: #ef4444; color: white; padding: 5px 12px; border-radius: 20px; font-size: 0.75rem; font-weight: 800; animation: pulse-subtle 1.5s infinite; letter-spacing: 0.05em; box-shadow: 0 2px 10px rgba(239, 68, 68, 0.4);">
+                    RECORDING
+                </div>
+            </div>
+
+            <!-- Persistence Buttons (Bottom) -->
+            <div style="display: flex; gap: 8px; align-items: center; width: 100%;">
+                <button onclick="saveS2TToLibrary()" class="s2t-shiny-btn" style="flex: 1; height: 42px; border-radius: 12px; font-weight: 700; font-size: 0.88rem; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 0 12px; white-space: nowrap;">
+                    <i class="fas fa-book-medical"></i> Save to Library
+                </button>
+                <button onclick="saveVoiceNoteStandalone()" class="s2t-shiny-btn" style="flex: 1; height: 42px; border-radius: 12px; font-weight: 700; font-size: 0.88rem; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 0 12px; white-space: nowrap;">
+                    <i class="fas fa-save"></i> Save Note
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Independent Standalone Voice Note Viewer Modal -->
+    <div id="voiceNoteViewerModal" class="modal-overlay" style="display: none; align-items: center; justify-content: center; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 5000000; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(15px);">
+        <div class="modal-content glass-panel" style="max-width: 650px; width: 92%; padding: 35px; display: flex; flex-direction: column; border-radius: 28px; border: 1px solid var(--border); background: var(--modal-bg); box-shadow: var(--shadow-lg);">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <span style="font-size: 1.6rem; color: var(--primary);">✦</span>
+                    <h3 style="margin: 0; font-weight: 800; color: var(--text-white); font-size: 1.4rem; letter-spacing: -0.02em;">Scratchpad Note Details</h3>
+                </div>
+                <button onclick="closeVoiceNoteViewer()" style="background: rgba(255, 255, 255, 0.05); border: 1px solid var(--border); color: var(--text-white); font-size: 1.1rem; width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.2s;">✕</button>
+            </div>
+            
+            <p style="color: var(--text-light); font-size: 0.92rem; margin-top: 0; margin-bottom: 24px; opacity: 0.8; line-height: 1.5;">
+                You can review the note, edit its contents, or convert it directly into a new book in your library.
+            </p>
+
+            <input type="hidden" id="currentViewVoiceNoteId">
+            <textarea id="viewVoiceNoteContentArea" rows="8" style="width: 100%; border-radius: 18px; border: 1px solid var(--border); background: rgba(0, 0, 0, 0.2); color: var(--text-white); padding: 18px; font-size: 1.05rem; outline: none; line-height: 1.6; resize: vertical; box-shadow: inset 0 2px 6px rgba(0,0,0,0.2); transition: all 0.2s; margin-bottom: 25px;"></textarea>
+
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; width: 100%; margin-top: 5px;">
+                <button onclick="editCurrentVoiceNote()" class="s2t-shiny-btn" style="height: 44px; border-radius: 12px; font-weight: 700; font-size: 0.88rem; display: flex; align-items: center; justify-content: center; gap: 8px; white-space: nowrap; padding: 0 10px;">
+                    <i class="fas fa-edit"></i> Edit Note
+                </button>
+                <button onclick="moveNoteToLibrary()" class="s2t-shiny-btn" style="height: 44px; border-radius: 12px; font-weight: 700; font-size: 0.88rem; display: flex; align-items: center; justify-content: center; gap: 8px; white-space: nowrap; padding: 0 10px;">
+                    <i class="fas fa-book-medical"></i> Add to Library
+                </button>
+                <button onclick="deleteCurrentVoiceNote()" class="btn-secondary" style="height: 44px; border-radius: 12px; font-weight: 700; font-size: 0.88rem; display: flex; align-items: center; justify-content: center; background: rgba(239, 68, 68, 0.1); border: 1.5px solid rgba(239, 68, 68, 0.3); color: #f87171; transition: all 0.2s; white-space: nowrap; padding: 0 10px; gap: 8px;">
+                    <i class="fas fa-trash-alt"></i> Delete Note
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Custom Note Title Prompt Modal -->
+    <div id="voiceNoteTitlePromptModal" class="modal-overlay" style="display: none; align-items: center; justify-content: center; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 6000000; background: rgba(15, 23, 42, 0.6); backdrop-filter: blur(15px);">
+        <div class="modal-content glass-panel" style="max-width: 450px; width: 90%; padding: 30px; display: flex; flex-direction: column; border-radius: 24px; border: 1px solid var(--border); background: var(--modal-bg); box-shadow: var(--shadow-lg);">
+            <h3 style="margin: 0 0 10px 0; font-weight: 800; color: var(--text-white); font-size: 1.25rem;">❖ Enter Note Title</h3>
+            <p style="color: var(--text-light); font-size: 0.9rem; margin: 0 0 20px 0; opacity: 0.8;">What would you like to call this scratchpad note?</p>
+            
+            <input type="text" id="voiceNotePromptTitleInput" value="My Voice Note" style="width: 100%; height: 48px; border-radius: 14px; border: 1px solid var(--border); background: rgba(0, 0, 0, 0.2); color: var(--text-white); padding: 0 16px; font-size: 1rem; outline: none; margin-bottom: 25px; box-shadow: inset 0 2px 4px rgba(0,0,0,0.1);">
+            
+            <div style="display: flex; gap: 12px; justify-content: flex-end;">
+                <button onclick="cancelVoiceNoteTitlePrompt()" class="btn-secondary" style="height: 46px; border-radius: 14px; padding: 0 18px; font-weight: 700; background: rgba(255, 255, 255, 0.05); border: 1px solid var(--border); color: var(--text-white); transition: all 0.2s;">
+                    Cancel
+                </button>
+                <button onclick="confirmVoiceNoteTitlePrompt()" class="btn-primary" style="height: 46px; border-radius: 14px; padding: 0 22px; font-weight: 700; background: linear-gradient(135deg, #10b981, #059669); border: none; box-shadow: 0 4px 15px rgba(16, 185, 129, 0.3); transition: all 0.2s;">
+                    Save Note
+                </button>
+            </div>
+        </div>
+    </div>
+
+
+    <div id="aiChatModal" class="modal-overlay" style="display: none; align-items: center; justify-content: center; z-index: 100000; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.5); backdrop-filter: blur(5px);">
+        <div class="modal-content" style="max-width: 850px; width: 95%; height: 750px; max-height: 90vh; display: flex; flex-direction: column; background: var(--modal-bg); border: 1px solid var(--border); border-radius: 24px; overflow: hidden; padding: 0; position: relative;">
+            <div id="chatHeader" style="padding: 20px 25px; background: var(--bg-header); border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; gap: 15px; cursor: pointer;" onclick="restoreAIChat()">
+                <div style="display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0;">
+                    <h2 style="color: var(--primary); font-size: 1.25rem; margin: 0; display: flex; align-items: center; gap: 10px; white-space: nowrap;">
+                        <i class="fas fa-magic"></i> <span class="d-none d-sm-inline">AI Assistant</span>
+                    </h2>
+                    <!-- Book Selection Dropdown for Chat Focus -->
+                    <select id="chatBookFocus" class="chat-book-selector" style="flex: 1; max-width: 300px; background: var(--glass); border: 1px solid var(--border); color: var(--text-white); padding: 6px 12px; border-radius: 12px; font-size: 0.85rem; outline: none; cursor: pointer;" onclick="event.stopPropagation()">
+                        <option value="">General Chat</option>
+                        <!-- Populated by JS -->
+                    </select>
+                </div>
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <button onclick="event.stopPropagation(); minimizeAIChat()" title="Minimize" style="background: none; border: none; color: var(--text-light); cursor: pointer; font-size: 1.2rem; padding: 5px; display: flex; align-items: center;">
+                        <i class="fas fa-minus"></i>
+                    </button>
+                    <button onclick="event.stopPropagation(); toggleAIChat()" title="Close" style="background: none; border: none; color: var(--text-light); cursor: pointer; font-size: 1.5rem; padding: 0 5px; display: flex; align-items: center;">
+                        ✕
+                    </button>
+                </div>
+            </div>
+            <div id="chatMessages" style="flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 15px; background: var(--bg-app);">
+                <div class="chat-msg ai" style="background: var(--glass); padding: 12px 16px; border-radius: 18px 18px 18px 4px; align-self: flex-start; max-width: 85%; color: var(--text-main); border: 1px solid var(--glass-border);">
+                    Hello! I'm your AI Reading Assistant. How can I help you today?
+                </div>
+            </div>
+            <div id="chatInputRow" style="padding: 15px; background: var(--bg-header); border-top: 1px solid var(--border); display: flex; gap: 10px; align-items: center;">
+                <button id="chatMicBtn" onclick="toggleChatVoice()" style="background: var(--glass); border: 1px solid var(--border); color: var(--text-main); width: 45px; height: 45px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all 0.3s;">
+                    <i class="fas fa-microphone"></i>
+                </button>
+                <input type="text" id="chatInput" placeholder="Type a message..." style="flex: 1; background: var(--glass); border: 1px solid var(--border); color: var(--text-white); padding: 12px 18px; border-radius: 25px; outline: none;" onkeypress="if(event.key==='Enter') sendChatMessage()">
+                <button onclick="sendChatMessage()" style="background: var(--primary); border: none; color: white; width: 45px; height: 45px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer;">
+                    <i class="fas fa-paper-plane"></i>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/speech_to_text.js?v=1"></script>
+    <script src="/static/script.js?v=18"></script>
+    <!-- Floating Dashboard Actions Container (Moved out for correct fixed positioning on mobile) -->
+    <div id="dashboardFabGroup" class="dashboard-floating-actions" style="display: flex;">
+        <!-- AI Chat Floating Button -->
+        <button class="dashboard-fab chat-fab" onclick="toggleAIChat()" title="Chat with AI">
+            <i class="fas fa-comment-dots"></i>
+        </button>
+        <!-- Go to Reader Floating Button (+) -->
+        <button class="dashboard-fab reader-fab" onclick="toggleDashboard()">
+            <span class="fab-tooltip-left">Go to Reader</span>
+            <i class="fas fa-plus"></i>
+        </button>
+    </div>
+    <!-- Ultra-Thin Edge-to-Edge Footer (Moved out for correct fixed positioning on mobile) -->
+    <footer id="dashboardMiniFooter" class="dashboard-mini-footer" style="display: none;">
+        <span class="proverb-text">“A book is like a garden carried in the pocket.”</span>
+    </footer>
 </body>
 
 </html>

@@ -1,19 +1,14 @@
 import os
 import sys
 import warnings
+import threading
+
 # Silence noisy deprecation warnings early
 warnings.filterwarnings("ignore") 
 
 # Fix emoji printing on Windows CMD
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
-
-from flask import Flask, render_template, request, jsonify, send_from_directory, send_file, Response, redirect, url_for, session
-from werkzeug.utils import secure_filename
-from werkzeug.security import generate_password_hash, check_password_hash
-from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
-from flask_socketio import SocketIO, join_room, leave_room, emit
-import threading
 import sqlite3
 import time
 import math
@@ -30,39 +25,115 @@ import random
 import requests
 import html
 import collections
-from typing import List
+import subprocess
+import atexit
+import datetime
+import shutil
+from datetime import timedelta
+from typing import List, Any
 from io import BytesIO, StringIO
 from urllib.parse import quote, unquote, urljoin
 import urllib.request
+from ai_responses import common_responses
 
-import subprocess
-import atexit
-import requests
-from bs4 import BeautifulSoup
-import edge_tts
+# --- Third Party Imports (Standard/Light) ---
+try:
+    from flask import Flask, render_template, request, jsonify, send_from_directory, send_file, Response, redirect, url_for, session # type: ignore
+except ImportError:
+    Flask = render_template = request = jsonify = send_from_directory = send_file = Response = redirect = url_for = session = None
+
+try:
+    from werkzeug.utils import secure_filename # type: ignore
+except ImportError:
+    secure_filename = None
+
+try:
+    from werkzeug.security import generate_password_hash, check_password_hash # type: ignore
+except ImportError:
+    generate_password_hash = check_password_hash = None
+
+try:
+    from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user # type: ignore
+except ImportError:
+    LoginManager = UserMixin = login_user = login_required = logout_user = current_user = None
+
+try:
+    from flask_socketio import SocketIO, join_room, leave_room, emit # type: ignore
+except ImportError:
+    SocketIO = join_room = leave_room = emit = None
+
+# --- LAZY LOADING SYSTEM (Speeds up startup by 10x) ---
+import importlib
+class LazyLoader:
+    def __init__(self, module_name, attribute=None):
+        self._module_name = module_name
+        self._attribute = attribute
+        self._loaded_obj = None
+    def _load(self):
+        if self._loaded_obj is None:
+            try:
+                module = importlib.import_module(self._module_name)
+                self._loaded_obj = getattr(module, self._attribute) if self._attribute else module
+            except Exception as e:
+                print(f"LazyLoad Failed for {self._module_name}: {e}")
+                self._loaded_obj = None
+        return self._loaded_obj
+    def __getattr__(self, name): return getattr(self._load(), name)
+    def __call__(self, *args, **kwargs): return self._load()(*args, **kwargs)
+    def __getitem__(self, key): return self._load()[key]
+    def __iter__(self): return iter(self._load())
+    def __bool__(self): return self._load() is not None
+
+# Heavy libraries are now proxied. They only import when FIRST accessed.
+pipeline: Any = LazyLoader("transformers", "pipeline")
+cv2: Any = LazyLoader("cv2")
+pytesseract: Any = LazyLoader("pytesseract")
+fitz: Any = LazyLoader("fitz")
+mammoth: Any = LazyLoader("mammoth")
+docx: Any = LazyLoader("docx")
+epub: Any = LazyLoader("ebooklib", "epub")
+ITEM_DOCUMENT: Any = LazyLoader("ebooklib", "ITEM_DOCUMENT")
+ITEM_IMAGE: Any = LazyLoader("ebooklib", "ITEM_IMAGE")
+pptx: Any = LazyLoader("pptx")
+MSO_SHAPE_TYPE: Any = LazyLoader("pptx.enum.shapes", "MSO_SHAPE_TYPE")
+PP_ALIGN: Any = LazyLoader("pptx.enum.text", "PP_ALIGN")
+MSO_ANCHOR: Any = LazyLoader("pptx.enum.text", "MSO_ANCHOR")
+gTTS: Any = LazyLoader("gtts", "gTTS")
+edge_tts: Any = LazyLoader("edge_tts")
+GoogleTranslator: Any = LazyLoader("deep_translator", "GoogleTranslator")
+FPDF: Any = LazyLoader("fpdf", "FPDF")
+TextBlob: Any = LazyLoader("textblob", "TextBlob")
+Image: Any = LazyLoader("PIL", "Image")
+vision: Any = LazyLoader("google.cloud", "vision")
+BeautifulSoup: Any = LazyLoader("bs4", "BeautifulSoup")
+np: Any = LazyLoader("numpy")
 
 # --- GLOBAL CONFIG & TRANSLATION SIDECAR ---
 SIDECAR_PORT = 3001
-sidecar_process = None
+SIDECAR_PROCESS = None
 
 def start_translation_sidecar():
-    global sidecar_process
+    global SIDECAR_PROCESS
     try:
         if os.path.exists("translator_sidecar.js"):
-            print(f"🚀 Launching Translation Sidecar (Port {SIDECAR_PORT})...")
+            Logger.info("Sidecar", f"Launching Translation Sidecar (Port {SIDECAR_PORT})...")
             # Sidecar handles 100+ parallel translation hits via Node.js Event Loop
-            sidecar_process = subprocess.Popen(["node", "translator_sidecar.js"], 
+            # Run in background to avoid blocking the main server startup
+            def run_sidecar():
+                global SIDECAR_PROCESS
+                SIDECAR_PROCESS = subprocess.Popen(["node", "translator_sidecar.js"], 
                                              stdout=subprocess.DEVNULL, 
                                              stderr=subprocess.DEVNULL)
-            time.sleep(0.5)
+            t = threading.Thread(target=run_sidecar, daemon=True)
+            t.start()
     except Exception as e:
-        print(f"Sidecar launch failed: {e}. Falling back to internal engine.")
+        Logger.error("Sidecar", f"Sidecar launch failed: {e}. Falling back to internal engine.")
 
 @atexit.register
-def kill_sidecar():
-    if sidecar_process:
-        print("🛑 Shutting down translation sidecar...")
-        sidecar_process.terminate()
+def stop_sidecar():
+    if SIDECAR_PROCESS:
+        Logger.info("Sidecar", "Shutting down translation sidecar...")
+        SIDECAR_PROCESS.terminate()
 
 
 app = Flask(__name__)
@@ -91,26 +162,61 @@ def get_sentiment_analyzer():
     global _SENTIMENT_ANALYZER
     if _SENTIMENT_ANALYZER is None:
         try:
-            from transformers import pipeline
             _SENTIMENT_ANALYZER = pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english", device=-1)
         except Exception as e:
             print(f"Sentiment model pre-load failed: {e}")
             _SENTIMENT_ANALYZER = "FAILED"
     return _SENTIMENT_ANALYZER if _SENTIMENT_ANALYZER != "FAILED" else None
 
+# --- Professional Server Logging System ---
+class Logger:
+    @staticmethod
+    def _get_time():
+        return datetime.datetime.now().strftime("%H:%M:%S")
+
+    @staticmethod
+    def info(module, msg):
+        print(f"[{Logger._get_time()}] [ {module.upper():<12} ] \033[94mℹ\033[0m {msg}")
+
+    @staticmethod
+    def success(module, msg):
+        print(f"[{Logger._get_time()}] [ {module.upper():<12} ] \033[92m●\033[0m {msg}")
+
+    @staticmethod
+    def warn(module, msg):
+        print(f"[{Logger._get_time()}] [ {module.upper():<12} ] \033[93m▲\033[0m {msg}")
+
+    @staticmethod
+    def error(module, msg):
+        print(f"[{Logger._get_time()}] [ {module.upper():<12} ] \033[91m■\033[0m {msg}")
+
 # Background Vision Model Loading
 def load_vision_model_async():
     try:
-        from transformers import pipeline
-        print("🧠 Vision AI: Pre-loading captioning engine in background...")
+        Logger.info("Vision AI", "Pre-loading captioning engine in background...")
         # Using Salesforce/blip-image-captioning-base as it's already cached locally
         app.image_captioner = pipeline("image-text-to-text", model="Salesforce/blip-image-captioning-base", device=-1)
-        print("✅ Vision AI: Engine ready.")
+        Logger.success("Vision AI", "Engine ready.")
     except Exception as e:
-        print(f"⚠️ Vision AI: Engine failed to initialize: {e}")
+        Logger.error("Vision AI", f"Engine failed to initialize: {e}")
         app.image_captioner = "FAILED"
 
-threading.Thread(target=load_vision_model_async, daemon=True).start()
+if os.environ.get('WERKZEUG_RUN_MAIN') == 'true' or not app.debug:
+    threading.Thread(target=load_vision_model_async, daemon=True).start()
+
+_CHAT_PIPELINE = None
+def get_chat_pipeline():
+    global _CHAT_PIPELINE
+    if _CHAT_PIPELINE is None:
+        try:
+            Logger.info("Chat AI", "Initializing 'Free Forever' engine (SmolLM2)...")
+            # SmolLM2-135M-Instruct is much better at answering questions than distilgpt2
+            _CHAT_PIPELINE = pipeline("text-generation", model="HuggingFaceTB/SmolLM2-135M-Instruct", device=-1)
+            Logger.success("Chat AI", "Engine Ready.")
+        except Exception as e:
+            Logger.error("Chat AI", f"Engine failed: {e}")
+            _CHAT_PIPELINE = "FAILED"
+    return _CHAT_PIPELINE if _CHAT_PIPELINE != "FAILED" else None
 
 def get_book_sentences(book_id):
     """Retrieve or generate tokenized sentences for a book to avoid repeated parsing."""
@@ -465,25 +571,36 @@ def init_db():
     )
     """)
 
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS voice_notes(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        content TEXT,
+        title TEXT DEFAULT 'Untitled Note',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    # Migration for voice_notes title column
+    try:
+        cur.execute("ALTER TABLE voice_notes ADD COLUMN title TEXT DEFAULT 'Untitled Note'")
+    except Exception: pass
+
     conn.commit()
     conn.close()
+
 
 
 # Database schema maintenance is handled in the main entry point
 
 
-try:
-    # Google Cloud Vision integration has been disabled by user request.
-    from google.cloud import vision
-    def get_vision_client(): return None
-except ImportError:
-    vision = None
-    def get_vision_client(): return None
+def get_vision_client(): 
+    # Google Cloud Vision integration is optional.
+    return None
 
 
 def google_vision_ocr(img_cv):
     """Google Cloud Vision: The gold standard for handwriting recognition."""
-    import cv2
     client = get_vision_client()
     if not client: return None
     
@@ -504,9 +621,6 @@ def extract_image_text(image, fast=True, skip_ocr=False):
     """Perform a high-fidelity OCR pass. Automatically upgrades to Google Vision for handwriting."""
     if skip_ocr: return ""
     try:
-        import cv2
-        import numpy as np
-        if image is None: return ""
         if isinstance(image, str):
             # Universal Byte Decoding (Safer than imread for non-ASCII paths/WebP)
             with open(image, "rb") as f:
@@ -527,9 +641,9 @@ def extract_image_text(image, fast=True, skip_ocr=False):
             except Exception as e:
                 print(f"Google Vision fallback to Tesseract: {e}")
 
-        import cv2
-        import numpy as np
-        import pytesseract
+        if not pytesseract or not cv2 or not np:
+            return ""
+
         pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
         h, w = image.shape[:2]
         # Rescale for better Tesseract recognition on dense text
@@ -606,9 +720,6 @@ def ocr_embedded_images(html, bid=None):
         if bid and active_ocr_bid != bid:
             return start, end, None
         try:
-            import cv2
-            import numpy as np
-            import base64
             _, encoded = src_data.split(",", 1)
             data = base64.b64decode(encoded)
             nparr = np.frombuffer(data, np.uint8)
@@ -642,8 +753,8 @@ def ocr_embedded_images(html, bid=None):
 
 
 def extract_pdf_html(file_path, fast_mode=True, page_limit=None):
-    """High-speed parallel PDF processing with watermark filtering and layout stabilization."""
-    import fitz
+    if not fitz:
+        return "<p>Error: PDF extraction library (fitz/PyMuPDF) not found. Please install it.</p>"
     abs_path = os.path.abspath(file_path)
     if not os.path.exists(abs_path):
         return "<p>Error: PDF source file missing.</p>"
@@ -698,8 +809,6 @@ def extract_pdf_html(file_path, fast_mode=True, page_limit=None):
                     img_tag = f'<img src="/uploads/extracted_assets/{asset_name}" style="max-width: 100%; height: auto; display: block; margin: 0 auto; border-radius: 8px;" />'
                     
                     try:
-                        import cv2
-                        import numpy as np
                         img_np = cv2.imdecode(np.frombuffer(img_data, np.uint8), cv2.IMREAD_COLOR)
                         if img_np is not None:
                             # Use fast sync OCR only for very large images (potential full-page scans)
@@ -732,14 +841,14 @@ def extract_pdf_html(file_path, fast_mode=True, page_limit=None):
                         block_lines.append(line_text)
 
                     if not block_lines: continue
-                    full_text = " ".join(block_lines).replace(" <br/>", "<br/>").replace("<br/> ", "<br/>")
+                    full_text = "\n".join(block_lines)
                     
                     if full_text in seen_texts: continue
                     seen_texts.add(full_text)
                     
-                    style = 'style="margin-bottom: 1.2em; line-height: 1.6; color: #1e293b; font-family: \'Inter\', sans-serif; font-size: 1.02rem;"'
+                    style = 'style="white-space: pre-wrap; margin-bottom: 1.2em; line-height: 1.6; color: #1e293b; font-family: \'Inter\', sans-serif; font-size: 1.02rem;"'
                     if is_scanned:
-                        style = 'style="margin-bottom: 1.2em; line-height: 1.6; color: #1e293b; font-family: \'Inter\', sans-serif; font-size: 1.05rem; max-width: 850px; margin-left: auto; margin-right: auto;"'
+                        style = 'style="white-space: pre-wrap; margin-bottom: 1.2em; line-height: 1.6; color: #1e293b; font-family: \'Inter\', sans-serif; font-size: 1.05rem; max-width: 850px; margin-left: auto; margin-right: auto;"'
                     
                     text_html_parts.append(f'<p {style}>{full_text}</p>')
 
@@ -784,11 +893,8 @@ def extract_pdf_html(file_path, fast_mode=True, page_limit=None):
 
 
 def extract_docx_html(file_path):
-    import mammoth
-    import docx
-    import base64
-    import cv2
-    import numpy as np
+    if not mammoth or not docx:
+        return "<div class='error'>DOCX extraction library (mammoth/python-docx) not found.</div>"
     def convert_image(image):
         with image.open() as image_bytes:
             encoded_src = base64.b64encode(image_bytes.read()).decode("ascii")
@@ -802,10 +908,8 @@ def extract_docx_html(file_path):
 
 
 def extract_epub_html(file_path):
-    from ebooklib import epub, ITEM_DOCUMENT, ITEM_IMAGE
-    import base64
-    import cv2
-    import numpy as np
+    if not epub:
+        return "<div class='error'>EPUB extraction library (ebooklib) not found.</div>"
     book = epub.read_epub(file_path)
     
     # Pre-map ALL images in the archive regardless of folder structure
@@ -838,7 +942,7 @@ def extract_epub_html(file_path):
                         img_tag_str = str(img)
                         try:
                             # Re-wrap in interactive container
-                            img_np = cv2.imdecode(np.frombuffer(img_data, np.uint8), cv2.IMREAD_COLOR)
+                            img_np = cv2.imdecode(np.frombuffer(img_data, np.uint8), cv2.IMREAD_COLOR) if cv2 and np else None
                             if img_np is not None:
                                 interactive = build_clickable_img_wrapper(img_tag_str, img_np)
                                 # Replace the img tag with the wrapped version in the soup
@@ -862,10 +966,9 @@ def extract_epub_html(file_path):
 
 
 def extract_pptx_html(file_path):
+    if not pptx:
+        return "<div class='error'>PPTX extraction library (python-pptx) not found.</div>"
     try:
-        import pptx
-        from pptx.enum.shapes import MSO_SHAPE_TYPE
-        from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
         prs = pptx.Presentation(file_path)
     except Exception:
         return "<div class='error'>Failed to load PPTX. Try saving as PDF.</div>"
@@ -1038,6 +1141,17 @@ def extract_book_html(file_path, fast_mode=True, bid=None, page_limit=None):
             return extract_txt_html(file_path)
     elif ext in [".txt", ".prn", ".text", ".md", ".log"]:
         return extract_txt_html(file_path)
+    elif ext in [".png", ".jpg", ".jpeg", ".webp"]:
+        # --- Image Support ---
+        # Wrap image in the standard lazy-page-container so the reader can display it instantly.
+        # Use relative path since the server serves /uploads/
+        rel_path = f"/uploads/{os.path.basename(file_path)}"
+        html = f"""<div id='img-page-1' class='lazy-page-container' 
+                    style='display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px; min-height: 100vh; background: var(--bg-paper);'>
+                    <img src='{rel_path}' style='max-width: 100%; height: auto; border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,0.25);'>
+                    <p style='margin-top: 20px; color: var(--text-light); font-style: italic; font-size: 0.85rem;'>Visual Document Page</p>
+                  </div>"""
+        return {"html": html, "total_pages": 1}
     elif ext in [".html", ".htm", ".xhtml"]:
         # Direct HTML reading (preserving original layout)
         try:
@@ -1053,8 +1167,6 @@ def extract_book_html(file_path, fast_mode=True, bid=None, page_limit=None):
         # Logic for image-to-book (already works)
         filename = os.path.basename(file_path)
         try:
-            import cv2
-            import numpy as np
             with open(file_path, "rb") as f:
                 img_data = f.read()
                 img_np = cv2.imdecode(np.frombuffer(img_data, np.uint8), cv2.IMREAD_COLOR)
@@ -1210,6 +1322,51 @@ def logout():
     logout_user()
     return redirect(url_for('login'))
 
+@app.route("/delete_account", methods=["POST"])
+@login_required
+def delete_account():
+    user_id = current_user.id
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        # Delete all files associated with user's books
+        cur.execute("SELECT id, path, extracted_path, thumbnail_path FROM books WHERE user_id = ?", (user_id,))
+        books = cur.fetchall()
+        for b_id, b_path, b_extracted, b_thumbnail in books:
+            if b_path and os.path.exists(b_path):
+                try: os.remove(b_path)
+                except: pass
+            if b_extracted and os.path.exists(b_extracted):
+                try: os.remove(b_extracted)
+                except: pass
+            if b_thumbnail:
+                t_path = os.path.join(UPLOAD_FOLDER, "thumbnails", b_thumbnail)
+                if os.path.exists(t_path):
+                    try: os.remove(t_path)
+                    except: pass
+        
+        # Now delete from books
+        cur.execute("DELETE FROM books WHERE user_id = ?", (user_id,))
+        
+        # Delete from other related tables
+        cur.execute("DELETE FROM daily_stats WHERE user_id = ?", (user_id,))
+        cur.execute("DELETE FROM notes WHERE user_id = ?", (user_id,))
+        cur.execute("DELETE FROM highlights WHERE user_id = ?", (user_id,))
+        cur.execute("DELETE FROM bookmarks WHERE user_id = ?", (user_id,))
+        cur.execute("DELETE FROM invitations WHERE sender_id = ? OR receiver_id = ?", (user_id, user_id))
+        cur.execute("DELETE FROM shared_books WHERE user_id = ? OR sharer_id = ?", (user_id, user_id))
+        
+        # Finally delete the user
+        cur.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+
+        logout_user()
+        return jsonify({"status": "success"})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
 @app.route("/update_profile", methods=["POST"])
 @login_required
 def update_profile():
@@ -1262,7 +1419,6 @@ def index():
         cur.execute("SELECT date FROM daily_stats WHERE user_id = ? AND seconds > 0 ORDER BY date DESC", (current_user.id,))
         dates = [row[0] for row in cur.fetchall()]
         if dates:
-            import datetime
             today = datetime.date.today()
             yesterday = today - datetime.timedelta(days=1)
             last_date = datetime.datetime.strptime(dates[0], '%Y-%m-%d').date()
@@ -1289,24 +1445,38 @@ def upload():
         return "No file selected", 400
 
     file = request.files["file"]
-
     if file.filename == "":
         return "No file selected", 400
+
+    # Handle Custom Rename from Dashboard
+    custom_name = request.form.get("custom_name")
+    display_name = file.filename
+    
+    if custom_name:
+        ext = os.path.splitext(file.filename)[1]
+        # Ensure we keep the extension if the user didn't provide one
+        if not custom_name.lower().endswith(ext.lower()):
+            display_name = custom_name + ext
+        else:
+            display_name = custom_name
 
     # --- Duplicate Detection ---
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id FROM books WHERE name = ? AND user_id = ?", (file.filename, current_user.id))
+    # Check against the final display_name to avoid duplicates
+    cur.execute("SELECT id FROM books WHERE name = ? AND user_id = ?", (display_name, current_user.id))
     existing = cur.fetchone()
     conn.close()
 
     if existing:
         return jsonify({
             "status": "duplicate",
-            "message": f"'{file.filename}' is already in your library!"
+            "message": f"'{display_name}' is already in your library!"
         }), 409
 
-    # Save the file right away
+    # Save the file (we keep original filename on disk to avoid conflicts, but display custom name in UI)
+    # Actually, to avoid overwriting files, let's use the display_name if available, but uniqueify if needed.
+    # For now, let's keep it simple: original on disk, custom in DB.
     filepath = os.path.join(UPLOAD_FOLDER, file.filename)
     file.save(filepath)
 
@@ -1316,23 +1486,18 @@ def upload():
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("INSERT INTO books(name, path, extracted_path, status, user_id) VALUES (?, ?, ?, ?, ?)",
-                (file.filename, filepath, extracted_path, "Processing File...", current_user.id))
+                (display_name, filepath, extracted_path, "Processing File...", current_user.id))
     book_id = cur.lastrowid
     conn.commit()
     conn.close()
 
     threading.Thread(target=do_extract_task, args=(filepath, extracted_path, book_id), daemon=True).start()
-    return jsonify({"status": "processing", "message": "Book received! Processing in background..."})
+    return jsonify({"status": "processing", "message": f"'{display_name}' received! Processing..."})
 
 
 def generate_thumbnail(bid, fpath):
     """Generates a visual preview (thumbnail) for the dashboard."""
     try:
-        import fitz
-        import cv2
-        import numpy as np
-        import docx
-        import pptx
         ext = os.path.splitext(fpath)[1].lower()
         thumb_name = f"thumb_{bid}.png"
         thumb_dir = os.path.join(UPLOAD_FOLDER, "thumbnails")
@@ -1399,7 +1564,6 @@ def background_ocr_upgrade_task(fpath, epath, bid=None):
     global active_ocr_bid
     if bid: active_ocr_bid = bid
     
-    import time
     time.sleep(3) # Give the main thread 3 seconds of peace to finish loading the first book
     
     # Check if we should even start (user might have switched already)
@@ -1414,17 +1578,38 @@ def background_ocr_upgrade_task(fpath, epath, bid=None):
         # Check again after thumbnail (which can be slow)
         if bid and active_ocr_bid != bid: return
 
-        # 2. Perform the heavy-duty OCR now (no fast mode)
-        # This enhances the initial fast extraction with searchable image text
-        final_html = extract_book_html(fpath, fast_mode=False, bid=bid)
+        # 2. PHASE 1: FULL STRUCTURAL EXTRACTION (Instant full availability)
+        # We do this in fast_mode=True first so the user gets all pages (e.g. 3600) within seconds.
+        full_fast_res = extract_book_html(fpath, fast_mode=True, bid=bid)
+        full_fast_html = str(full_fast_res["html"] if isinstance(full_fast_res, dict) else full_fast_res)
+        full_page_count = full_fast_res.get("total_pages", 0) if isinstance(full_fast_res, dict) else full_fast_html.count('lazy-page-container')
+        
+        # Save the full fast version immediately
+        with open(epath, "w", encoding="utf-8") as f:
+            f.write(full_fast_html)
+            
+        # Update DB: Book is now 'ready' with full page count!
+        conn = get_conn()
+        if thumb:
+            conn.execute("UPDATE books SET status='ready', thumbnail_path=?, page_count=? WHERE id=?", (thumb, full_page_count, bid))
+        else:
+            conn.execute("UPDATE books SET status='ready', page_count=? WHERE id=?", (full_page_count, bid))
+        conn.commit()
+        conn.close()
+        print(f"Background Phase 1 (Full Structure) complete for {bid}. Pages: {full_page_count}")
+
+        # 3. PHASE 2: DEEP KNOWLEDGE MINING (Deep OCR - Slow)
+        # This enhances the pages with searchable text and higher-quality image data.
+        final_html_res = extract_book_html(fpath, fast_mode=False, bid=bid)
+        final_html = str(final_html_res["html"] if isinstance(final_html_res, dict) else final_html_res)
         
         # Check one last time before saving
         if bid and active_ocr_bid != bid: return
         
         with open(epath, "w", encoding="utf-8") as f:
-            f.write(str(final_html))
+            f.write(final_html)
             
-        # 3. Finalize DB state: mark as 'ready' and SYNC PAGE COUNT
+        # 4. Finalize DB state (Sync final page count if it changed)
         if bid:
             # Re-calculate page count after deep OCR
             final_page_count = str(final_html).count('lazy-page-container')
@@ -1441,7 +1626,6 @@ def background_ocr_upgrade_task(fpath, epath, bid=None):
         
         print(f"Background OCR upgrade complete for {bid if bid else 'unknown'}.")
     except Exception:
-        import traceback
         traceback.print_exc()
         # Ensure we don't leave it stuck in 'processing' if it technically finished or failed
         if bid:
@@ -1463,7 +1647,6 @@ def do_extract_task(fpath, epath, bid):
         
         # 1b. CAPTURE SUMMARY: Optimized for speed
         # We only parse the FIRST 50k characters for the summary to prevent hanging on massive books.
-        from bs4 import BeautifulSoup
         summary_sample = html_str[:50000]
         soup = BeautifulSoup(summary_sample, "html.parser")
         clean_text = soup.get_text(separator=' ').strip()
@@ -1494,20 +1677,23 @@ def do_extract_task(fpath, epath, bid):
             conn2.close()
         except: pass
 
-    return jsonify({"status": "processing", "message": "Book received! Processing in background..."})
-
 
 @app.route("/books")
 @login_required
 def books():
     conn = get_conn()
     cur = conn.cursor()
-    # Fetch owned books AND shared books
+    # Fetch owned books (with share check) AND shared books
     cur.execute("""
         SELECT b.id, b.name, b.uploaded_at, b.status, b.thumbnail_path, b.summary, b.reading_time, b.is_favorite,
                (SELECT COUNT(*) FROM bookmarks WHERE book_id = b.id) as bookmark_count,
                (SELECT COUNT(*) FROM notes WHERE book_id = b.id) as notes_count,
-               'owned' as relation, b.page_count, NULL as sharer_name
+               CASE 
+                 WHEN (SELECT COUNT(*) FROM shared_books WHERE book_id = b.id AND sharer_id = ?) > 0 THEN 'shared_by_me'
+                 ELSE 'owned'
+               END as relation, 
+               b.page_count,
+               (SELECT u.username FROM users u JOIN shared_books sb ON u.id = sb.user_id WHERE sb.book_id = b.id AND sb.sharer_id = ? LIMIT 1) as collaborator_name
         FROM books b
         WHERE b.user_id = ?
         
@@ -1516,17 +1702,105 @@ def books():
         SELECT b.id, b.name, b.uploaded_at, b.status, b.thumbnail_path, b.summary, b.reading_time, b.is_favorite,
                (SELECT COUNT(*) FROM bookmarks WHERE book_id = b.id) as bookmark_count,
                (SELECT COUNT(*) FROM notes WHERE book_id = b.id) as notes_count,
-               'shared' as relation, b.page_count, u.username as sharer_name
+               'shared_with_me' as relation, b.page_count, u.username as collaborator_name
         FROM books b
         JOIN shared_books sb ON b.id = sb.book_id
         JOIN users u ON sb.sharer_id = u.id
         WHERE sb.user_id = ?
         
         ORDER BY id DESC
-    """, (current_user.id, current_user.id))
+    """, (current_user.id, current_user.id, current_user.id, current_user.id))
     data = cur.fetchall()
     conn.close()
     return jsonify(data)
+
+
+@app.route("/voice_notes", methods=["GET", "POST"])
+@login_required
+def voice_notes_route():
+    conn = get_conn()
+    cur = conn.cursor()
+    if request.method == "POST":
+        data = request.json or {}
+        content = data.get("content")
+        title = data.get("title") or "Untitled Note"
+        if content:
+            Logger.info("Persistence", f"Manual save triggered for voice note: '{title[:20]}...'")
+            cur.execute("INSERT INTO voice_notes (user_id, content, title) VALUES (?, ?, ?)", (current_user.id, content, title))
+            conn.commit()
+            conn.close()
+            return jsonify({"status": "success", "message": "Voice note saved successfully!"})
+        conn.close()
+        return jsonify({"status": "error", "message": "Content is required!"}), 400
+    else:
+        cur.execute("SELECT id, content, created_at, title FROM voice_notes WHERE user_id = ? ORDER BY id DESC", (current_user.id,))
+        notes = cur.fetchall()
+        conn.close()
+        # Convert to list of dicts for JSON
+        res = [{"id": n[0], "content": n[1], "created_at": n[2], "title": n[3] or "Untitled Note"} for n in notes]
+        return jsonify(res)
+
+
+
+@app.route("/delete_voice_note/<int:note_id>", methods=["POST"])
+@login_required
+def delete_voice_note(note_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM voice_notes WHERE id = ? AND user_id = ?", (note_id, current_user.id))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "success", "message": "Voice note deleted."})
+
+
+@app.route("/update_voice_note/<int:note_id>", methods=["POST"])
+@login_required
+def update_voice_note(note_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    data = request.json or {}
+    content = data.get("content")
+    title = data.get("title")
+    if content:
+        if title:
+            cur.execute("UPDATE voice_notes SET content = ?, title = ? WHERE id = ? AND user_id = ?", (content, title, note_id, current_user.id))
+        else:
+            cur.execute("UPDATE voice_notes SET content = ? WHERE id = ? AND user_id = ?", (content, note_id, current_user.id))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "success", "message": "Voice note updated successfully!"})
+    conn.close()
+    return jsonify({"status": "error", "message": "Content is required!"}), 400
+
+
+@app.route("/add_voice_note_to_library/<int:note_id>", methods=["POST"])
+@login_required
+def add_voice_note_to_library(note_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT content FROM voice_notes WHERE id = ? AND user_id = ?", (note_id, current_user.id))
+    note = cur.fetchone()
+    if not note:
+        conn.close()
+        return jsonify({"status": "error", "message": "Voice note not found"}), 404
+    
+    content = note[0]
+    # Create text file
+    filename = f"voice_note_{int(time.time())}.txt"
+    filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(content)
+
+    cur.execute("""
+        INSERT INTO books (name, path, status, user_id, page_count)
+        VALUES (?, ?, ?, ?, ?)
+    """, (filename, filepath, "ready", current_user.id, 1))
+
+    # Optional: delete original standalone note after moving to library
+    cur.execute("DELETE FROM voice_notes WHERE id = ? AND user_id = ?", (note_id, current_user.id))
+    conn.commit()
+    conn.close()
+    return jsonify({"status": "success", "message": "Successfully added note to library!"})
 
 
 @app.route("/update_reading_time", methods=["POST"])
@@ -1557,7 +1831,6 @@ def update_reading_time():
 def get_user_streak():
     conn = get_conn()
     cur = conn.cursor()
-    import datetime
     
     # 20 mins goal
     daily_goal_sec = 1200 
@@ -1858,16 +2131,27 @@ def tts():
     # 🛡️ TTS ROBUSTNESS: Strip out problematic symbols that cause Edge-TTS to stall or stutter.
     # We keep punctuation that contributes to natural speech pauses (. , ! ? ; : - ।)
     # but remove symbols like @ # $ % ^ & * ( ) < > / \ _ + = | ~ `
-    import re
     text = re.sub(r'[@#$%^&*<>\\\/_+=|~`\[\]{}]', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
 
     if not text:
         return "No speakable text", 400
-    
+
+    # INSTANT TRANSLATION LOGIC: 
+    # If the text provided is English but the target language is not, 
+    # we translate it server-side to skip a network round-trip from the client.
+    l_short = lang.split('-')[0].lower() if '-' in lang else lang.lower()
+    if l_short != 'en' and not re.search(r'[\u0B80-\u0BFF\u0900-\u097F\u0C00-\u0C7F\u0C80-\u0CFF\u0D00-\u0D7F\u0980-\u09FF]', text):
+        try:
+            # We use a single-item batch for high speed
+            translated = translate_batch_fast([text], l_short)
+            if translated and len(translated) > 0:
+                text = translated[0]
+        except Exception as te:
+            pass
+
     # Standardize language (ta-IN -> ta)
     l_full = lang.lower()
-    l_short = lang.split('-')[0].lower() if '-' in lang else lang.lower()
     
     # Professional Neural Voice Map (Comprehensive)
     VOICE_MAP = {
@@ -1919,7 +2203,6 @@ def tts():
     if l not in EDGE_SUPPORTED:
         # PURE FALLBACK FOR UNSUPPORTED REGIONS (e.g. Punjabi)
         try:
-            from gtts import gTTS
             tts_obj = gTTS(text=text, lang=l, slow=False)
             fp = io.BytesIO()
             tts_obj.write_to_fp(fp)
@@ -1939,8 +2222,6 @@ def tts():
 
     # EDGE-TTS GENERATION (Buffered for stability on Windows)
     try:
-        import asyncio
-        import edge_tts
         
         async def get_audio_bytes():
             communicate = edge_tts.Communicate(text, voice)
@@ -2004,6 +2285,7 @@ def export_audiobook(book_id):
         VOICE_MAP = {
             'en': { 'female': 'en-US-AriaNeural', 'male': 'en-US-GuyNeural' },
             'en-us': { 'female': 'en-US-AriaNeural', 'male': 'en-US-GuyNeural' },
+            'en-gb': { 'female': 'en-GB-SoniaNeural', 'male': 'en-GB-ThomasNeural' },
             'ta': { 'female': 'ta-IN-PallaviNeural', 'male': 'ta-IN-ValluvarNeural' },
             'hi': { 'female': 'hi-IN-SwaraNeural', 'male': 'hi-IN-MadhurNeural' },
             'kn': { 'female': 'kn-IN-SapnaNeural', 'male': 'kn-IN-GaganNeural' },
@@ -2068,7 +2350,6 @@ def export_audiobook(book_id):
         chunks = chunks[:800] # Safe upper bound for massive academic books
 
         def generate_audiobook():
-            import edge_tts
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             
@@ -2319,6 +2600,44 @@ def get_highlights(book_id):
     return jsonify(highlights)
 
 
+@app.route("/save_text_as_book", methods=["POST"])
+def save_text_as_book():
+    if not current_user.is_authenticated:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json() or {}
+    text = data.get("text", "").strip()
+    if not text:
+        return jsonify({"error": "No text provided"}), 400
+
+    now_str = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+    filename = f"Voice_Note_{now_str}.html"
+
+    filepath = os.path.join(UPLOAD_FOLDER, filename)
+    extracted_path = os.path.join(EXTRACTED_FOLDER, filename)
+
+    html_content = f'<div class="lazy-page-container flex-page" style="display: flex; flex-direction: column; margin-bottom: 60px; padding: 40px; gap: 20px; background: white; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.05); min-height: 200px;"><p style="white-space: pre-wrap; margin-bottom: 1.2em; line-height: 1.6; color: #1e293b; font-family: \'Inter\', sans-serif; font-size: 1.02rem;">{text}</p></div>'
+
+    # Save a basic text file
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+    # Also extract right away
+    with open(extracted_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO books(name, path, extracted_path, status, user_id) VALUES (?, ?, ?, ?, ?)",
+        (filename, filepath, extracted_path, "Extracted", current_user.id)
+    )
+    conn.commit()
+    conn.close()
+
+    return jsonify({"status": "success", "message": "Voice note saved as a new book!"})
+
+
 @app.route("/delete_book/<int:book_id>", methods=["POST"])
 def delete_book(book_id):
     conn = get_conn()
@@ -2383,7 +2702,6 @@ def delete_book(book_id):
             # but we remove the main HTML file here)
             if extracted_path and os.path.exists(extracted_path):
                 if os.path.isdir(extracted_path):
-                    import shutil
                     shutil.rmtree(extracted_path)
                 else:
                     os.remove(extracted_path)
@@ -2480,7 +2798,6 @@ def translate_text():
             print(f"Sidecar Bridge Failure: {e}. Falling back to internal Python engine.")
 
         # FALLBACK: Using a specialized Batch Translator for maximum reliability vs manual string joining
-        from deep_translator import GoogleTranslator
         translator = GoogleTranslator(source='auto', target=target_lang)
         
         # PARTITIONED BATCHING: Prevents URI overflow and provides faster individual feedback
@@ -2544,19 +2861,19 @@ def save_bookmark():
         conn = get_conn()
         cur = conn.cursor()
         
-        # Check for existing bookmark to enforce single-bookmark-per-book
-        cur.execute("SELECT id FROM bookmarks WHERE book_id = ?", (book_id,))
+        # Check for existing bookmark at this exact character index
+        cur.execute("SELECT id FROM bookmarks WHERE book_id = ? AND char_index = ?", (book_id, char_index))
         existing = cur.fetchone()
         
         if existing and not force_replace:
             conn.close()
-            return jsonify({"status": "exists", "message": "A bookmark already exists for this book. Replace it?"})
+            return jsonify({"status": "exists", "message": "A bookmark already exists at this location. Replace it?"})
         
         if existing:
             # Update current bookmark
             cur.execute(
-                "UPDATE bookmarks SET page_number = ?, scroll_y = ?, char_index = ?, node_index = ?, node_offset = ?, label = ?, lang_code = ?, created_at = CURRENT_TIMESTAMP WHERE book_id = ?",
-                (page_num, scroll_y, char_index, node_index, node_offset, label, lang_code, book_id)
+                "UPDATE bookmarks SET page_number = ?, scroll_y = ?, node_index = ?, node_offset = ?, label = ?, lang_code = ?, created_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (page_num, scroll_y, node_index, node_offset, label, lang_code, existing[0])
             )
         else:
             # Insert new one
@@ -2726,36 +3043,13 @@ def save_note():
 
 @app.route("/notes/<int:book_id>")
 def get_notes(book_id):
-    lang = request.args.get("lang", "en") # Current UI language
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT id, content FROM notes WHERE book_id = ? ORDER BY created_at DESC", (book_id,))
     rows = cur.fetchall()
     conn.close()
 
-    notes = []
-    for row in rows:
-        note_id, content = row
-        # Auto-translate if not in original/english
-        # Determine target language (handle 'orig')
-        actual_target = lang
-        if lang == 'orig' and book_id:
-            # We need a small sample of content to detect if it's 'orig'
-            notes_sample = content[:1000]
-            if re.search(r'[\u0B80-\u0BFF]', notes_sample): actual_target = 'ta'
-            elif re.search(r'[\u0900-\u097F]', notes_sample): actual_target = 'hi'
-            elif re.search(r'[\u0B80-\u0BFF]', content): actual_target = 'ta' # Backwards compatibility/Deep check
-            
-        # Auto-translate if actual_target is not english/original
-        if actual_target and actual_target != 'en':
-            try:
-                # If the content is already in the target language, deep-translator usually handles it fine
-                from deep_translator import GoogleTranslator
-                content = GoogleTranslator(source='auto', target=actual_target).translate(content)
-            except Exception:
-                pass 
-        notes.append({"id": note_id, "content": content})
-        
+    notes = [{"id": r[0], "content": r[1]} for r in rows]
     return jsonify(notes)
 
 @app.route("/update_note", methods=["POST"])
@@ -2812,7 +3106,6 @@ def download_notes(book_id):
     # Translate notes if requested language is not original
     notes = []
     if actual_target and actual_target != 'en':
-        from deep_translator import GoogleTranslator
         translator = GoogleTranslator(source='auto', target=actual_target)
         for n in raw_notes:
             try:
@@ -2827,7 +3120,6 @@ def download_notes(book_id):
         return "No notes found to download.", 400
 
     if format_type == "docx":
-        import docx
         doc = docx.Document()
         doc.add_heading(f'Study Notes: {book_name}', 0)
         doc.add_paragraph('Collected using AI Book Reader').italic = True
@@ -2842,7 +3134,6 @@ def download_notes(book_id):
         return send_file(target, as_attachment=True, download_name=f"Notes_{book_name}.docx", mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
 
     elif format_type == "pdf":
-        from fpdf import FPDF
         
         class PDF(FPDF):
             def header(self):
@@ -3068,7 +3359,6 @@ def translate_batch_fast(texts, target_lang):
     # 2. FALLBACK to Python Library (Batching for safety)
     if not translated_pool:
         try:
-            from deep_translator import GoogleTranslator
             translator = GoogleTranslator(source='auto', target=target_lang)
             batch_size = 15 # conservative for deep_translator stability
             for i in range(0, len(to_translate), batch_size):
@@ -3249,7 +3539,6 @@ def generate_quiz():
 
             # High-Performance NLP Logic using TextBlob
             try:
-                from textblob import TextBlob
                 blob = TextBlob(text)
                 # Group noun phrases and filter out junk
                 concepts = [str(np).lower() for np in blob.noun_phrases if len(str(np)) > 3]
@@ -3365,7 +3654,6 @@ def generate_quiz():
                         if not has_target_script:
                             try:
                                 # Final forced translation for this specific straggler
-                                from deep_translator import GoogleTranslator
                                 t = GoogleTranslator(source='auto', target=actual_target)
                                 q["question"] = t.translate(q["question"])
                                 if q.get("options"):
@@ -3481,24 +3769,21 @@ def define_word():
             return jsonify({"answer": "Word missing."})
             
         sentences = []
-        # Prioritize the text current being viewed (this handles translations)
         if text_from_client:
             soup = BeautifulSoup(text_from_client, "html.parser")
             raw_text = soup.get_text(separator=" ")
             sentences = re.split(r'(?<=[.!?])\s+', raw_text)
             sentences = [re.sub(r'\s+', ' ', s).strip() for s in sentences if len(s.strip()) > 5]
         
-        # Fallback to book file if client text is sparse or missing
         if not sentences and book_id:
             sentences = get_book_sentences(book_id)
 
-        # 1. Multilingual pattern matching for finding definitions in-context
         lang_patterns = {
             "en": [rf"\b{word}\s+is\b", rf"\b{word}\s+means\b", rf"\b{word}\s+refers\s+to\b", rf"\bdefinition\s+of\s+{word}\b"],
             "ta": [rf"{word}\s+என்பது", rf"{word}\s+என்றால்", rf"{word}\s+குறிக்கிறது"],
             "hi": [rf"{word}\s+का\s+अर्थ", rf"{word}\s+है", rf"{word}\s+मतलब"],
             "te": [rf"{word}\s+అంటే", rf"{word}\s+అనేది"],
-            "ml": [rf"{word}\s+എന്നാൽ", rf"{word}\s+എന്ന്\s+പറയുന്നത്"],
+            "ml": [rf"{word}\s+എന്നാൽ", rf"{word}\s+ಎന്ന്\s+പറಯുന്നത്"],
             "kn": [rf"{word}\s+ಎಂದರೆ", rf"{word}\s+ಎನ್ನುವುದು"],
             "bn": [rf"{word}\s+মানে", rf"{word}\s+হল"],
             "gu": [rf"{word}\s+એટલે", rf"{word}\s+છે"]
@@ -3517,27 +3802,16 @@ def define_word():
             combined_def = ""
             for i in range(min(len(definition_sentences), 2)):
                 combined_def += str(definition_sentences[i]) + " "
-            
             combined_def = combined_def.strip()
             
-            # 🚀 MULTILINGUAL CONTEXTUAL DEFINITION: 
-            # If we found the meaning in the text, also provide the English bridge for clarity.
             if lang != 'en':
                 try:
-                    detect_url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={lang}&tl=en&dt=t&q={word}"
-                    res_word = requests.get(detect_url, timeout=3).json()
+                    res_word = requests.get(f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={lang}&tl=en&dt=t&q={word}", timeout=3).json()
                     english_word = res_word[0][0][0] if res_word[0] and res_word[0][0] else word
-                    
-                    trans_url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={lang}&tl=en&dt=t&q={combined_def}"
-                    res_def = requests.get(trans_url, timeout=3).json()
-                    en_parts = [p[0] for p in res_def[0] if p[0]]
-                    en_def = "".join(en_parts)
-                    
-                    return jsonify({"answer": f"{word} ({english_word}): {combined_def} (En: {en_def})"})
+                    return jsonify({"answer": f"{word} ({english_word}): {combined_def}"})
                 except:
                     return jsonify({"answer": combined_def})
-            else:
-                return jsonify({"answer": combined_def})
+            return jsonify({"answer": combined_def})
             
         # 2. Try Dictionary Definitions (High signal)
         try:
@@ -3650,15 +3924,7 @@ def ask_assistant():
 @app.route("/explain_image", methods=["POST"])
 def explain_image():
     try:
-        import base64
-        import io
-        import cv2
-        import numpy as np
-        from PIL import Image
-        import urllib.request
         from urllib.parse import unquote
-        import pytesseract
-        import re
 
         data = request.get_json()
         # Support both 'src' (legacy/original) and 'image' (new frontend logic)
@@ -4247,7 +4513,7 @@ def handle_join_room(data):
     if room:
         join_room(room)
         print(f"User joined room: {room}")
-        emit('user_joined', {'status': 'connected'}, room=room)
+        emit('user_joined', {'status': 'connected'}, to=room)
 
 @socketio.on('scroll_sync')
 def handle_scroll_sync(data):
@@ -4256,7 +4522,133 @@ def handle_scroll_sync(data):
     scroll_top = data.get('scroll_top')
     if room and page_id:
         # Broadcast to everyone else in the room
-        emit('remote_scroll', {'page_id': page_id, 'scroll_top': scroll_top}, room=room, include_self=False)
+        emit('remote_scroll', {'page_id': page_id, 'scroll_top': scroll_top}, to=room, include_self=False)
+
+@app.route("/api/ai_chat", methods=["POST"])
+@login_required
+def ai_chat():
+    conn = None
+    try:
+        data = request.get_json() or {}
+        user_message = data.get("message", "")
+        context_title = data.get("context", "")
+        book_id = data.get("book_id")
+        
+        if not user_message:
+            return jsonify({"status": "error", "message": "No message provided"}), 400
+
+        Logger.info("Chat AI", f"Processing query from user: {current_user.username}")
+
+        # 1. Quick Responses for Common Small Talk & FAQs (Imported from ai_responses.py)
+        msg_clean = user_message.lower().strip("?.! ")
+        if msg_clean in common_responses:
+            return jsonify({"status": "success", "response": common_responses[msg_clean]})
+
+        # 2. Fast Definition for Single Words
+        words = user_message.strip().split()
+        if len(words) == 1 and words[0].isalpha():
+            word = words[0]
+            return jsonify({
+                "status": "success", 
+                "response": f"'{word}' is a word that means different things depending on context. Generally, it refers to its common dictionary definition. For example, 'love' is a deep feeling of affection. Would you like a more detailed explanation?"
+            })
+
+        # 3. Fetch Library & Book Context
+        library_context = "no books yet"
+        relevant_context = ""
+        
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM books")
+        rows = cur.fetchall()
+        book_list = [row[0].replace("_", " ").split(".")[0] for row in rows]
+        if book_list:
+            library_context = ", ".join(book_list)
+
+        # 4. Fetch RAG Context if book_id is provided
+        if book_id:
+            try:
+                sentences = get_book_sentences(book_id)
+                if sentences:
+                    keywords = [w.lower() for w in user_message.split() if len(w) > 3]
+                    found = []
+                    for s in sentences:
+                        s_low = s.lower()
+                        if any(k in s_low for k in keywords):
+                            found.append(s)
+                        if len(found) >= 5: break
+                    if not found:
+                        found = sentences[:5]
+                    relevant_context = " ".join(found)
+            except Exception as e:
+                print(f"Context fetch error: {e}")
+        
+        conn.close()
+        conn = None
+
+        # 5. Use the Local AI for Generation
+        chat_model = get_chat_pipeline()
+        if chat_model:
+            # Detect if user is asking for a word meaning or more detail
+            user_msg_low = user_message.lower()
+            is_definition_request = any(k in user_msg_low for k in ["meaning of", "definition of", "what is", "define "])
+            wants_more_detail = any(k in user_msg_low for k in ["more detail", "explain more", "tell me more", "elaborate", "detailed"])
+            
+            # SmolLM2 Prompt Template - Optimized for extreme brevity
+            prompt = f"<|im_start|>system\nYou are an ultra-concise AI Assistant with broad general world knowledge. You MUST keep answers under 2 sentences.\n"
+            if wants_more_detail:
+                prompt = f"<|im_start|>system\nYou are a helpful Reading Assistant. Use your general knowledge and the provided context to explain in detail.\n"
+            elif is_definition_request:
+                prompt += "Provide a general dictionary definition based on world knowledge. Only mention books if explicitly asked.\n"
+            
+            prompt += f"Library: {library_context}\n"
+            if context_title:
+                prompt += f"Active Book: {context_title}\n"
+            if relevant_context and not is_definition_request:
+                prompt += f"Context: {relevant_context}\n"
+            
+            prompt += "<|im_end|>\n"
+            prompt += f"<|im_start|>user\n{user_message}<|im_end|>\n"
+            prompt += "<|im_start|>assistant\n"
+            
+            # Use a very tight token limit for standard queries
+            limit = 50 if not wants_more_detail else 200
+            result = chat_model(prompt, max_new_tokens=limit, do_sample=True, temperature=0.4, top_p=0.9, repetition_penalty=1.2, pad_token_id=50256)
+            full_text = result[0]['generated_text']
+            
+            if "assistant" in full_text.lower():
+                response = full_text.split("assistant")[-1].strip()
+                response = response.replace("<|im_end|>", "").replace("<|im_start|>", "").strip()
+                if response.startswith(":"): response = response[1:].strip()
+            else:
+                response = full_text.replace(prompt, "").strip()
+
+            for stop in ["User:", "System:", "Instruction:", "Human:", "Context:", "<|im_start|>", "<|im_end|>", "\nUser", "\nSystem"]:
+                if stop in response: response = response.split(stop)[0].strip()
+            
+            # FORCE TRUNCATION: If the user didn't ask for detail, only keep the first 2 sentences.
+            if not wants_more_detail and len(response) > 5:
+                # Split by sentence markers but keep the marker
+                sentences = re.split(r'(?<=[.!?])\s+', response)
+                if len(sentences) > 2:
+                    response = " ".join(sentences[:2])
+                    if not any(response.endswith(m) for m in ['.', '!', '?']):
+                         response += "."
+
+            if not response or len(response) < 2:
+                response = f"I can help with your books! Your library has: {library_context}."
+
+            return jsonify({"status": "success", "response": response})
+        else:
+            return jsonify({"status": "success", "response": "I'm still initializing. Try again in a moment!"})
+
+    except Exception as e:
+        print(f"Chat Error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if conn:
+            try: conn.close()
+            except: pass
 
 if __name__ == "__main__":
     # Perfect Logic: Only run initialization in the child process during debug mode,
@@ -4264,6 +4656,6 @@ if __name__ == "__main__":
     if os.environ.get('WERKZEUG_RUN_MAIN') == 'true' or not app.debug:
         init_db()
         start_translation_sidecar()
-        print("🚀 Systems Initialized. Server starting...")
+        Logger.success("Core", "Systems Initialized. Server starting...")
     
     socketio.run(app, host='0.0.0.0', port=5000, allow_unsafe_werkzeug=True)

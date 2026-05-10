@@ -243,7 +243,60 @@
         .is-registering .register-form-wrapper { display: block; }
         .is-forgot .forgot-form-wrapper { display: block; }
         .is-reset .reset-form-wrapper { display: block; }
+
+        /* --- Mobile Optimization --- */
+        @media (max-width: 600px) {
+            body {
+                align-items: flex-start;
+                padding-top: 50px;
+                overflow-y: auto;
+            }
+
+            .login-form-component-root {
+                min-width: 90vw !important;
+                width: 92vw !important;
+                border-radius: 32px;
+                padding-bottom: 30px;
+                box-shadow: 0 20px 50px rgba(0,0,0,0.4);
+            }
+
+            .rive-wrapper {
+                width: 140px;
+                height: 140px;
+                margin-top: 10px;
+            }
+
+            #canvas {
+                width: 180px;
+                height: 180px;
+            }
+
+            .login-form-wrapper, .register-form-wrapper, .forgot-form-wrapper, .reset-form-wrapper {
+                padding: 0 24px;
+            }
+
+            h1 {
+                font-size: 1.75rem;
+                margin-bottom: 15px;
+            }
+
+            /* Stack grid inputs on mobile */
+            .register-form-wrapper form > div[style*="grid-template-columns"],
+            .register-form-wrapper form > div > div[style*="grid-template-columns"] {
+                grid-template-columns: 1fr !important;
+                gap: 12px !important;
+            }
+
+            .theme-btn {
+                top: 15px;
+                right: 15px;
+                width: 48px;
+                height: 48px;
+            }
+        }
     </style>
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
 
 <body id="authBody" data-error="{{ error or '' }}" data-success="{{ success or '' }}" data-mode="{{ mode or '' }}">
@@ -280,6 +333,11 @@
                             </span>
                         </div>
                     </div>
+                    {% if error and (error == "Username does not exist" or error == "Incorrect password") %}
+                    <div style="color: #f87171; font-size: 14px; font-weight: 600; text-align: center; margin-top: 10px;" id="loginErrorMsg">
+                        {{ error }}
+                    </div>
+                    {% endif %}
                     <button type="submit" class="login-btn">Unlock Library</button>
                     <p class="switch-btn">New here? <b onclick="toggleForms('register')">Create Account</b></p>
                 </form>
@@ -447,7 +505,7 @@
             const icon = document.getElementById('themeIcon');
             const newTheme = html.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
             html.setAttribute('data-theme', newTheme);
-            icon.innerText = newTheme === 'light' ? '☀️' : '🌙';
+            icon.innerHTML = newTheme === 'light' ? '<i class="fas fa-sun"></i>' : '<i class="fas fa-moon"></i>';
             localStorage.setItem('reader-theme', newTheme);
         }
 
@@ -466,22 +524,36 @@
             }
         }
 
+        function showCustomAlert(title, message, icon) {
+            const modal = document.getElementById('customAlertModal');
+            document.getElementById('customAlertTitle').innerText = title;
+            document.getElementById('customAlertMessage').innerText = message;
+            document.getElementById('customAlertIcon').innerHTML = icon || '<i class="fas fa-info-circle"></i>';
+            modal.style.display = 'flex';
+        }
+
+        function closeCustomAlert() {
+            document.getElementById('customAlertModal').style.display = 'none';
+        }
+
         (function init() {
             const savedTheme = localStorage.getItem('reader-theme') || 'dark';
             document.documentElement.setAttribute('data-theme', savedTheme);
             const icon = document.getElementById('themeIcon');
-            if (icon) icon.innerText = savedTheme === 'light' ? '☀️' : '🌙';
+            if (icon) icon.innerHTML = savedTheme === 'light' ? '<i class="fas fa-sun"></i>' : '<i class="fas fa-moon"></i>';
 
-            const err = document.getElementById('authBody').dataset.error;
-            const succ = document.getElementById('authBody').dataset.success;
+            const err = "{{ error or '' }}";
+            const succ = "{{ success or '' }}";
             if (err && err !== '') {
-                alert(err);
+                if (err !== 'Username does not exist' && err !== 'Incorrect password') {
+                    showCustomAlert('Alert', err, '<i class="fas fa-exclamation-triangle" style="color: #f59e0b;"></i>');
+                }
             }
             if (succ && succ !== '') {
-                alert(succ);
+                showCustomAlert('Success', succ, '<i class="fas fa-check-circle" style="color: #10b981;"></i>');
             }
 
-            const mode = document.getElementById('authBody').dataset.mode;
+            const mode = "{{ mode or '' }}";
             if (mode === 'register' || mode === 'forgot' || mode === 'reset') {
                 toggleForms(mode);
             }
@@ -497,6 +569,24 @@
             }, 100);
         })();
     </script>
+    <!-- Beautiful custom popup alert for errors/success messages -->
+    <div id="customAlertModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 10000; background: rgba(0, 0, 0, 0.6); backdrop-filter: blur(8px); align-items: center; justify-content: center;">
+        <div style="background: var(--card-bg); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 28px; padding: 30px 40px; max-width: 420px; width: 90%; text-align: center; box-shadow: 0 30px 60px rgba(0,0,0,0.5); animation: scaleUp 0.3s cubic-bezier(0.18, 0.89, 0.32, 1.28);">
+            <div id="customAlertIcon" style="font-size: 3rem; margin-bottom: 15px; color: var(--primary);">
+                <i class="fas fa-exclamation-triangle"></i>
+            </div>
+            <h3 id="customAlertTitle" style="color: var(--text-main); font-size: 1.35rem; margin-bottom: 8px; font-weight: 800; font-family: 'Playfair Display', serif;">Message</h3>
+            <p id="customAlertMessage" style="color: var(--text-dim); font-size: 1rem; line-height: 1.5; margin-bottom: 25px;">Notification detail goes here...</p>
+            <button onclick="closeCustomAlert()" style="width: 100%; background: var(--primary); color: white; border: none; border-radius: 16px; height: 50px; font-size: 1.1rem; font-weight: 700; cursor: pointer; transition: all 0.2s; box-shadow: 0 8px 25px var(--primary-glow);">OK</button>
+        </div>
+    </div>
+    
+    <style>
+        @keyframes scaleUp {
+            from { opacity: 0; transform: scale(0.85); }
+            to { opacity: 1; transform: scale(1); }
+        }
+    </style>
 </body>
 
 </html>

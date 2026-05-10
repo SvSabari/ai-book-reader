@@ -42,7 +42,9 @@ try {
                     }, 300);
                 }
             });
+            setTimeout(() => { isRemoteScrolling = false; }, 800);
         }
+        initSidebarResize();
     });
 } catch (e) { }
 
@@ -79,6 +81,9 @@ function startStudyTimer(startTimeInSeconds = 0) {
 
 function updateStudyTimer() {
     if (!studySessionStartTime) return;
+    const overlay = document.getElementById("dashboardOverlay");
+    if (overlay && overlay.style.display === "flex") return;
+
     const sessionElapsed = Math.floor((Date.now() - studySessionStartTime) / 1000);
     const totalElapsed = initialStudyTime + sessionElapsed;
 
@@ -89,7 +94,7 @@ function updateStudyTimer() {
     const timeStr = [hrs, mins, secs].map(v => v < 10 ? "0" + v : v).join(":");
     const timerEl = document.getElementById("studyTimer");
     if (timerEl) {
-        timerEl.innerText = `| ${timeStr} Studying`;
+        timerEl.innerText = `| ${timeStr}`;
     }
 }
 
@@ -144,12 +149,37 @@ function toggleDashboard() {
     const isVisible = overlay.style.display === "flex";
     if (!isVisible) {
         overlay.style.display = "flex";
+        const voiceBtn = document.getElementById("voiceBtn");
+        if (voiceBtn) voiceBtn.style.display = "none";
+        const drawFab = document.getElementById("floatingDrawFab");
+        if (drawFab) drawFab.style.display = "none";
+        const drawToolbar = document.getElementById("drawingMiniToolbar");
+        if (drawToolbar) drawToolbar.style.display = "none";
+
+        const fabGroup = document.getElementById("dashboardFabGroup");
+        if (fabGroup) fabGroup.style.display = "flex";
+        const footer = document.getElementById("dashboardMiniFooter");
+        if (footer) footer.style.display = "flex";
+        
+        document.body.style.overflow = "hidden"; // Prevent background scrolling
         stopReadingPulse();
         loadBooks();
         fetchUserStreak();
         checkForInvites();
     } else {
         overlay.style.display = "none";
+        const voiceBtn = document.getElementById("voiceBtn");
+        if (voiceBtn && currentBookId) voiceBtn.style.display = "flex";
+        const drawFab = document.getElementById("floatingDrawFab");
+        if (drawFab && currentBookId) drawFab.style.display = "flex";
+
+        const fabGroup = document.getElementById("dashboardFabGroup");
+        if (fabGroup) fabGroup.style.display = "none";
+        const footer = document.getElementById("dashboardMiniFooter");
+        if (footer) footer.style.display = "none";
+        
+        document.body.style.overflow = ""; // Restore scrolling
+        if (typeof stopDashboardPolling === 'function') stopDashboardPolling();
         // CRITICAL: Close any open sub-modals to prevent UI ghosting over the reader
         const subModals = ['collabsModal', 'invitationsModal', 'roomModal', 'profileModal'];
         subModals.forEach(id => {
@@ -161,6 +191,7 @@ function toggleDashboard() {
         if (currentBookId) startReadingPulse();
     }
 }
+
 
 function renderDashboard(data) {
     console.log("Rendering Dashboard with", data.length, "books");
@@ -230,7 +261,7 @@ function renderDashboard(data) {
 
     data.forEach(book => {
         // [id, name, uploaded_at, status, thumb, summary, time, is_favorite, bCount, nCount, relation, pageCount, sharerName]
-        const [id, name, uploaded_at, status, thumb, summary, time, is_fav, bCount, nCount, relation, pageCount, sharerName] = book;
+        const [id, name, uploaded_at, status, thumb, summary, time, is_fav, bCount, nCount, relation, pageCount, collabName] = book;
 
         // Format upload date
         let uploadDateStr = "";
@@ -238,6 +269,13 @@ function renderDashboard(data) {
             const date = new Date(uploaded_at.replace(" ", "T") + "Z");
             uploadDateStr = date.toISOString().split('T')[0]; // Simple YYYY-MM-DD
         } catch (e) { uploadDateStr = (uploaded_at || "").split(" ")[0]; }
+
+        // Clean the name for display
+        const cleanName = name.replace(/_/g, ' ')
+            .replace(/\.(pdf|epub|docx|txt)$/i, '')
+            .split(' ')
+            .map(w => w.length > 0 ? w.charAt(0).toUpperCase() + w.slice(1) : w)
+            .join(' ');
 
         const card = document.createElement("div");
         card.className = "book-card";
@@ -265,16 +303,16 @@ function renderDashboard(data) {
         `;
 
         if (thumb) {
-            thumbContent = `<img src="/thumbnail/${id}" alt="${name}" onerror="this.style.display='none'">`;
+            thumbContent = `<img src="/thumbnail/${id}" alt="${name}" style="width: 100%; height: 100%; object-fit: cover;">`;
         }
 
         const indicators = `
             <div class="card-indicators">
-                ${isProcessing ? `<span class="status-badge-processing">⚙️ Processing...</span>` : ''}
-                ${(status && status !== 'ready' && !isProcessing) ? `<span class="indicator-badge status-badge">⚙️ ${status}</span>` : ''}
-                ${relation === 'shared' ? `<span class="indicator-badge" style="background: rgba(99, 102, 241, 0.15); color: var(--primary); border: 1px solid rgba(99, 102, 241, 0.3); font-weight: 700; letter-spacing: 0.02em;" title="Collaborated with ${sharerName || 'someone'}">👥 SHARED</span>` : ''}
-                ${bCount > 0 ? `<span class="indicator-badge" title="Has Bookmarks">🔖 ${bCount}</span>` : ''}
-                ${nCount > 0 ? `<span class="indicator-badge" title="Has Study Notes">📝 ${nCount}</span>` : ''}
+                ${isProcessing ? `<span class="status-badge-processing"><i class="fas fa-cog fa-spin"></i> Processing...</span>` : ''}
+                ${(status && status !== 'ready' && !isProcessing) ? `<span class="indicator-badge status-badge"><i class="fas fa-cog"></i> ${status}</span>` : ''}
+                ${relation === 'shared' ? `<span class="indicator-badge" style="background: rgba(99, 102, 241, 0.15); color: var(--primary); border: 1px solid rgba(99, 102, 241, 0.3); font-weight: 700; letter-spacing: 0.02em;" title="Collaborated with ${collabName || 'someone'}"><i class="fas fa-users"></i> SHARED</span>` : ''}
+                ${bCount > 0 ? `<span class="indicator-badge" title="Has Bookmarks"><i class="fas fa-bookmark"></i> ${bCount}</span>` : ''}
+                ${nCount > 0 ? `<span class="indicator-badge" title="Has Study Notes"><i class="fas fa-sticky-note"></i> ${nCount}</span>` : ''}
             </div>
         `;
 
@@ -290,69 +328,62 @@ function renderDashboard(data) {
         };
 
         card.innerHTML = `
-            <div class="card-thumbnail">
-                ${thumbContent}
-                <button class="btn-favorite ${is_fav ? 'active' : ''}" onclick="toggleFavorite(${id}, this)" title="${is_fav ? 'Unfavorite' : 'Add to Favorites'}">
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="${is_fav ? '#ef4444' : 'none'}" stroke="${is_fav ? '#ef4444' : 'white'}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="overflow: visible;">
-                        <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l8.84-8.84 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
-                    </svg>
-                </button>
+            <button class="btn-favorite ${is_fav ? 'active' : ''}" onclick="toggleFavorite(${id}, this)" title="${is_fav ? 'Unfavorite' : 'Add to Favorites'}">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="${is_fav ? '#ef4444' : 'none'}" stroke="${is_fav ? '#ef4444' : 'white'}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="overflow: visible;">
+                    <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l8.84-8.84 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"></path>
+                </svg>
+            </button>
+            
+            <!-- Floating Smart Symbols (Top Left of Image) -->
+            <div class="card-smart-indicators" style="position: absolute; top: 12px; left: 12px; display: flex; flex-direction: column; gap: 6px; z-index: 30;">
+                ${relation === 'shared_by_me' ? 
+                    `<div style="background: rgba(245, 158, 11, 0.95); color: white; padding: 5px 10px; border-radius: 8px; font-size: 0.65rem; font-weight: 900; box-shadow: 0 4px 12px rgba(0,0,0,0.3); display: flex; align-items: center; gap: 6px; backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.2); text-transform: uppercase;"><i class="fas fa-share-alt" style="font-size: 0.7rem;"></i> TO: @${(collabName || 'USER').toUpperCase()}</div>` : ''
+                }
+                ${relation === 'shared_with_me' ? 
+                    `<div style="background: rgba(99, 102, 241, 0.95); color: white; padding: 5px 10px; border-radius: 8px; font-size: 0.65rem; font-weight: 900; box-shadow: 0 4px 12px rgba(0,0,0,0.3); display: flex; align-items: center; gap: 6px; backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.2); text-transform: uppercase;"><i class="fas fa-user-friends" style="font-size: 0.7rem;"></i> BY: @${(collabName || 'OWNER').toUpperCase()}</div>` : ''
+                }
+                ${bCount > 0 ? `<div style="background: rgba(255, 159, 67, 0.9); color: white; padding: 4px 8px; border-radius: 8px; font-size: 0.7rem; font-weight: 800; box-shadow: 0 4px 10px rgba(0,0,0,0.2); display: flex; align-items: center; gap: 6px; backdrop-filter: blur(4px);"><i class="fas fa-bookmark" style="font-size: 0.65rem;"></i> ${bCount}</div>` : ''}
+                ${nCount > 0 ? `<div style="background: rgba(99, 102, 241, 0.9); color: white; padding: 4px 8px; border-radius: 8px; font-size: 0.7rem; font-weight: 800; box-shadow: 0 4px 10px rgba(0,0,0,0.2); display: flex; align-items: center; gap: 6px; backdrop-filter: blur(4px);"><i class="fas fa-sticky-note" style="font-size: 0.65rem;"></i> ${nCount}</div>` : ''}
             </div>
+
+            <!-- The Cover (Swings away) -->
+            <div class="book-cover-panel" style="height: 210px; border-top-left-radius: 24px; border-top-right-radius: 24px; overflow: hidden; position: relative; z-index: 15; border-bottom: 1px solid rgba(255,255,255,0.05);">
+                <div class="card-thumbnail" style="height: 100%; width: 100%; border-radius: 0;">
+                    ${thumbContent}
+                </div>
+                ${isProcessing ? `<div style="position:absolute; inset:0; background:rgba(0,0,0,0.5); backdrop-filter: blur(4px); display:flex; align-items:center; justify-content:center; color:white; font-size:0.75rem; font-weight:800; letter-spacing: 0.05em;">PROCESSING...</div>` : ''}
             </div>
-            <div class="card-content">
-                <div class="card-title" title="${name}">${name}</div>
-                ${indicators}
-                <div class="card-meta" style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: nowrap; font-size: 0.7rem;">
-                    <div style="display: flex; align-items: center; gap: 4px; white-space: nowrap;">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.7;">
-                            <circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline>
-                        </svg>
-                        ${uploadDateStr}
-                    </div>
-                    <div style="display: flex; align-items: center; gap: 4px; white-space: nowrap;">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="opacity:0.7;">
-                            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
-                            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
-                        </svg>
-                        ${pageCount || 0} Pages
+
+            <!-- AI Summary Overlay (Hidden behind image) -->
+            <div class="card-summary-overlay" style="height: 210px; border-top-left-radius: 24px; border-top-right-radius: 24px; position: absolute; top: 0; left: 0; right: 0; z-index: 5; background: var(--bg-panel); border-bottom: 1px solid rgba(255,255,255,0.05);">
+                <div class="summary-badge" style="margin: 20px 20px 10px 20px;">🪄 AI Synopsis</div>
+                <p class="summary-text" style="padding: 0 20px; font-size: 0.8rem; -webkit-line-clamp: 6; line-clamp: 6; line-height: 1.5; color: var(--text-light); opacity: 0.9;">${summary || "Our AI is currently analyzing this book to provide you with a deep summary. Please check back in a moment!"}</p>
+            </div>
+
+            <!-- Info Section (Stable) -->
+            <div class="card-info-stable" style="padding: 12px 16px; flex: 1; display: flex; flex-direction: column; justify-content: space-between;">
+                <div>
+                    <!-- Full Title Display -->
+                    <div class="card-title" title="${name}" style="font-size: 1.05rem; font-weight: 800; margin-bottom: 8px; color: var(--text-white); line-height: 1.3; word-break: break-word; white-space: normal;">${cleanName}</div>
+                    
+                    <div class="card-meta-row" style="display: flex; align-items: center; gap: 12px; font-size: 0.75rem; color: var(--text-light); opacity: 0.6; font-weight: 500;">
+                        <span style="display: flex; align-items: center; gap: 5px;"><i class="far fa-calendar-alt"></i> ${uploadDateStr}</span>
+                        <span style="display: flex; align-items: center; gap: 5px;"><i class="fas fa-layer-group"></i> ${pageCount || 0} Pages</span>
                     </div>
                 </div>
-                <div class="card-footer">
-                    <button class="btn-read-more" ${isProcessing ? 'disabled title="Processing... Please wait"' : ''} onclick="openBook(${id}, '${name.replace(/'/g, "\\'")}'); toggleDashboard();">
-                        <span>${isProcessing ? 'Wait...' : 'Open'}</span>
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
-                            <polyline points="15 3 21 3 21 9"></polyline>
-                            <line x1="10" y1="14" x2="21" y2="3"></line>
-                        </svg>
+                
+                <div class="card-footer-unified" style="display: flex; align-items: center; justify-content: flex-start; gap: 6px; margin-top: 12px;">
+                    <button class="btn-read-more" ${isProcessing ? 'disabled' : ''} onclick="openBook(${id}, '${name.replace(/'/g, "\\'")}'); toggleDashboard();" 
+                            style="flex: 0 0 auto; height: 38px; background: var(--primary); color: white; border: none; border-radius: 10px; font-weight: 800; font-size: 0.75rem; display: flex; align-items: center; justify-content: center; gap: 4px; cursor: pointer; transition: 0.2s; padding: 0 10px; min-width: 80px;">
+                        <span>OPEN</span>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
                     </button>
-                    <div class="card-actions-row">
-                         <button class="btn-card-icon" onclick="deleteBook(${id})" title="Delete Book">
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <polyline points="3 6 5 6 21 6"></polyline>
-                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                            </svg>
-                         </button>
-                         <button class="btn-card-icon" title="Download" onclick="downloadBook(${id}, '${name.replace(/'/g, "\\'")}')">
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line>
-                            </svg>
-                         </button>
-                         <button class="btn-card-icon" title="Share" onclick="shareBook(${id}, '${name.replace(/'/g, "\\'")}')">
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle>
-                                <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line>
-                            </svg>
-                         </button>
+                    
+                    <div style="display: flex; gap: 4px; flex-shrink: 0;">
+                         <button onclick="deleteBook(${id})" title="Delete" style="width: 34px; height: 34px; border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.15); background: rgba(239, 68, 68, 0.05); color: #ef4444; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: 0.2s;"><i class="fas fa-trash-alt" style="font-size: 0.75rem;"></i></button>
+                         <button onclick="downloadBook(${id}, '${name.replace(/'/g, "\\'")}')" title="Download" style="width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--border); background: var(--glass); color: var(--text-light); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: 0.2s;"><i class="fas fa-download" style="font-size: 0.75rem;"></i></button>
+                         <button onclick="shareBook(${id}, '${name.replace(/'/g, "\\'")}')" title="Share" style="width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--border); background: var(--glass); color: var(--text-light); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: 0.2s;"><i class="fas fa-share-alt" style="font-size: 0.75rem;"></i></button>
                     </div>
-                </div>
-            </div>
-            <!-- AI Summary Overlay -->
-            <div class="card-summary-overlay">
-                <div class="summary-badge">🪄 AI Synopsis</div>
-                <p class="summary-text">${summary || "Our AI is still processing this book to provide a concise summary. Check back soon!"}</p>
-                <div class="summary-footer">
-                    <span style="opacity: 0.6; font-size: 0.65rem;">${window.innerWidth < 992 ? 'TAP TO DISMISS' : 'HOVER TO RECALL'}</span>
                 </div>
             </div>
         `;
@@ -369,12 +400,23 @@ function renderDashboard(data) {
 }
 
 let dashboardPollTimeout = null;
+
+function stopDashboardPolling() {
+    if (dashboardPollTimeout) {
+        clearTimeout(dashboardPollTimeout);
+        dashboardPollTimeout = null;
+    }
+    window._isPollingDashboard = false;
+}
+
 function startDashboardPolling() {
+    if (dashboardPollTimeout) clearTimeout(dashboardPollTimeout);
     if (window._isPollingDashboard) return;
     window._isPollingDashboard = true;
 
     const poll = async () => {
-        if (!document.getElementById("dashboard") || document.getElementById("dashboard").classList.contains("hidden")) {
+        const overlay = document.getElementById("dashboardOverlay");
+        if (!overlay || overlay.style.display === "none") {
             // Stop polling if dashboard is closed
             window._isPollingDashboard = false;
             return;
@@ -385,7 +427,7 @@ function startDashboardPolling() {
             const data = await res.json();
 
             // Check if still processing
-            const stillProcessing = data.some(b => b[3] && b[3].toLowerCase().includes("processing"));
+            const stillProcessing = data.some(b => b[3] && (b[3].toLowerCase().includes("processing") || b[3].toLowerCase().includes("analyzing") || b[3].toLowerCase().includes("upgrading")));
 
             // Update UI
             renderDashboard(data);
@@ -445,7 +487,7 @@ async function fetchUserStreak() {
             const goalKey = `goal_celebrated_${today}`;
 
             if (percent >= 100) {
-                goalStatus.innerText = "Goal achieved! You're a legend! 🏆";
+                goalStatus.innerHTML = "Goal achieved! You're a legend! <i class='fas fa-trophy'></i>";
                 goalStatus.style.color = "#2ed573";
 
                 // CELEBRATION: Only trigger if not already celebrated TODAY
@@ -806,6 +848,10 @@ async function saveAsNote() {
         if (res.ok) {
             showUploadToast("✍️ Snippet added to archive", "success");
             window.getSelection().removeAllRanges();
+            const modal = document.getElementById("notebookModal");
+            if (modal && modal.style.display === "flex") {
+                renderNotebook();
+            }
         }
     } catch (e) { console.error(e); }
 }
@@ -904,11 +950,12 @@ async function renderNotebook() {
     list.innerHTML = `<div style="text-align: center; padding: 40px; color: var(--text-light);">Reviewing your notes...</div>`;
 
     try {
-        let currentLang = document.getElementById('langSelect').value;
+        let currentLangSelect = document.getElementById('langSelect');
+        let currentLang = currentLangSelect ? currentLangSelect.value : 'orig';
         let res = await fetch(`/notes/${currentBookId}?lang=${currentLang}`);
         let notes = await res.json();
 
-        responseCount.innerText = `${notes.length} Study Insights`;
+        if (responseCount) responseCount.innerText = `${notes.length} Study Insights`;
         list.innerHTML = "";
 
         if (notes.length === 0) {
@@ -942,7 +989,8 @@ async function renderNotebook() {
 
 
     } catch (e) {
-        list.innerHTML = `<div style="color: #ef4444;">Error accessing records.</div>`;
+        console.error("Error in renderNotebook:", e);
+        list.innerHTML = `<div style="color: #ef4444;">Error accessing records: ${e.message}</div>`;
     }
 }
 
@@ -1051,7 +1099,7 @@ async function startQuiz(type) {
         currentQuizData = data.questions;
         renderQuiz(type);
     } catch (e) {
-        alert("Quiz Error: " + e.message);
+        showUploadToast("Quiz Error: " + e.message, "error");
         closeQuiz();
     }
 }
@@ -1116,7 +1164,7 @@ function renderQuiz(type) {
 
 function exportQuizToFile() {
     if (!currentQuizData || currentQuizData.length === 0) {
-        alert("No quiz data available to download.");
+        showUploadToast("No quiz data available to download.", "error");
         return;
     }
 
@@ -1835,18 +1883,31 @@ async function searchMeaning() {
 }
 
 function upload() {
-    let file = document.getElementById("file").files[0];
+    let input = document.getElementById("file");
+    let file = input ? input.files[0] : null;
 
     if (!file) {
         showUploadToast("Please choose a file first.", "warn");
         return;
     }
 
+    const renameInput = document.getElementById('dashboardBookRenameInputSidebar');
+    const customName = renameInput ? renameInput.value.trim() : "";
+
     let form = new FormData();
     form.append("file", file);
+    if (customName) {
+        form.append("custom_name", customName);
+    }
 
     // Show uploading indicator
-    showUploadToast("⏳ Uploading " + file.name + "...", "info");
+    showUploadToast("⏳ Uploading " + (customName || file.name) + "...", "info");
+
+    const uploadBtn = document.getElementById('btnConfirmAddBookSidebar');
+    if (uploadBtn) {
+        uploadBtn.disabled = true;
+        uploadBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading...';
+    }
 
     fetch("/upload", {
         method: "POST",
@@ -1855,25 +1916,77 @@ function upload() {
         .then(async res => {
             let data = await res.json().catch(() => ({ message: "Unknown error" }));
             if (res.status === 409) {
-                // Duplicate book
                 showUploadToast("📚 " + data.message, "warn");
+                if (uploadBtn) {
+                    uploadBtn.disabled = false;
+                    uploadBtn.innerText = "Upload Book";
+                }
                 return;
             }
             if (!res.ok) {
                 showUploadToast("❌ Upload failed: " + data.message, "error");
+                if (uploadBtn) {
+                    uploadBtn.disabled = false;
+                    uploadBtn.innerText = "Upload Book";
+                }
                 return;
             }
             // Success
-            document.getElementById("file").value = "";
-            let label = document.querySelector('.btn-upload-label');
-            if (label) label.innerText = "Choose File";
             showUploadToast("✅ Book uploaded successfully!", "success");
+            resetSidebarUpload();
+            if (uploadBtn) {
+                uploadBtn.disabled = false;
+                uploadBtn.innerText = "Upload Book";
+            }
             setTimeout(() => loadBooks(), 600);
         })
         .catch(err => {
             console.error(err);
             showUploadToast("❌ Upload failed. Check your connection.", "error");
+            if (uploadBtn) {
+                uploadBtn.disabled = false;
+                uploadBtn.innerText = "Upload Book";
+            }
         });
+}
+
+function handleSidebarFileSelection() {
+    const input = document.getElementById('file');
+    const chooseBtn = document.getElementById('dashboardChooseFileBtnSidebar');
+    const renameWrapper = document.getElementById('dashboardRenameWrapperSidebar');
+    const renameInput = document.getElementById('dashboardBookRenameInputSidebar');
+    const confirmBtn = document.getElementById('btnConfirmAddBookSidebar');
+
+    if (!input || !input.files || input.files.length === 0) return;
+
+    const file = input.files[0];
+    const nameWithoutExt = file.name.split('.').slice(0, -1).join('.');
+    const finalName = nameWithoutExt || file.name;
+
+    if (chooseBtn) chooseBtn.style.display = 'none';
+    if (renameWrapper) renameWrapper.style.display = 'flex';
+    if (renameInput) {
+        renameInput.value = finalName;
+        setTimeout(() => renameInput.focus(), 50);
+    }
+    if (confirmBtn) confirmBtn.style.display = 'flex';
+
+    showUploadToast(`Selected: ${file.name}. Rename if you wish!`, "info");
+}
+
+function resetSidebarUpload() {
+    const input = document.getElementById('file');
+    if (input) input.value = "";
+
+    const chooseBtn = document.getElementById('dashboardChooseFileBtnSidebar');
+    const renameWrapper = document.getElementById('dashboardRenameWrapperSidebar');
+    const confirmBtn = document.getElementById('btnConfirmAddBookSidebar');
+
+    if (chooseBtn) chooseBtn.style.display = 'flex';
+    if (renameWrapper) renameWrapper.style.display = 'none';
+    if (confirmBtn) confirmBtn.style.display = 'none';
+    
+    showUploadToast("Selection cancelled", "info");
 }
 
 function showUploadToast(msg, type) {
@@ -1886,7 +1999,19 @@ function showUploadToast(msg, type) {
         error: "#7f1d1d",
         info: "#1e3a5f"
     };
+    
+    let icons = {
+        success: '<i class="fas fa-check-circle" style="margin-right: 8px;"></i>',
+        warn: '<i class="fas fa-exclamation-triangle" style="margin-right: 8px;"></i>',
+        error: '<i class="fas fa-exclamation-circle" style="margin-right: 8px;"></i>',
+        info: '<i class="fas fa-info-circle" style="margin-right: 8px;"></i>'
+    };
+
     let bg = colors[type] || colors.info;
+    let icon = icons[type] || icons.info;
+
+    // Remove any leading emojis or spaces from the message
+    let cleanMsg = msg.replace(/^[\u{1F300}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\s]+/u, '');
 
     let toast = document.createElement("div");
     toast.id = "uploadToast";
@@ -1895,8 +2020,9 @@ function showUploadToast(msg, type) {
         background: ${bg}; color: #fff; padding: 12px 24px; border-radius: 12px;
         font-size: 0.9rem; font-weight: 600; box-shadow: 0 4px 20px rgba(0,0,0,0.35);
         z-index: 100000; animation: toastIn 0.3s ease; max-width: 380px; text-align: center;
+        display: flex; align-items: center; justify-content: center;
     `;
-    toast.innerHTML = msg;
+    toast.innerHTML = icon + `<span>${cleanMsg}</span>`;
     document.body.appendChild(toast);
 
     // Auto-remove after 3.5 seconds
@@ -1922,6 +2048,7 @@ function loadBooks() {
             // Sync both Library views
             renderDashboard(data);
             loadCollaborations();
+            if (typeof fetchVoiceNotes === "function") fetchVoiceNotes();
 
             let list = document.getElementById("booklist");
             list.innerHTML = "";
@@ -1964,8 +2091,8 @@ function loadBooks() {
                 let isActive = (currentBookId && id == currentBookId);
                 let openBtnText = isActive ? "Active" : "Open";
                 let openBtn = (!isProcessing && status !== "error")
-                    ? `<button class="btn-open ${isActive ? 'active-pulse' : ''}" onclick="openBook(${id})"><i class="fas fa-book-open"></i> ${openBtnText}</button>`
-                    : `<button disabled class="btn-open processing-btn" style="opacity:0.6;cursor:not-allowed;">${isProcessing ? 'Wait...' : 'Open'}</button>`;
+                    ? `<button class="btn-open ${isActive ? 'active-pulse' : ''}" onclick="openBook(${id})"><i class="fas fa-book-open"></i> <span>${openBtnText}</span></button>`
+                    : `<button disabled class="btn-open processing-btn" style="opacity:0.6;cursor:not-allowed;"><span>${isProcessing ? 'Wait...' : 'Open'}</span></button>`;
 
                 let downloadBtn = (!isProcessing && status !== "error")
                     ? `<button class="btn-download" onclick="downloadBook(${book[0]}, '${book[1].replace(/'/g, "\\'")}')" title="Download Book"><i class="fas fa-download"></i></button>`
@@ -1983,7 +2110,12 @@ function loadBooks() {
                                     </svg>
                                 </button>
                             </div>
-                            ${relation === 'shared' ? '<div class="shared-badge">👥 SHARED BY ' + sharerName.toUpperCase() + '</div>' : ''}
+                            ${relation === 'shared_by_me' ? 
+                                '<div class="original-badge" style="background: rgba(245, 158, 11, 0.1); color: #f59e0b; border-color: rgba(245, 158, 11, 0.2); display: flex; align-items: center; gap: 5px;"><i class="fas fa-share-alt" style="font-size: 0.65rem;"></i> YOU SHARED</div>' : ''
+                            }
+                            ${relation === 'shared_with_me' ? 
+                                '<div class="shared-badge" style="display: flex; align-items: center; gap: 5px;"><i class="fas fa-user-friends" style="font-size: 0.65rem;"></i> THEY SHARED BY ' + (sharerName || 'COLLABORATOR').toUpperCase() + '</div>' : ''
+                            }
                             <div class="book-metadata">
                                 <span><i class="far fa-calendar-alt"></i> ${book[2].split(' ')[0]}</span>
                                 <span><i class="far fa-file-alt"></i> ${book[11] || 0} Pages</span>
@@ -2001,10 +2133,34 @@ function loadBooks() {
                 list.appendChild(tr);
             });
 
+            // Populate AI Chat Book Selector
+            const chatSelector = document.getElementById('chatBookFocus');
+            if (chatSelector) {
+                const currentVal = chatSelector.value;
+                chatSelector.innerHTML = '<option value="">General Chat</option>';
+                data.forEach(book => {
+                    const [id, name] = book;
+                    const cleanName = name.replace(/_/g, ' ').replace(/\.(pdf|epub|docx|txt)$/i, '');
+                    const opt = document.createElement('option');
+                    opt.value = id;
+                    opt.innerText = `Focus: ${cleanName}`;
+                    chatSelector.appendChild(opt);
+                });
+                // Keep selection if it still exists
+                if (currentVal) chatSelector.value = currentVal;
+                else if (window.currentBookId) chatSelector.value = window.currentBookId;
+            }
+
             // Auto-refresh every 3s while any book is still processing
             if (hasProcessing) {
                 if (!_processingPollTimer) {
                     _processingPollTimer = setInterval(() => {
+                        const overlay = document.getElementById("dashboardOverlay");
+                        if (!overlay || overlay.style.display === "none") {
+                            clearInterval(_processingPollTimer);
+                            _processingPollTimer = null;
+                            return;
+                        }
                         loadBooks().then(d => {
                             let stillProcessing = (d || []).some(b => {
                                 const s = (b[3] || "ready").toLowerCase();
@@ -2026,7 +2182,16 @@ function loadBooks() {
             return data;
         })
         .catch(err => {
-            console.error("Books load error:", err);
+            console.error("❌ Library Sync Failed:", err);
+            const container = document.getElementById('dashboardBooksContainer');
+            if (container) container.innerHTML = `
+                <div class="text-center p-5">
+                    <i class="fas fa-exclamation-triangle mb-3" style="font-size: 2rem; color: #f59e0b;"></i>
+                    <h4>Library temporarily unavailable</h4>
+                    <p class="text-muted">The server is busy or restarting. Please try again in a moment.</p>
+                    <button class="btn btn-outline-primary mt-2" onclick="loadBooks()">Retry Sync</button>
+                </div>
+            `;
         });
 }
 
@@ -2229,10 +2394,13 @@ function openBook(bookId) {
     isPaused = false;
     if (typeof stopReading === 'function') stopReading();
     if (typeof stopStudyTimer === 'function') stopStudyTimer();
+    hasMadeSessionDrawing = false; // Reset drawing flag for new book
 
     // 🧹 PRE-FETCH CLEANUP: Clear massive strings and DOM right now
     currentBookText = "";
     if (window._currentBookPages) window._currentBookPages = [];
+    window.originalBookContent = null;
+    window.currentTargetLang = "orig";
 
     // Detach old DOM instantly to help GC
     let reader = document.getElementById("reader");
@@ -2281,6 +2449,8 @@ function proceedToOpenBook(bookId) {
     if (placeholder) placeholder.style.display = "none";
     const voiceBtn = document.getElementById("voiceBtn");
     if (voiceBtn) voiceBtn.style.display = "flex";
+    const drawFab = document.getElementById("floatingDrawFab");
+    if (drawFab) drawFab.style.display = "flex";
     showLoader();
     window._pendingBookmarkResume = null; // Clear old book's residue
     window._isRenderingFinished = false; // Track if rendering is done for late-arriving bookmarks
@@ -2314,7 +2484,7 @@ function proceedToOpenBook(bookId) {
         .then(async data => {
             if (data.error) {
                 hideLoader();
-                alert(data.error);
+                showUploadToast(data.error, "error");
                 return;
             }
 
@@ -2342,6 +2512,8 @@ function proceedToOpenBook(bookId) {
             if (bookTitleEl) bookTitleEl.innerText = data.name;
 
             if (bookBadgeEl) bookBadgeEl.classList.add('visible');
+            const drawFab = document.getElementById('floatingDrawFab');
+            if (drawFab) drawFab.style.display = 'flex';
 
             // Highlight active book in sidebar instantly
             document.querySelectorAll("#booklist tr").forEach(row => {
@@ -2396,12 +2568,22 @@ function proceedToOpenBook(bookId) {
                 // Dynamic Language Labeling
                 // Take a safe sample for detection without blowing up memory on massive books
                 let rawText = data.text || "";
-                let sampleTextForLang = rawText.substring(0, 30000);
-
-                // Fast regex to strip data:image/... base64 blocks which can be massive and block detection
-                sampleTextForLang = sampleTextForLang.replace(/src=["']data:image\/[^"']+["']/g, '');
-                // Strip remaining tags and take a smaller sample for even faster processing
-                let detectionSample = sampleTextForLang.replace(/<[^>]*>/g, ' ').substring(0, 1500).trim();
+                let detectionSample = rawText;
+                
+                // Remove head, style, script content entirely
+                detectionSample = detectionSample.replace(/<head[^>]*>[\s\S]*?<\/head>/gi, ' ');
+                detectionSample = detectionSample.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ' ');
+                detectionSample = detectionSample.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, ' ');
+                // Remove base64 images
+                detectionSample = detectionSample.replace(/src=["']data:image\/[^"']+["']/g, '');
+                // Remove remaining HTML tags
+                detectionSample = detectionSample.replace(/<[^>]*>/g, ' ');
+                // Remove URLs & emails
+                detectionSample = detectionSample.replace(/https?:\/\/\S+/g, ' ');
+                detectionSample = detectionSample.replace(/\S+@\S+/g, ' ');
+                
+                // Now take a clean text sample for detection
+                detectionSample = detectionSample.substring(0, 3000).trim();
 
                 const scriptCounts = {
                     "Tamil": (detectionSample.match(/[\u0b80-\u0bff]/g) || []).length,
@@ -2664,12 +2846,14 @@ function proceedToOpenBook(bookId) {
             renderBatch(0);
 
             loadHighlights(bookId);
+            setTimeout(() => initDrawingForBook(bookId), 500);
             setTimeout(renderBookmarkIcons, 1500); // Wait for initial render
+
         })
         .catch(err => {
             console.error("Reader Fetch Error:", err);
             hideLoader();
-            alert("📚 Reader Error: " + (err.message || "Connection failed. Please try again."));
+            showUploadToast("📚 Reader Error: " + (err.message || "Connection failed. Please try again."), "error");
         });
 
 }
@@ -2714,7 +2898,6 @@ function deleteBook(bookId) {
                 .then(data => {
                     showUploadToast(data.message || data.error, data.error ? "error" : "success");
                     loadBooks();
-                    if (typeof renderDashboard === 'function') renderDashboard();
                 });
         },
         () => { /* Stay - no action */ },
@@ -3151,8 +3334,7 @@ function getNodesAndText(root, targetPages = null) {
     let parts = [];
     let currentLen = 0;
 
-    // Use specific pages if provided (Virtual Mapping), otherwise fallback to entire root
-    const itemsToScan = targetPages || [root];
+    const itemsToScan = (targetPages && targetPages.length > 0) ? targetPages : [root];
 
     itemsToScan.forEach(scope => {
         let walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT, null, false);
@@ -3400,7 +3582,11 @@ async function resumeReadingFromIndex(index, startPaused = false, forceExactPosi
 
     if (playPauseBtn) playPauseBtn.innerHTML = startPaused ? "▶ <span>Resume</span>" : "⏸ <span>Pause</span>";
 
-    if (testShort !== 'en') {
+    // PHASE 2: Use Native Speech (Instant) if a local voice exists, otherwise Fallback to Server TTS
+    const voices = window.speechSynthesis.getVoices();
+    const hasNativeVoice = getBestVoice(voices, testLang, currentNarratorGender);
+
+    if (!hasNativeVoice) {
         playFallbackAudioQueue(chunks, chunkOffset, testShort, startPaused);
         return;
     }
@@ -3542,6 +3728,7 @@ async function resumeReadingFromIndex(index, startPaused = false, forceExactPosi
 
         utterancePool.push(utterance); // Keep reference alive
         utterance.onend = function () {
+            if (isPaused) return;
             utterancePool = utterancePool.filter(u => u !== utterance);
             if (jobId !== currentNarrationJobId) return;
             completedTasks++;
@@ -3607,7 +3794,7 @@ function stopReading(isComplete = false) {
     }
 
     let playPauseBtn = document.getElementById("playPauseBtn");
-    if (playPauseBtn) playPauseBtn.innerText = "Read Full ▶";
+    if (playPauseBtn) playPauseBtn.innerHTML = "▶ <span>Read Full</span>";
 
     updateStorytellerState();
 }
@@ -3633,6 +3820,17 @@ async function resetReadingSession() {
     const langSelect = document.getElementById('langSelect');
     if (langSelect) langSelect.value = 'orig';
 
+    const drawFab = document.getElementById('floatingDrawFab');
+    const drawToolbar = document.getElementById('floatingDrawToolbar');
+    if (drawFab) drawFab.style.display = 'none';
+    if (drawToolbar) drawToolbar.style.display = 'none';
+    if (drawCanvas) {
+        drawCanvas.remove();
+        drawCanvas = null;
+        drawCtx = null;
+    }
+    isDrawingActive = false;
+
     if (window.activeTranslationObserver) {
         window.activeTranslationObserver.disconnect();
         window.activeTranslationObserver = null;
@@ -3640,7 +3838,8 @@ async function resetReadingSession() {
 }
 
 async function togglePlayPause() {
-    let playPauseBtn = document.getElementById("plan");
+    if (typeof drawingState !== 'undefined' && drawingState > 0) return;
+    let playPauseBtn = document.getElementById("playPauseBtn");
 
     if (!currentBookId) {
         showUploadToast("📚 Please select a book from your library first!", "info");
@@ -3653,7 +3852,7 @@ async function togglePlayPause() {
         if (ctx.state === 'suspended') ctx.resume();
 
         // INSTANT UI RESPONSE
-        if (playPauseBtn) playPauseBtn.innerText = "Pause ⏸";
+        if (playPauseBtn) playPauseBtn.innerHTML = "⏸ <span>Pause</span>";
         currentNarrationJobId++; // Start a clean narration session with no stale callbacks
         isReadingAloud = true;
         isPaused = false;
@@ -3755,6 +3954,9 @@ function initializeReader() {
     // Reader Interaction Handler
     if (reader) {
         reader.addEventListener("click", function (e) {
+            // 🛡️ DRAWING-LOCK: Ignore click if in drawing/handwriting mode
+            if (typeof drawingState !== 'undefined' && drawingState > 0) return;
+
             // 🛡️ DRAG-LOCK: Ignore click if we just finished a drag/pan operation
             if (window.isRecentlyPanned) {
                 window.isRecentlyPanned = false;
@@ -3877,6 +4079,7 @@ function initializeReader() {
 
         // AUTO-PAUSE ON MANUAL SCROLL
         function pauseReadingOnUserScroll() {
+            if (typeof drawingState !== 'undefined' && drawingState > 0) return;
             if (isReadingAloud && !isPaused) {
                 // If the last auto-scroll was VERY recent, ignore it to prevent false positives
                 if (Date.now() - (window.lastAutoScrollTime || 0) < 500) return;
@@ -4009,7 +4212,7 @@ function readSelectedText() {
     isPaused = false;
 
     let playPauseBtn = document.getElementById("playPauseBtn");
-    if (playPauseBtn) playPauseBtn.innerText = "Pause ⏸";
+    if (playPauseBtn) playPauseBtn.innerHTML = "⏸ <span>Pause</span>";
 
     let lang = getSelectedLanguage();
     let shortLang = lang ? lang.split('-')[0].toLowerCase() : 'en';
@@ -4036,6 +4239,7 @@ function readSelectedText() {
     }
 
     utterance.onend = function () {
+        if (isPaused) return;
         stopReading();
     };
 
@@ -4683,7 +4887,10 @@ async function translateBook() {
         });
     }, { root: reader, threshold: 0.1 });
 
-    const pages = Array.from(document.querySelectorAll('.lazy-page-container'));
+    let pages = Array.from(document.querySelectorAll('.lazy-page-container'));
+    if (pages.length === 0 && reader) {
+        pages = (reader.children.length > 0) ? Array.from(reader.children) : [reader];
+    }
     pages.forEach(p => window.activeTranslationObserver.observe(p));
 
     const currentPageInput = document.getElementById('currentPageInput');
@@ -5184,10 +5391,10 @@ function playNextFallback(startPaused = false, isRetry = false) {
     const speakerGender = item.gender || currentNarratorGender;
     let nativeVoice = getBestVoice(voices, targetLang, speakerGender);
 
-    // CRITICAL FIX: Only use native window.speechSynthesis for English.
-    // For all other languages, we MUST use the server-side Neural TTS engine (Edge/gTTS) 
-    // as it is 100x more reliable and high-quality across all devices.
-    if (nativeVoice && shortLang === 'en') {
+    // SPEED OPTIMIZATION: Use native window.speechSynthesis whenever a voice is available.
+    // This provides instant playback for all languages (English, Tamil, Hindi, etc.)
+    // If no native voice is found, it will gracefully fallback to the Neural Server TTS.
+    if (nativeVoice) {
         let utterance = new SpeechSynthesisUtterance(item.text);
         currentEmotionUtterance = utterance;
         utterance.lang = nativeVoice.lang;
@@ -5456,6 +5663,28 @@ async function closeBookAction() {
 }
 
 async function executeClosingSequence() {
+    if (drawCanvas && currentBookId && hasMadeSessionDrawing) {
+        showConfirmModal(
+            "Save Handwritten Notes?",
+            "Would you like to save your drawings/handwritten notes for this book?",
+            "Save",
+            "Don't Save",
+            "Cancel",
+            () => {
+                localStorage.setItem(`book_drawing_${currentBookId}`, drawCanvas.toDataURL());
+                proceedClosing();
+            },
+            () => {
+                proceedClosing();
+            },
+            () => { /* Cancel */ }
+        );
+    } else {
+        proceedClosing();
+    }
+}
+
+async function proceedClosing() {
     let reader = document.getElementById("reader");
 
     // Trigger folding shut animation
@@ -5474,7 +5703,7 @@ async function executeClosingSequence() {
     isReadingAloud = false;
     isPaused = false;
     let playPauseBtn = document.getElementById("playPauseBtn");
-    if (playPauseBtn) playPauseBtn.innerText = "▶";
+    if (playPauseBtn) playPauseBtn.innerHTML = "▶ <span>Read Full</span>";
 
     if (reader) {
         reader.classList.add('no-spine-shadow');
@@ -5504,6 +5733,17 @@ async function executeClosingSequence() {
 
     const voiceBtn = document.getElementById("voiceBtn");
     if (voiceBtn) voiceBtn.style.display = "none";
+
+    const drawFab = document.getElementById("floatingDrawFab");
+    const drawToolbar = document.getElementById("drawingMiniToolbar");
+    if (drawFab) drawFab.style.display = "none";
+    if (drawToolbar) drawToolbar.style.display = "none";
+    if (drawCanvas) {
+        drawCanvas.remove();
+        drawCanvas = null;
+        drawCtx = null;
+    }
+    isDrawingActive = false;
 
     const placeholder = document.getElementById("emptyBookPlaceholder");
     if (placeholder) placeholder.style.display = "flex";
@@ -5671,6 +5911,7 @@ async function applyImageOcrOverlays() {
 // Browser ::selection CSS is unreliable over transparent text.
 // Track selectionchange and apply .ocr-selected class to hovered spans instead.
 document.addEventListener("selectionchange", () => {
+    if (typeof drawingState !== 'undefined' && drawingState > 0) return;
     // 1. Clear OCR highlights
     document.querySelectorAll(".ocr-word.ocr-selected").forEach(el => {
         el.classList.remove("ocr-selected");
@@ -6584,13 +6825,11 @@ async function saveBookmarkManual(forceReplace = false) {
         }
 
         if (res.ok) {
-            // Silent Success - No Toast as requested, just visual feedback
             const toolbar = document.getElementById('selectionToolbar');
             if (toolbar) toolbar.style.display = 'none';
             if (selection) selection.removeAllRanges();
 
-            // Pulse the bookmark icon if visible in any UI
-            console.log("Bookmark updated successfully.");
+            showUploadToast("🔖 Bookmark saved successfully!", "success");
             renderBookmarkIcons(); // Show the icon immediately
         }
     } catch (e) {
@@ -6955,8 +7194,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Don't close if clicking the search input or specific toggle buttons
                 const isSearchInput = e.target.tagName === 'INPUT';
                 const isMenuBtn = e.target.closest('.mobile-menu-btn');
+                const isFilterBtn = e.target.closest('.btn-sidebar-filter');
 
-                if (isInteractive && !isSearchInput && !isMenuBtn) {
+                if (isInteractive && !isSearchInput && !isMenuBtn && !isFilterBtn) {
                     // Small timeout to allow the click action to register before the UI shifts
                     setTimeout(() => toggleSidebar(true), 150);
                 }
@@ -7015,6 +7255,37 @@ function removeProfilePhoto() {
     document.getElementById('profileUpload').value = "";
 }
 
+function deleteAccount() {
+    showConfirmModal(
+        "Delete Account",
+        "Are you sure you want to permanently delete your account and all your data? This action cannot be undone.",
+        "Delete Account",
+        "Cancel",
+        null,
+        async () => {
+            try {
+                const res = await fetch("/delete_account", { method: "POST" });
+                const data = await res.json();
+                if (res.ok && data.status === "success") {
+                    showUploadToast("Your account has been deleted successfully.", "success");
+                    setTimeout(() => {
+                        window.location.href = "/logout";
+                    }, 1500);
+                } else {
+                    showUploadToast(data.error || "Failed to delete account.", "error");
+                }
+            } catch (e) {
+                console.error(e);
+                showUploadToast("An error occurred. Please try again.", "error");
+            }
+        },
+        null,
+        null,
+        true
+    );
+}
+
+
 function createReadingRoom() {
     if (!currentBookId) {
         showUploadToast("Open a book first to create a room!", "error");
@@ -7024,14 +7295,10 @@ function createReadingRoom() {
         currentRoom = `room_${currentBookId}_${Math.random().toString(36).substring(7)}`;
         socket.emit('join_room', { room: currentRoom });
     }
-    const inviteLink = `${window.location.origin}/?id=${currentBookId}&room=${currentRoom}`;
-    document.getElementById('roomLink').innerText = inviteLink;
-    document.getElementById('roomModal').style.display = 'flex';
-
-    // Check for Native Share API support (Mobile/Modern Browsers)
-    if (navigator.share) {
-        document.getElementById('webShareBtn').style.display = 'block';
-    }
+    
+    // Open the modal directly (Link display has been removed)
+    const modal = document.getElementById('roomModal');
+    if (modal) modal.style.display = 'flex';
 }
 
 function copyRoomLink() {
@@ -7074,8 +7341,12 @@ function sendDirectInvite() {
     })
         .then(r => r.json())
         .then(data => {
-            if (data.error) showUploadToast(data.error, "error");
-            else {
+            if (data.error) {
+                showUploadToast(data.error, "error");
+            } else if (data.info) {
+                showUploadToast(data.info, "info");
+                document.getElementById('inviteIdentity').value = "";
+            } else {
                 showUploadToast(data.message || "Invitation sent!", "success");
                 document.getElementById('inviteIdentity').value = "";
             }
@@ -7141,39 +7412,115 @@ function triggerDashboardUpload() {
     if (input) input.click();
 }
 
-async function uploadDashboardBook() {
+function handleDashboardFileSelection() {
     const input = document.getElementById('dashboardFileInput');
     if (!input || !input.files || input.files.length === 0) return;
 
-    // Use a temporary swap to reuse the existing upload() function's logic
-    const originalFileInput = document.getElementById('file');
-    if (originalFileInput) {
-        // We can't easily swap files due to security, so we'll just implement a direct call
-        const file = input.files[0];
-        const formData = new FormData();
-        formData.append("file", file);
+    const file = input.files[0];
+    const nameWithoutExt = file.name.split('.').slice(0, -1).join('.');
+    const finalName = nameWithoutExt || file.name;
 
-        showUploadToast(`🚀 Uploading ${file.name}...`, "info");
+    // Robustly handle all potential upload UI elements (Desktop & Mobile)
+    const chooseButtons = document.querySelectorAll('#dashboardChooseFileBtn, #dashboardChooseFileBtnMobile');
+    const renameWrappers = document.querySelectorAll('#dashboardRenameWrapper, #dashboardRenameWrapperMobile');
+    const renameInputs = document.querySelectorAll('#dashboardBookRenameInput, #dashboardBookRenameInputMobile');
+    const confirmButtons = document.querySelectorAll('#btnConfirmAddBook, #btnConfirmAddBookMobile');
 
-        try {
-            const res = await fetch("/upload", {
-                method: "POST",
-                body: formData
-            });
-            const data = await res.json();
-            if (data.error) {
-                showUploadToast(data.error, "error");
-            } else {
-                showUploadToast("✅ Book added to library!", "success");
-                setTimeout(() => loadBooks(), 600);
-                input.value = ""; // Reset
-            }
-        } catch (err) {
-            showUploadToast("Connection failed", "error");
+    chooseButtons.forEach(btn => btn.style.display = 'none');
+    renameWrappers.forEach(wrapper => {
+        wrapper.style.display = 'flex'; 
+    });
+    
+    renameInputs.forEach(inp => {
+        inp.value = finalName;
+        // Only focus if it's visible to avoid jarring scrolls
+        if (window.getComputedStyle(inp).display !== 'none') {
+            setTimeout(() => inp.focus(), 50);
         }
-    } else {
-        // Fallback or handle if the main file input is missing (unlikely)
-        upload();
+    });
+
+    confirmButtons.forEach(btn => btn.style.display = 'flex');
+
+    showUploadToast(`Selected: ${file.name}. Rename if you wish!`, "info");
+}
+
+function resetDashboardUpload() {
+    const input = document.getElementById('dashboardFileInput');
+    if (input) input.value = "";
+
+    const chooseButtons = document.querySelectorAll('#dashboardChooseFileBtn, #dashboardChooseFileBtnMobile');
+    const renameWrappers = document.querySelectorAll('#dashboardRenameWrapper, #dashboardRenameWrapperMobile');
+    const confirmButtons = document.querySelectorAll('#btnConfirmAddBook, #btnConfirmAddBookMobile');
+
+    chooseButtons.forEach(btn => btn.style.display = 'flex');
+    renameWrappers.forEach(wrapper => wrapper.style.display = 'none');
+    confirmButtons.forEach(btn => btn.style.display = 'none');
+    
+    showUploadToast("Selection cancelled", "info");
+}
+
+async function confirmDashboardUpload() {
+    const input = document.getElementById('dashboardFileInput');
+    if (!input || !input.files || input.files.length === 0) {
+        showUploadToast("Please choose a file first.", "error");
+        return;
+    }
+
+    // Check which rename input is active
+    const renameInput = document.getElementById('dashboardBookRenameInput');
+    const renameInputMobile = document.getElementById('dashboardBookRenameInputMobile');
+    
+    // Use desktop input if visible, otherwise use mobile input
+    let customName = "";
+    if (renameInput && window.getComputedStyle(renameInput.parentElement).display !== 'none') {
+        customName = renameInput.value.trim();
+    } else if (renameInputMobile && window.getComputedStyle(renameInputMobile.parentElement).display !== 'none') {
+        customName = renameInputMobile.value.trim();
+    }
+
+    const file = input.files[0];
+    const formData = new FormData();
+    formData.append("file", file);
+    if (customName) {
+        formData.append("custom_name", customName);
+    }
+
+    // Confirm buttons
+    const confirmBtn = document.getElementById('btnConfirmAddBook');
+    const confirmBtnMobile = document.getElementById('btnConfirmAddBookMobile');
+
+    const updateBtnState = (btn, isLoading) => {
+        if (!btn) return;
+        btn.disabled = isLoading;
+        btn.innerHTML = isLoading ? '<i class="fas fa-spinner fa-spin"></i> Adding...' : 'Add Book';
+    };
+
+    updateBtnState(confirmBtn, true);
+    updateBtnState(confirmBtnMobile, true);
+    
+    showUploadToast(`🚀 Adding ${customName || file.name} to library...`, "info");
+
+    try {
+        const res = await fetch("/upload", {
+            method: "POST",
+            body: formData
+        });
+        const data = await res.json();
+        
+        if (data.status === "error" || data.status === "duplicate" || res.status >= 400) {
+            showUploadToast(data.message || data.error || "Upload failed", "error");
+            updateBtnState(confirmBtn, false);
+            updateBtnState(confirmBtnMobile, false);
+        } else {
+            showUploadToast(data.message || "✅ Book added successfully!", "success");
+            resetDashboardUpload();
+            if (typeof loadBooks === 'function') loadBooks();
+        }
+    } catch (err) {
+        console.error("Upload failed:", err);
+        showUploadToast("Connection failed", "error");
+        updateBtnState(confirmBtn, false);
+        updateBtnState(confirmBtnMobile, false);
     }
 }
 
@@ -7309,3 +7656,630 @@ function toggleMobileTools() {
         drawer.classList.toggle('active');
     }
 }
+
+let drawingState = 0; // 0 = none, 1 = draw, 2 = erase
+let drawCanvas = null;
+let drawCtx = null;
+let isDrawingNow = false;
+let brushColor = "#1e293b";
+let brushSize = 3;
+let hasMadeSessionDrawing = false;
+
+function initDrawingForBook(bookId) {
+    let reader = document.getElementById("reader");
+    if (!reader) return;
+
+    if (drawCanvas) {
+        drawCanvas.remove();
+        drawCanvas = null;
+        drawCtx = null;
+    }
+
+    drawingState = 0;
+
+    const fab = document.getElementById("floatingDrawFab");
+    if (fab) {
+        fab.style.display = "flex";
+        fab.innerHTML = '<img src="/static/pencil.png" style="width: 32px; height: 32px; object-fit: contain; mix-blend-mode: multiply;"><span id="drawStatusBadge" style="position: absolute; top: 0px; right: 0px; width: 18px; height: 18px; border-radius: 50%; background: #ef4444; border: 1.5px solid #ffffff; display: none; align-items: center; justify-content: center; font-size: 10px; color: white; font-weight: bold; box-shadow: 0 2px 5px rgba(0,0,0,0.25); z-index: 21;">✕</span>';
+        fab.title = "Enable Drawing Mode";
+    }
+
+    drawCanvas = document.createElement("canvas");
+    drawCanvas.id = "readerDrawCanvas";
+    drawCanvas.style.position = "absolute";
+    drawCanvas.style.top = "0";
+    drawCanvas.style.left = "0";
+    drawCanvas.style.width = "100%";
+    drawCanvas.style.height = "100%";
+    drawCanvas.style.pointerEvents = "none";
+    drawCanvas.style.cursor = "crosshair";
+    drawCanvas.style.zIndex = "2147483640";
+
+    // Wait until full scrolling size is available
+    drawCanvas.width = reader.scrollWidth || reader.offsetWidth || 800;
+    drawCanvas.height = reader.scrollHeight || reader.offsetHeight || 600;
+
+    reader.style.position = "relative";
+    reader.appendChild(drawCanvas);
+
+    drawCtx = drawCanvas.getContext("2d");
+    drawCtx.strokeStyle = brushColor;
+    drawCtx.lineWidth = brushSize;
+    drawCtx.lineCap = "round";
+    drawCtx.lineJoin = "round";
+
+    drawCanvas.addEventListener("mousedown", startDraw);
+    drawCanvas.addEventListener("mousemove", drawMove);
+    drawCanvas.addEventListener("mouseup", endDraw);
+    drawCanvas.addEventListener("mouseleave", endDraw);
+
+    drawCanvas.addEventListener("touchstart", (e) => {
+        if (e.cancelable) e.preventDefault();
+        let touch = e.touches[0];
+        let mouseEvent = new MouseEvent("mousedown", {
+            clientX: touch.clientX,
+            clientY: touch.clientY
+        });
+        drawCanvas.dispatchEvent(mouseEvent);
+    }, { passive: false });
+    drawCanvas.addEventListener("touchmove", (e) => {
+        if (e.cancelable) e.preventDefault();
+        let touch = e.touches[0];
+        let mouseEvent = new MouseEvent("mousemove", {
+            clientX: touch.clientX,
+            clientY: touch.clientY
+        });
+        drawCanvas.dispatchEvent(mouseEvent);
+    }, { passive: false });
+    drawCanvas.addEventListener("touchend", (e) => {
+        if (e.cancelable) e.preventDefault();
+        let mouseEvent = new MouseEvent("mouseup", {});
+        drawCanvas.dispatchEvent(mouseEvent);
+    }, { passive: false });
+
+    let savedDrawing = localStorage.getItem(`book_drawing_${bookId}`);
+    if (savedDrawing) {
+        let img = new Image();
+        img.onload = () => {
+            drawCtx.drawImage(img, 0, 0);
+        };
+        img.src = savedDrawing;
+    }
+}
+
+function toggleDrawingMode() {
+    const toolbar = document.getElementById("drawingMiniToolbar");
+    const fab = document.getElementById("floatingDrawFab");
+    if (!toolbar) return;
+    if (toolbar.style.display === "none" || toolbar.style.display === "") {
+        toolbar.style.display = "flex";
+        if (fab) {
+            fab.style.opacity = "0"; // Hide button while toolbar is open
+            fab.style.pointerEvents = "none";
+        }
+        // Auto-activate pencil for better UX
+        activatePencilTool();
+    } else {
+        toolbar.style.display = "none";
+        if (fab) {
+            fab.style.opacity = "1";
+            fab.style.pointerEvents = "auto";
+        }
+    }
+}
+
+function activatePencilTool() {
+    if (!drawCanvas || !drawCtx) return;
+    drawingState = 1;
+    drawCanvas.style.pointerEvents = "auto";
+    drawCanvas.style.touchAction = "none";
+    drawCanvas.style.cursor = "crosshair";
+    
+    document.body.style.userSelect = "none";
+    document.body.style.webkitUserSelect = "none";
+    
+    let reader = document.getElementById("reader");
+    if (reader) {
+        reader.style.touchAction = "none";
+        reader.style.userSelect = "none";
+        reader.style.webkitUserSelect = "none";
+    }
+    drawCtx.globalCompositeOperation = "source-over";
+    drawCtx.strokeStyle = brushColor;
+    drawCtx.lineWidth = brushSize;
+
+    const badge = document.getElementById("drawStatusBadge");
+    if (badge) {
+        badge.style.display = "flex";
+        badge.style.background = "#10b981";
+        badge.innerText = "✓";
+    }
+    showUploadToast("✍️ Pencil mode active!", "success");
+}
+
+function activateEraserTool() {
+    if (!drawCanvas || !drawCtx) return;
+    drawingState = 2;
+    drawCanvas.style.pointerEvents = "auto";
+    drawCanvas.style.touchAction = "none";
+    drawCanvas.style.cursor = "pointer";
+    
+    document.body.style.userSelect = "none";
+    document.body.style.webkitUserSelect = "none";
+    
+    let reader = document.getElementById("reader");
+    if (reader) {
+        reader.style.touchAction = "none";
+        reader.style.userSelect = "none";
+        reader.style.webkitUserSelect = "none";
+    }
+    drawCtx.globalCompositeOperation = "destination-out";
+    drawCtx.lineWidth = 30;
+
+    const badge = document.getElementById("drawStatusBadge");
+    if (badge) {
+        badge.style.display = "flex";
+        badge.style.background = "#ef4444";
+        badge.innerText = "✕";
+    }
+    showUploadToast("🧹 Eraser mode active!", "info");
+}
+
+function clearDrawCanvas() {
+    if (drawCtx && drawCanvas) {
+        drawCtx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+        hasMadeSessionDrawing = true; // Clearing counts as a change that might need saving
+        showUploadToast("🗑️ Drawing cleared successfully.", "success");
+    }
+}
+
+function disableDrawingMode() {
+    if (!drawCanvas || !drawCtx) return;
+    drawingState = 0;
+    drawCanvas.style.pointerEvents = "none";
+    drawCanvas.style.touchAction = "auto";
+    drawCtx.globalCompositeOperation = "source-over";
+
+    document.body.style.userSelect = "auto";
+    document.body.style.webkitUserSelect = "auto";
+
+    let reader = document.getElementById("reader");
+    if (reader) {
+        reader.style.touchAction = "auto";
+        reader.style.userSelect = "auto";
+        reader.style.webkitUserSelect = "auto";
+    }
+
+    const toolbar = document.getElementById("drawingMiniToolbar");
+    if (toolbar) toolbar.style.display = "none";
+    
+    const fab = document.getElementById("floatingDrawFab");
+    if (fab) {
+        fab.style.opacity = "1";
+        fab.style.pointerEvents = "auto";
+    }
+
+    const badge = document.getElementById("drawStatusBadge");
+    if (badge) badge.style.display = "none";
+
+    showUploadToast("🎨 Drawing mode disabled.", "info");
+}
+
+function startDraw(e) {
+    if (drawingState === 0 || !drawCtx) return;
+    if (e.cancelable) e.preventDefault();
+    e.stopPropagation();
+    isDrawingNow = true;
+    let rect = drawCanvas.getBoundingClientRect();
+    let x = (e.clientX - rect.left) * (drawCanvas.width / rect.width);
+    let y = (e.clientY - rect.top) * (drawCanvas.height / rect.height);
+    
+    drawCtx.beginPath();
+    drawCtx.moveTo(x, y);
+    hasMadeSessionDrawing = true; // Mark that user has interacted with the canvas
+}
+
+function drawMove(e) {
+    if (drawingState === 0 || !isDrawingNow || !drawCtx) return;
+    if (e.cancelable) e.preventDefault();
+    e.stopPropagation();
+    let rect = drawCanvas.getBoundingClientRect();
+    let x = (e.clientX - rect.left) * (drawCanvas.width / rect.width);
+    let y = (e.clientY - rect.top) * (drawCanvas.height / rect.height);
+    
+    drawCtx.lineTo(x, y);
+    drawCtx.stroke();
+}
+
+function endDraw() {
+    isDrawingNow = false;
+}
+
+function fetchVoiceNotes() {
+    return fetch("/voice_notes")
+        .then(res => res.json())
+        .then(data => {
+            const section = document.getElementById("standaloneVoiceNotesSection");
+            const grid = document.getElementById("voiceNotesGrid");
+            if (!section || !grid) return;
+
+            if (!data || data.length === 0) {
+                section.style.display = "none";
+                grid.innerHTML = "";
+                return;
+            }
+
+            section.style.display = "block";
+            grid.innerHTML = data.map(note => `
+                <div class="glass-panel voice-note-scratchpad-card" style="padding: 12px 14px; border-radius: 14px; display: flex; flex-direction: column; border: 1px solid var(--border); background: rgba(255, 255, 255, 0.02); box-shadow: var(--shadow-sm); transition: all 0.2s; cursor: pointer;" onclick="openVoiceNoteViewer(${note.id}, \`${note.content.replace(/`/g, '\\`').replace(/'/g, "\\'")}\`)">
+                    <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px;">
+                        <span style="font-weight: 700; color: var(--text-white); font-size: 0.92rem; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; max-width: 170px;">
+                            <i class="fas fa-thumbtack" style="color: #ef4444; margin-right: 4px; font-size: 0.85rem;"></i> ${note.title || "Untitled Note"}
+                        </span>
+                        <span style="font-size: 0.72rem; color: var(--text-light); opacity: 0.65;">${new Date(note.created_at).toLocaleDateString()}</span>
+                    </div>
+                </div>
+            `).join("");
+        })
+        .catch(err => console.error("Error loading voice notes:", err));
+}
+
+function openVoiceNoteViewer(noteId, content) {
+    const modal = document.getElementById("voiceNoteViewerModal");
+    const idInput = document.getElementById("currentViewVoiceNoteId");
+    const textarea = document.getElementById("viewVoiceNoteContentArea");
+    if (!modal || !idInput || !textarea) return;
+
+    idInput.value = noteId;
+    textarea.value = content;
+    modal.style.display = "flex";
+}
+
+function closeVoiceNoteViewer() {
+    const modal = document.getElementById("voiceNoteViewerModal");
+    if (modal) {
+        modal.style.display = "none";
+    }
+}
+
+function deleteCurrentVoiceNote() {
+    const idInput = document.getElementById("currentViewVoiceNoteId");
+    if (!idInput || !idInput.value) return;
+
+    fetch(`/delete_voice_note/${idInput.value}`, {
+        method: "POST"
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.status === "success") {
+            showUploadToast(data.message, "success");
+            closeVoiceNoteViewer();
+            fetchVoiceNotes();
+        } else {
+            showUploadToast(data.message || "Failed to delete voice note", "error");
+        }
+    })
+    .catch(err => console.error(err));
+}
+
+function moveNoteToLibrary() {
+    const idInput = document.getElementById("currentViewVoiceNoteId");
+    if (!idInput || !idInput.value) return;
+
+    fetch(`/add_voice_note_to_library/${idInput.value}`, {
+        method: "POST"
+    })
+    .then(res => res.json())
+    .then(data => {
+        if (data.status === "success") {
+            showUploadToast(data.message, "success");
+            closeVoiceNoteViewer();
+            fetchVoiceNotes();
+            if (typeof loadBooks === "function") {
+                loadBooks();
+            }
+        } else {
+            showUploadToast(data.message || "Failed to add voice note to library", "error");
+        }
+    })
+    .catch(err => console.error(err));
+}
+
+function editCurrentVoiceNote() {
+    const idInput = document.getElementById("currentViewVoiceNoteId");
+    const contentArea = document.getElementById("viewVoiceNoteContentArea");
+    if (!idInput || !idInput.value || !contentArea) return;
+
+    window._editingVoiceNoteId = idInput.value;
+
+    const s2tArea = document.getElementById("s2tTranscriptArea");
+    if (s2tArea) {
+        s2tArea.value = contentArea.value;
+    }
+
+    const titleInput = document.getElementById("voiceNotePromptTitleInput");
+    if (titleInput) {
+        titleInput.value = "My Voice Note";
+    }
+
+    closeVoiceNoteViewer();
+    openSpeechToText();
+}
+
+// --- AI CHAT LOGIC ---
+let isChatVoiceActive = false;
+let chatRecognition = null;
+
+function toggleAIChat() {
+    const modal = document.getElementById('aiChatModal');
+    const content = modal.querySelector('.modal-content');
+    if (modal.style.display === 'none' || !modal.style.display) {
+        modal.style.display = 'flex';
+        modal.classList.remove('chat-minimized-overlay');
+        content.classList.remove('chat-minimized-content');
+        document.getElementById('chatInput').focus();
+    } else {
+        modal.style.display = 'none';
+        modal.classList.remove('chat-minimized-overlay');
+        content.classList.remove('chat-minimized-content');
+        if (isChatVoiceActive) stopChatVoice();
+    }
+}
+
+function minimizeAIChat() {
+    const modal = document.getElementById('aiChatModal');
+    const content = modal.querySelector('.modal-content');
+    modal.classList.add('chat-minimized-overlay');
+    content.classList.add('chat-minimized-content');
+    if (isChatVoiceActive) stopChatVoice();
+}
+
+function restoreAIChat() {
+    const modal = document.getElementById('aiChatModal');
+    const content = modal.querySelector('.modal-content');
+    if (content.classList.contains('chat-minimized-content')) {
+        modal.classList.remove('chat-minimized-overlay');
+        content.classList.remove('chat-minimized-content');
+        document.getElementById('chatInput').focus();
+    }
+}
+
+async function sendChatMessage(overrideText = null) {
+    const input = document.getElementById('chatInput');
+    const msg = overrideText || input.value.trim();
+    if (!msg) return;
+
+    if (!overrideText) input.value = '';
+    appendChatMessage('user', msg);
+
+    // Show loading
+    const loadingId = 'ai-loading-' + Date.now();
+    appendChatMessage('ai', 'AI is thinking...', loadingId);
+
+    if (isChatVoiceActive) stopChatVoice();
+
+    const chatFocus = document.getElementById('chatBookFocus');
+    const selectedBookId = chatFocus ? chatFocus.value : null;
+    const selectedBookName = chatFocus && chatFocus.selectedIndex > 0 ? chatFocus.options[chatFocus.selectedIndex].text : "";
+
+    try {
+        const response = await fetch('/api/ai_chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+                message: msg,
+                book_id: selectedBookId || window.currentBookId || null,
+                context: selectedBookName || window.currentBookTitle || ""
+            })
+        });
+        const data = await response.json();
+        
+        // Remove loading
+        const loadingEl = document.getElementById(loadingId);
+        if (loadingEl) loadingEl.parentElement.remove();
+
+        if (data.status === 'success') {
+            appendChatMessage('ai', data.response);
+            speakAIResponse(data.response);
+        } else {
+            appendChatMessage('ai', 'Sorry, I encountered an error: ' + (data.message || 'Unknown error'));
+        }
+    } catch (e) {
+        console.error("Chat error:", e);
+        const loadingEl = document.getElementById(loadingId);
+        if (loadingEl) loadingEl.parentElement.remove();
+        appendChatMessage('ai', 'Sorry, I could not connect to the AI service.');
+    }
+}
+
+function appendChatMessage(sender, text, id = null) {
+    const container = document.getElementById('chatMessages');
+    const msgDiv = document.createElement('div');
+    msgDiv.className = 'chat-msg-container ' + sender;
+    msgDiv.style.display = 'flex';
+    msgDiv.style.flexDirection = 'column';
+    msgDiv.style.alignItems = sender === 'user' ? 'flex-end' : 'flex-start';
+    msgDiv.style.marginBottom = '15px';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'chat-bubble';
+    if (id) bubble.id = id;
+    
+    bubble.style.padding = '12px 16px';
+    bubble.style.borderRadius = sender === 'user' ? '18px 18px 4px 18px' : '18px 18px 18px 4px';
+    bubble.style.maxWidth = '85%';
+    bubble.style.wordBreak = 'break-word';
+    bubble.style.fontSize = '0.95rem';
+    bubble.style.lineHeight = '1.4';
+    
+    if (sender === 'user') {
+        bubble.style.background = 'var(--primary)';
+        bubble.style.color = 'white';
+    } else {
+        bubble.style.background = 'var(--glass)';
+        bubble.style.color = 'var(--text-main)';
+        bubble.style.border = '1px solid var(--glass-border)';
+    }
+
+    bubble.innerText = text;
+    msgDiv.appendChild(bubble);
+
+    // Add Voice Controls for AI messages
+    if (sender === 'ai' && !id?.includes('loading')) {
+        const actions = document.createElement('div');
+        actions.style.display = 'flex';
+        actions.style.gap = '8px';
+        actions.style.marginTop = '6px';
+        actions.style.marginLeft = '4px';
+        
+        // Escape backticks and other characters for the onclick handler
+        const safeText = text.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$');
+        
+        // Professional SVG Icons (Larger and cleaner)
+        const volumeIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4V5z"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>`;
+        const stopIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>`;
+
+        actions.innerHTML = `
+            <button class="chat-hear-btn" 
+                    title="Hear again"
+                    style="background:rgba(181, 130, 101, 0.08); border:none; border-radius:8px; cursor:pointer; color:var(--text-main); padding: 8px; display:inline-flex; align-items:center; justify-content:center; transition:0.2s; opacity:0.8;">
+                ${volumeIcon}
+            </button>
+            <button onclick="window.speechSynthesis.cancel()" 
+                    title="Stop"
+                    style="background:rgba(239, 68, 68, 0.05); border:none; border-radius:8px; cursor:pointer; color:#ef4444; padding: 8px; display:inline-flex; align-items:center; justify-content:center; transition:0.2s; opacity:0.8;"
+                    onmouseover="this.style.background='rgba(239, 68, 68, 0.12)'; this.style.opacity='1'" onmouseout="this.style.background='rgba(239, 68, 68, 0.05)'; this.style.opacity='0.8'">
+                ${stopIcon}
+            </button>
+        `;
+
+        // Safe Event Listener to avoid quote-breaking errors
+        const hearBtn = actions.querySelector('.chat-hear-btn');
+        hearBtn.onclick = () => speakAIResponse(text);
+        hearBtn.onmouseover = () => { hearBtn.style.background='rgba(181, 130, 101, 0.15)'; hearBtn.style.opacity='1'; };
+        hearBtn.onmouseout = () => { hearBtn.style.background='rgba(181, 130, 101, 0.08)'; hearBtn.style.opacity='0.8'; };
+        
+        msgDiv.appendChild(actions);
+        msgDiv.appendChild(actions);
+    }
+
+    container.appendChild(msgDiv);
+    container.scrollTop = container.scrollHeight;
+}
+
+function toggleChatVoice() {
+    if (isChatVoiceActive) {
+        stopChatVoice();
+    } else {
+        startChatVoice();
+    }
+}
+
+function startChatVoice() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+        alert("Voice recognition not supported in this browser.");
+        return;
+    }
+
+    if (!chatRecognition) {
+        chatRecognition = new SpeechRecognition();
+        chatRecognition.continuous = true;
+        chatRecognition.interimResults = true;
+        chatRecognition.lang = 'en-US';
+
+        chatRecognition.onresult = (event) => {
+            let final_transcript = '';
+            let interim_transcript = '';
+
+            // Iterate from 0 to get the entire current session's transcript
+            for (let i = 0; i < event.results.length; ++i) {
+                if (event.results[i].isFinal) {
+                    final_transcript += event.results[i][0].transcript;
+                } else {
+                    interim_transcript += event.results[i][0].transcript;
+                }
+            }
+
+            const currentInput = document.getElementById('chatInput');
+            if (currentInput) {
+                currentInput.value = final_transcript + interim_transcript;
+            }
+        };
+
+        chatRecognition.onend = () => {
+            stopChatVoice();
+        };
+
+        chatRecognition.onerror = (event) => {
+            console.error("Speech recognition error", event.error);
+            stopChatVoice();
+        };
+    }
+
+    isChatVoiceActive = true;
+    document.getElementById('chatMicBtn').classList.add('active');
+    document.getElementById('chatInput').placeholder = "Listening...";
+    chatRecognition.start();
+}
+
+function stopChatVoice() {
+    isChatVoiceActive = false;
+    if (chatRecognition) chatRecognition.stop();
+    document.getElementById('chatMicBtn').classList.remove('active');
+    document.getElementById('chatInput').placeholder = "Type a message...";
+}
+
+// --- Sidebar Resize Logic ---
+function initSidebarResize() {
+    const resizer = document.getElementById('sidebarResizer');
+    const layout = document.querySelector('.app-layout');
+    if (!resizer || !layout) return;
+
+    let isResizing = false;
+
+    resizer.addEventListener('mousedown', (e) => {
+        isResizing = true;
+        resizer.classList.add('resizing');
+        document.body.style.cursor = 'col-resize';
+        // Add an overlay or prevent pointer events on other elements to avoid flickering
+        document.body.style.userSelect = 'none';
+        
+        // Ensure reader iframe/content doesn't capture mouse
+        const reader = document.getElementById('reader');
+        if (reader) reader.style.pointerEvents = 'none';
+    });
+
+    document.addEventListener('mousemove', (e) => {
+        if (!isResizing) return;
+
+        let newWidth = e.clientX;
+        
+        // Constraints
+        if (newWidth < 250) newWidth = 250;
+        if (newWidth > 600) newWidth = 600;
+
+        layout.style.setProperty('--sidebar-width', `${newWidth}px`);
+        
+        // Save to localStorage for persistence
+        localStorage.setItem('sidebarWidth', `${newWidth}px`);
+    });
+
+    document.addEventListener('mouseup', () => {
+        if (!isResizing) return;
+        isResizing = false;
+        resizer.classList.remove('resizing');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        
+        const reader = document.getElementById('reader');
+        if (reader) reader.style.pointerEvents = '';
+    });
+
+    // Restore saved width
+    const savedWidth = localStorage.getItem('sidebarWidth');
+    if (savedWidth) {
+        layout.style.setProperty('--sidebar-width', savedWidth);
+    }
+}
+

@@ -121,7 +121,7 @@ body {
 
 .app-layout {
     display: grid;
-    grid-template-columns: 360px 1fr;
+    grid-template-columns: var(--sidebar-width, 360px) auto 1fr;
     height: 100vh;
     width: 100vw;
     background: var(--bg-app);
@@ -140,6 +140,25 @@ body {
     overflow-y: auto;
     z-index: 20;
     box-shadow: 10px 0 30px rgba(0, 0, 0, 0.2);
+    position: relative;
+}
+
+.sidebar-resizer {
+    width: 6px;
+    height: 100vh;
+    cursor: col-resize;
+    background: transparent;
+    transition: background 0.2s;
+    z-index: 100;
+    flex-shrink: 0;
+    border-left: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+}
+
+.sidebar-resizer:hover,
+.sidebar-resizer.resizing {
+    background: rgba(245, 158, 11, 0.2);
+    border-left: 2px solid var(--primary);
 }
 
 .sidebar h1 {
@@ -367,7 +386,7 @@ tr.active-book-row .book-name {
 .book-entry {
     display: flex;
     flex-direction: column;
-    padding: 18px 15px;
+    padding: 18px 12px;
     gap: 15px;
     background: rgba(255, 255, 255, 0.02);
     border-radius: 14px;
@@ -425,14 +444,28 @@ tr.active-book-row .book-name {
     align-self: flex-start;
 }
 
+.original-badge {
+    font-size: 0.65rem;
+    background: rgba(16, 185, 129, 0.1);
+    color: #10b981;
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-weight: 800;
+    border: 1px solid rgba(16, 185, 129, 0.2);
+    align-self: flex-start;
+}
+
 .book-footer-actions {
     display: flex;
     flex-direction: row;
-    gap: 12px;
+    flex-wrap: nowrap;
+    gap: 8px;
     border-top: 1px solid var(--glass-border);
     padding-top: 15px;
     margin-top: 5px;
     width: 100%;
+    box-sizing: border-box;
+    justify-content: space-between;
 }
 
 .book-footer-actions button {
@@ -448,7 +481,7 @@ tr.active-book-row .book-name {
     align-items: center !important;
     justify-content: center !important;
     text-align: center !important;
-    gap: 10px;
+    gap: 6px;
     border: 1px solid var(--glass-border);
     background: rgba(255, 255, 255, 0.03);
     color: var(--text-light);
@@ -467,8 +500,8 @@ tr.active-book-row .book-name {
 }
 
 .book-footer-actions .btn-download {
-    flex: 0 0 45px !important;
-    width: 45px !important;
+    flex: 0 0 38px !important;
+    width: 38px !important;
     padding: 0 !important;
     background: rgba(16, 185, 129, 0.05);
     color: #10b981;
@@ -484,8 +517,8 @@ tr.active-book-row .book-name {
 }
 
 .book-footer-actions .btn-delete {
-    flex: 0 0 45px !important;
-    width: 45px !important;
+    flex: 0 0 38px !important;
+    width: 38px !important;
     padding: 0 !important;
     background: rgba(239, 68, 68, 0.05);
     color: #ef4444;
@@ -586,8 +619,8 @@ tr.active-book-row .book-name {
 }
 
 .reader-header {
-    padding: 10px 40px;
-    /* Spacious horizontal padding: 40px on both sides */
+    padding: 10px 15px 10px 80px;
+    /* Shifted controls further right to give dropdown more room on the left */
     background: var(--bg-header);
     backdrop-filter: blur(20px);
     border-bottom: 1px solid var(--glass-border);
@@ -617,6 +650,7 @@ tr.active-book-row .book-name {
 .dropdown-wrapper {
     flex-shrink: 0;
     margin-right: 15px;
+    margin-left: 10px;
     position: relative;
 }
 
@@ -780,9 +814,9 @@ tr.active-book-row .book-name {
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(239, 68, 68, 0.1);
-    border: 1px solid rgba(239, 68, 68, 0.2);
-    color: #f87171;
+    background: rgba(239, 68, 68, 0.15);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    color: #ef4444 !important;
     border-radius: 8px;
     cursor: pointer;
     font-size: 1.1rem;
@@ -1259,7 +1293,7 @@ div[id^="page"] p:not(.highlight):not(.reading-mark):not(.find-highlight) {
     border-radius: 4px;
 }
 
-/* Hidden OCR text for TTS/search — visual overlays are handled by JS */
+/* Hidden OCR text for TTS/search Ã¢â‚¬â€ visual overlays are handled by JS */
 .ocr-text-hidden {
     position: absolute;
     width: 0;
@@ -1326,7 +1360,7 @@ div[id^="page"] p:not(.highlight):not(.reading-mark):not(.find-highlight) {
     background: rgba(0, 120, 215, 0.4);
     /* Chrome PDF viewer blue */
     border-radius: 1px;
-    /* No mix-blend-mode — flat solid overlay for best visibility */
+    /* No mix-blend-mode Ã¢â‚¬â€ flat solid overlay for best visibility */
 }
 
 /* Minimalist Icon-Only Toolbar with Custom Tooltips */
@@ -1901,7 +1935,7 @@ body {
 }
 
 .bookmark-symbol::after {
-    content: "🔖 Saved Here";
+    content: "Ã°Å¸â€â€“ Saved Here";
     position: absolute;
     bottom: 120%;
     left: 50%;
@@ -2735,7 +2769,7 @@ body {
     position: relative;
     perspective: 1000px;
     transform-style: preserve-3d;
-    transform: rotateX(25deg) rotateY(-25deg);
+    transform: rotateX(25deg) rotateY(-25deg) translateX(44px);
     animation: bookFloat 4s infinite ease-in-out;
     margin-bottom: 70px;
     filter: drop-shadow(0 20px 40px rgba(0, 0, 0, 0.4));
@@ -2794,14 +2828,11 @@ body {
 }
 
 @keyframes bookFloat {
-
-    0%,
-    100% {
-        transform: rotateX(25deg) rotateY(-25deg) translateY(0);
+    0%, 100% {
+        transform: rotateX(25deg) rotateY(-25deg) translateX(44px) translateY(0);
     }
-
     50% {
-        transform: rotateX(20deg) rotateY(15deg) translateY(-25px);
+        transform: rotateX(20deg) rotateY(15deg) translateX(44px) translateY(-25px);
     }
 }
 
@@ -3091,9 +3122,9 @@ body {
     flex-direction: column;
     justify-content: flex-start;
     align-items: center;
-    padding-top: 2.5vh;
+    padding-top: 0; /* Fill from the very top */
     overflow: hidden;
-    animation: dashboardFadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    animation: dashboardFadeIn 0.3s ease-out;
     backdrop-filter: blur(25px);
 }
 
@@ -3102,15 +3133,19 @@ body {
 }
 
 @keyframes dashboardFadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes containerPopIn {
     from {
         opacity: 0;
-        transform: translateY(20px);
+        transform: translateY(30px) scale(0.95);
         filter: blur(10px);
     }
-
     to {
         opacity: 1;
-        transform: translateY(0);
+        transform: translateY(0) scale(1);
         filter: blur(0);
     }
 }
@@ -3118,13 +3153,16 @@ body {
 .dashboard-container {
     width: 95%;
     max-width: 1500px;
-    height: 88vh;
+    height: 100vh; /* Fill the viewport height */
     display: flex;
     flex-direction: column;
     gap: 25px;
-    padding: 30px;
+    padding: 30px 30px 0 30px; /* Top/Sides padding only */
     background: rgba(255, 255, 255, 0.01);
     border-radius: 40px;
+    overflow: hidden;
+    box-sizing: border-box;
+    animation: containerPopIn 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
 .glass-panel {
@@ -3173,7 +3211,8 @@ body {
     display: flex;
     gap: 30px;
     margin-top: 10px;
-    height: 100%;
+    flex: 1; /* Take up remaining space */
+    min-height: 0;
 }
 
 .dashboard-sidebar {
@@ -3185,6 +3224,7 @@ body {
     overflow-y: auto;
     overflow-x: hidden;
     padding-right: 10px;
+    padding-bottom: 40px; /* Extra room to prevent clipping at the bottom */
     max-height: calc(100vh - 150px);
 }
 
@@ -3196,9 +3236,12 @@ body {
 }
 
 .dashboard-scroll-area {
-    height: 600px;
+    flex-grow: 1;
+    min-height: 0;
     overflow-y: auto;
-    padding-right: 15px;
+    overflow-x: hidden;
+    padding: 20px 40px 100px 40px;
+    will-change: transform;
 }
 
 .dashboard-controls-container {
@@ -3340,14 +3383,23 @@ body {
 
 .dashboard-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(175px, 1fr));
-    gap: 25px;
-    padding: 10px 0 60px 0;
+    grid-template-columns: repeat(3, 1fr); /* Force 3 cards per row as requested */
+    gap: 30px;
+    padding: 20px 0 120px 0; /* Large bottom padding so buttons are visible above the edge */
+    width: 100%;
 }
 
-@media (min-width: 1200px) {
+@media (max-width: 1250px) {
     .dashboard-grid {
-        grid-template-columns: repeat(auto-fill, minmax(185px, 1fr));
+        grid-template-columns: repeat(2, 1fr); /* 2 cards on medium screens */
+        gap: 20px;
+    }
+}
+
+@media (max-width: 850px) {
+    .dashboard-grid {
+        grid-template-columns: 1fr; /* 1 card on mobile */
+        gap: 15px;
     }
 }
 
@@ -3362,53 +3414,65 @@ body {
 /* Dashboard Horizontal Card Design */
 .book-card {
     background: var(--bg-panel);
-    backdrop-filter: blur(12px);
     border: 1px solid var(--glass-border);
     border-radius: 24px;
     display: flex;
     flex-direction: column;
-    padding: 12px;
+    padding: 0;
     gap: 0;
     height: auto;
-    min-height: 290px;
-    transition: all 0.5s;
+    min-height: 330px;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     position: relative;
     box-shadow: var(--shadow-sm);
     text-align: left;
+    overflow: hidden;
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .book-card:hover {
+        transform: translateY(-8px);
+        box-shadow: 0 30px 60px rgba(0, 0, 0, 0.4);
+    }
+
+    .book-card:hover .book-cover-panel {
+        transform: rotateY(-85deg);
+    }
+}
+
+.book-cover-panel {
+    position: relative;
+    background: var(--bg-panel);
+    border: 1px solid var(--glass-border);
+    border-radius: 24px;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    height: 100%;
+    z-index: 10;
     transform-style: preserve-3d;
-    perspective: 2000px;
-}
-
-.book-card:hover {
-    transform: translateY(-8px);
-    border-color: var(--primary);
-    box-shadow: 0 30px 60px rgba(0, 0, 0, 0.4);
-    background: rgba(30, 41, 59, 0.82);
-}
-
-.book-card:hover .card-summary-overlay {
-    opacity: 1;
-    transform: rotateY(0deg);
-    pointer-events: auto;
+    transform-origin: left center;
+    transition: transform 0.6s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .card-summary-overlay {
     position: absolute;
     inset: 0;
     background: var(--modal-bg);
-    backdrop-filter: blur(12px);
     padding: 24px;
     display: flex;
     flex-direction: column;
     justify-content: center;
     border-radius: 24px;
-    opacity: 0;
-    transform-origin: 0;
-    transform: rotateY(80deg);
-    transition: all 0.5s;
-    z-index: 60;
+    transition: all 0.4s;
+    z-index: 1;
     pointer-events: none;
     border: 1px solid var(--border);
+}
+
+.book-card:hover .card-summary-overlay {
+    pointer-events: auto;
 }
 
 .summary-badge {
@@ -3478,8 +3542,8 @@ body {
 
 .btn-favorite {
     position: absolute;
-    top: 10px;
-    right: 10px;
+    top: 22px;
+    right: 22px;
     background: var(--glass);
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
@@ -3492,7 +3556,7 @@ body {
     justify-content: center;
     cursor: pointer;
     transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-    z-index: 70;
+    z-index: 100;
     padding: 0;
     color: white;
 }
@@ -4017,6 +4081,10 @@ body {
         grid-template-columns: 1fr;
     }
 
+    .sidebar-resizer {
+        display: none !important;
+    }
+
     .sidebar {
         position: fixed;
         left: 0;
@@ -4194,20 +4262,51 @@ body {
         justify-content: center !important;
         width: max-content !important;
         max-width: 95% !important;
-        height: 36px !important;
-        /* Slimmer badge */
-        padding: 0 12px !important;
-        gap: 8px !important;
-        top: 6px !important;
+        height: 44px !important;
+        /* Increased height for better icon fit */
+        padding: 0 16px !important;
+        gap: 10px !important;
+        top: 10px !important;
         /* Pulled up even more */
         left: 50% !important;
         transform: translateX(-50%) !important;
         border-radius: 50px !important;
-        background: rgba(15, 23, 42, 0.95) !important;
-        backdrop-filter: blur(10px) !important;
+        background: var(--bg-panel) !important;
+        backdrop-filter: blur(20px) !important;
         z-index: 1000 !important;
         position: absolute !important;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4) !important;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25) !important;
+        border: 1px solid var(--border) !important;
+        color: var(--text-main) !important;
+    }
+
+    .floating-book-badge .btn-fav-reader {
+        width: 32px !important;
+        height: 32px !important;
+        background: var(--glass) !important;
+        border: 1px solid var(--border) !important;
+        margin: 0 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        color: var(--text-main) !important;
+        flex-shrink: 0 !important;
+    }
+
+    .floating-book-badge .btn-fav-reader svg {
+        width: 14px !important;
+        height: 14px !important;
+        stroke-width: 2.5px !important;
+    }
+
+    .floating-book-badge .badge-text {
+        font-size: 0.8rem !important;
+        max-width: 120px !important;
+        color: var(--text-main) !important;
+    }
+
+    .floating-book-badge .badge-progress {
+        color: var(--text-light) !important;
     }
 
     .find-box {
@@ -4263,11 +4362,55 @@ body {
             padding-left: 15px !important;
         }
 
+        /* --- Mini Dashboard Footer --- */
+        .dashboard-mini-footer {
+            position: fixed !important;
+            bottom: 0 !important;
+            left: 0 !important;
+            width: 100% !important;
+            height: 28px !important;
+            background: rgba(248, 244, 236, 0.9) !important; /* Match light theme bg */
+            backdrop-filter: blur(10px);
+            display: flex !important;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000000 !important;
+            border-top: 1px solid rgba(0,0,0,0.05);
+            box-shadow: 0 -2px 10px rgba(0,0,0,0.05);
+        }
+
+        .dashboard-mini-footer:hover {
+            opacity: 0.9;
+        }
+
+        .dashboard-mini-footer span {
+            font-size: 0.65rem;
+            font-weight: 600;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--text-light);
+            font-family: 'Outfit', sans-serif;
+        }
+
+        [data-theme="light"] .dashboard-mini-footer span {
+            color: #8c7e6a;
+        }
+
+        .proverb-text {
+            font-family: 'Outfit', sans-serif;
+            font-style: italic;
+            letter-spacing: 0.05em;
+            font-size: 0.8rem !important;
+            text-transform: none !important;
+            opacity: 0.7;
+        }
+
         /* --- Dashboard & Library Mobile Fixes --- */
         .dashboard-overlay {
             z-index: 999999 !important;
             padding: 0 !important;
-            overflow: hidden !important;
+            overflow-y: auto !important; /* Allow scrolling the whole overlay on mobile */
+            -webkit-overflow-scrolling: touch;
         }
 
         /* Ensure Modals (Collabs, Requests) open ABOVE the dashboard */
@@ -4277,14 +4420,36 @@ body {
 
         .dashboard-container {
             width: 100% !important;
-            height: 100vh !important;
+            min-height: 100vh !important;
+            height: auto !important; /* Let it grow with content on mobile */
             border-radius: 0 !important;
-            padding: 20px 15px !important;
-            gap: 20px !important;
+            padding: 0 15px 0 15px !important;
+            gap: 15px !important;
+            background: var(--bg-app) !important;
+            display: flex !important;
+            flex-direction: column !important;
+            overflow: visible !important; /* Container should not lock scroll */
+        }
+
+        .dashboard-scroll-area {
+            flex: 1 !important;
             overflow-y: auto !important;
             overflow-x: hidden !important;
-            background: var(--bg-app) !important;
-            display: block !important; /* Stack normally */
+            padding: 15px !important;
+            margin-top: 5px !important;
+            background: rgba(0, 0, 0, 0.05); /* Inset 'room' feel */
+            border-radius: 32px;
+            box-shadow: inset 0 2px 15px rgba(0, 0, 0, 0.1);
+            position: relative;
+        }
+
+        .dashboard-scroll-area::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0; height: 100px;
+            background: linear-gradient(180deg, rgba(255,255,255,0.05), transparent);
+            pointer-events: none;
+            border-radius: 32px 32px 0 0;
         }
 
         .dashboard-header-bar {
@@ -4337,16 +4502,18 @@ body {
             width: 100% !important;
             max-height: none !important;
             padding-right: 0 !important;
-            margin-bottom: 30px !important;
+            margin-bottom: 10px !important;
             display: flex !important;
             flex-direction: column !important;
-            gap: 20px !important;
+            gap: 12px !important;
         }
 
         .dashboard-grid {
-            padding: 0 0 50px 0 !important;
-            grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)) !important;
-            gap: 12px !important;
+            padding: 0 0 120px 0 !important;
+            grid-template-columns: 1fr !important; /* Single column on mobile for full visibility */
+            gap: 20px !important;
+            max-width: 500px !important; /* Keep it centered and tidy */
+            margin: 0 auto !important;
         }
 
         /* Chart adjustments for mobile */
@@ -4378,13 +4545,16 @@ body {
         }
 
         .book-card {
-            padding: 10px !important;
-            min-height: 250px !important;
-            border-radius: 20px !important;
+            padding: 15px !important;
+            min-height: auto !important;
+            border-radius: 28px !important;
+            display: flex !important;
+            flex-direction: column !important;
+            gap: 15px !important;
         }
 
         .card-thumbnail {
-            height: 150px !important; /* Slightly taller thumbnail for better fit */
+            height: 160px !important;
         }
 
         /* Compact Card Buttons for Mobile */
@@ -4402,9 +4572,11 @@ body {
         }
 
         .btn-card-icon {
-            width: 28px !important;
-            height: 28px !important;
-            opacity: 0.7 !important;
+            width: 42px !important;
+            height: 42px !important;
+            opacity: 1 !important;
+            background: rgba(255, 255, 255, 0.05) !important;
+            border: 1px solid var(--glass-border) !important;
         }
 
         .btn-card-icon svg {
@@ -4413,7 +4585,10 @@ body {
         }
 
         .card-actions-row {
-            gap: 2px !important;
+            gap: 8px !important;
+            justify-content: space-between !important;
+            width: 100% !important;
+            margin-top: 10px !important;
         }
 
         .card-title {
@@ -4429,11 +4604,14 @@ body {
         }
 
         /* Mobile Summary Support */
+        .book-card.mobile-active .book-cover-panel {
+            transform: rotateY(-85deg) !important;
+        }
+
         .book-card.mobile-active .card-summary-overlay {
             opacity: 1 !important;
-            transform: translateY(0) !important;
             pointer-events: auto !important;
-            padding-bottom: 65px !important; /* Push content up to avoid footer buttons */
+            z-index: 1 !important;
         }
 
         .summary-text {
@@ -4442,8 +4620,25 @@ body {
         }
 
         .book-card.mobile-active {
-            background: rgba(30, 41, 59, 0.95) !important;
-            border-color: var(--primary) !important;
+            background: rgba(255, 255, 255, 0.98) !important;
+            border: 2px solid var(--primary) !important;
+            box-shadow: 0 15px 45px rgba(0, 0, 0, 0.2) !important;
+        }
+
+        .book-card.mobile-active .card-title,
+        .book-card.mobile-active .summary-text,
+        .book-card.mobile-active .card-meta-row span,
+        .book-card.mobile-active .summary-badge {
+            color: #333333 !important;
+            opacity: 1 !important;
+        }
+
+        .book-card.mobile-active .card-summary-overlay {
+            background: transparent !important;
+        }
+
+        .book-card.mobile-active .card-meta-row i {
+            color: var(--primary) !important;
         }
 
         .stat-mini-card div:last-child {
@@ -4454,9 +4649,9 @@ body {
         .mobile-dashboard-header-modern {
             display: flex;
             flex-direction: column;
-            gap: 24px;
-            padding: 20px 0;
-            margin-bottom: 10px;
+            gap: 12px;
+            padding: 10px 0;
+            margin-bottom: 5px;
         }
 
         .mobile-add-book-card {
@@ -4518,8 +4713,8 @@ body {
         .mobile-search-row {
             display: flex;
             align-items: center;
-            gap: 12px;
-            margin-top: 15px;
+            gap: 8px;
+            margin-top: 4px;
             position: relative;
         }
 
@@ -4531,14 +4726,19 @@ body {
         #dashboardSearchMobile {
             width: 100%;
             height: 52px !important;
-            background: rgba(15, 23, 42, 0.6);
-            border: 1px solid var(--glass-border);
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
             border-radius: 16px;
             padding: 0 15px 0 45px;
-            color: var(--text-white);
+            color: var(--text-main);
             font-size: 0.95rem;
             outline: none;
-            box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
+            box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.05);
+        }
+
+        #dashboardSearchMobile::placeholder {
+            color: var(--text-light);
+            opacity: 0.6;
         }
 
         .mobile-magnifier {
@@ -4573,12 +4773,27 @@ body {
         }
 
         /* Professional Touch Targets */
-        .btn-icon,
-        .btn-primary,
-        .lang-dropdown,
-        .btn-zoom {
-            height: 52px !important;
-            min-height: 52px !important;
+        /* Reading Room Modal Responsiveness */
+        .room-modal-content {
+            padding: 25px 20px !important;
+            width: 90% !important;
+            margin: 0 auto !important;
+        }
+        
+        .invite-row {
+            flex-direction: column !important;
+            gap: 12px !important;
+        }
+        
+        .invite-row input {
+            width: 100% !important;
+        }
+        
+        .invite-row button {
+            width: auto !important;
+            min-width: 160px !important;
+            margin: 5px auto 0 auto !important;
+            padding: 12px 25px !important;
         }
     }
 
@@ -4896,3 +5111,220 @@ body {
   box-shadow: -140px -140px #cc3f47;
   background-image: linear-gradient(45deg, #FF512F 0%, #F09819 51%, #FF512F 100%);
 }
+
+.color-bubble.active-color {
+    transform: scale(1.15);
+    border: 2px solid #6366f1 !important;
+    box-shadow: 0 0 10px rgba(99, 102, 241, 0.6);
+}
+
+#floatingDrawFab:hover {
+    transform: scale(1.1) rotate(6deg);
+    box-shadow: 0 12px 30px rgba(79, 70, 229, 0.45);
+}
+
+:root:not([data-theme="light"]) img[src*="books.gif"],
+:root:not([data-theme="light"]) img[src*="microphone.gif"],
+:root:not([data-theme="light"]) img[src*="fire.gif"] {
+    mix-blend-mode: normal !important;
+    background-color: rgba(255, 255, 255, 0.92) !important;
+    border-radius: 50% !important;
+    padding: 3px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+}
+
+:root:not([data-theme="light"]) img[src*="pencil.png"],
+:root:not([data-theme="light"]) img[src*="voice-note.png"] {
+    mix-blend-mode: normal !important;
+    background-color: rgba(255, 255, 255, 0.92) !important;
+    border-radius: 6px;
+    padding: 3px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+}
+
+[data-theme="light"] .empty-state-finger-gif {
+    mix-blend-mode: multiply !important;
+}
+
+:root:not([data-theme="light"]) .empty-state-finger-gif {
+    mix-blend-mode: normal !important;
+    background-color: rgba(255, 255, 255, 0.92) !important;
+    border-radius: 12px;
+    padding: 10px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+}
+
+/* S2T Shiny Button Animation styles */
+.s2t-shiny-btn {
+    position: relative;
+    transition: all 0.3s ease-in-out;
+    box-shadow: 0px 8px 15px rgba(0, 0, 0, 0.15);
+    background: var(--primary);
+    color: #ffffff !important;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    gap: 8px;
+    font-weight: bold;
+    border: 1.5px solid rgba(255, 255, 255, 0.3);
+    outline: none;
+    overflow: hidden;
+    text-decoration: none;
+}
+
+.s2t-shiny-btn:hover {
+    transform: scale(1.05);
+    border-color: rgba(255, 255, 255, 0.6);
+    box-shadow: 0px 12px 22px rgba(0, 0, 0, 0.25);
+    background: var(--primary-hover);
+}
+
+.s2t-shiny-btn::before {
+    content: "";
+    position: absolute;
+    width: 80px;
+    height: 100%;
+    background-image: linear-gradient(
+        120deg,
+        rgba(255, 255, 255, 0) 30%,
+        rgba(255, 255, 255, 0.8),
+        rgba(255, 255, 255, 0) 70%
+    );
+    top: 0;
+    left: -80px;
+    opacity: 0.6;
+}
+
+.s2t-shiny-btn:hover::before {
+    animation: shine-effect 1.5s ease-out infinite;
+}
+
+@keyframes shine-effect {
+    0% {
+        left: -80px;
+    }
+    60% {
+        left: 100%;
+    }
+    to {
+        left: 100%;
+    }
+}
+
+/* AI Chat Enhancements */
+.chat-msg-container.user .chat-bubble {
+    box-shadow: 0 4px 15px rgba(181, 130, 101, 0.2);
+}
+
+.chat-msg-container.ai .chat-bubble {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+#chatMicBtn.active {
+    animation: pulse-mic 1.5s infinite;
+    background: #ef4444 !important;
+    border-color: #f87171 !important;
+}
+
+@keyframes pulse-mic {
+    0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+    70% { transform: scale(1.1); box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+    100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+}
+
+#chatMessages::-webkit-scrollbar {
+    width: 6px;
+}
+#chatMessages::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 10px;
+}
+
+/* --- Mini Dashboard Footer --- */
+.dashboard-mini-footer {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    height: 32px; /* Slightly taller for a better bar look */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(15, 23, 42, 0.8); /* Solid dark glass background */
+    backdrop-filter: blur(15px);
+    -webkit-backdrop-filter: blur(15px);
+    border-top: 1px solid rgba(0, 0, 0, 0.4);
+    z-index: 100;
+}
+
+.proverb-text {
+    font-family: 'Outfit', sans-serif;
+    font-style: italic;
+    font-size: 0.72rem !important; /* Smaller, discreet font */
+    color: var(--text-light) !important;
+    opacity: 0.5;
+    letter-spacing: 0.08em;
+    text-transform: none !important;
+    transition: opacity 0.3s ease;
+}
+
+.dashboard-mini-footer:hover .proverb-text {
+    opacity: 0.9;
+}
+
+[data-theme="light"] .proverb-text {
+    color: #8c7e6a !important; /* Elegant muted tone for light theme */
+}
+
+
+[data-theme="light"] .dashboard-mini-footer {
+    background: rgba(245, 239, 230, 0.9);
+    border-top: 1px solid rgba(0, 0, 0, 0.15);
+}
+[data-theme='light'] .dashboard-scroll-area {
+    background: rgba(176, 125, 98, 0.05);
+    box-shadow: inset 0 2px 10px rgba(176, 125, 98, 0.1);
+}
+
+/* AI Chat Minimization */
+.modal-overlay.chat-minimized-overlay {
+    background: transparent !important;
+    backdrop-filter: none !important;
+    pointer-events: none;
+}
+
+.modal-content.chat-minimized-content {
+    pointer-events: auto;
+    position: fixed !important;
+    bottom: 25px !important;
+    right: 25px !important;
+    width: 200px !important;
+    height: 54px !important;
+    max-width: 90vw !important;
+    border-radius: 27px !important;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.3) !important;
+    transition: all 0.4s cubic-bezier(0.19, 1, 0.22, 1) !important;
+    overflow: hidden !important;
+    border: 2px solid var(--primary) !important;
+}
+
+.modal-content.chat-minimized-content #chatMessages,
+.modal-content.chat-minimized-content #chatInputRow,
+.modal-content.chat-minimized-content #chatBookFocus,
+.modal-content.chat-minimized-content [title="Minimize"] {
+    display: none !important;
+}
+
+.modal-content.chat-minimized-content #chatHeader {
+    border-bottom: none !important;
+    height: 100% !important;
+    padding: 0 18px !important;
+    justify-content: center !important;
+    background: var(--bg-header) !important;
+}
+
+.modal-content.chat-minimized-content #chatHeader h2 span {
+    font-size: 0.95rem !important;
+}
+
