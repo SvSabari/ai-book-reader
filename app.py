@@ -95,6 +95,7 @@ epub: Any = LazyLoader("ebooklib", "epub")
 ITEM_DOCUMENT: Any = LazyLoader("ebooklib", "ITEM_DOCUMENT")
 ITEM_IMAGE: Any = LazyLoader("ebooklib", "ITEM_IMAGE")
 pptx: Any = LazyLoader("pptx")
+Image: Any = LazyLoader("PIL", "Image")
 MSO_SHAPE_TYPE: Any = LazyLoader("pptx.enum.shapes", "MSO_SHAPE_TYPE")
 PP_ALIGN: Any = LazyLoader("pptx.enum.text", "PP_ALIGN")
 MSO_ANCHOR: Any = LazyLoader("pptx.enum.text", "MSO_ANCHOR")
@@ -327,6 +328,13 @@ def init_db():
     )
     """)
 
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_books_user ON books(user_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shared_books_user ON shared_books(user_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_shared_books_book ON shared_books(book_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_bookmarks_book ON bookmarks(book_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_notes_book ON notes(book_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_daily_stats_user_date ON daily_stats(user_id, date)")
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS daily_stats(
         date DATE PRIMARY KEY,
@@ -385,7 +393,17 @@ def init_db():
 
     # --- AUTO-UPGRADE: Fix books missing thumbnails or summaries from old uploads ---
     def auto_repair():
+        # Prevent running too frequently (e.g. on every debug reload)
+        # Use a simple file-based lock/timestamp
+        maintenance_flag = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".maintenance_done")
+        if os.path.exists(maintenance_flag):
+            st = os.stat(maintenance_flag)
+            if time.time() - st.st_mtime < 1800: # Only run every 30 mins
+                 return
+        
         try:
+            with open(maintenance_flag, "w") as f: f.write(str(time.time()))
+            
             time.sleep(1) # Wait for app to be ready
             print("🛠️ Dashboard Maintenance: Checking for missing assets & cleaning orphans...")
             conn_repair = sqlite3.connect(DB)
@@ -403,14 +421,18 @@ def init_db():
                 live_profiles = {r[0] for r in cur_r.fetchall() if r[0]}
                 live_profiles.add("default_profile.png")
                 
-                # Scan HTML files for used assets
+                # Scan HTML files for used assets (Safe scan of ALL books)
                 used_assets = set()
                 asset_pattern = re.compile(r'src="/uploads/extracted_assets/([^"]+)"')
                 for html_path in live_extracted:
                     if os.path.exists(html_path):
-                        with open(html_path, "r", encoding="utf-8", errors="ignore") as f:
-                            matches = asset_pattern.findall(f.read())
-                            for m in matches: used_assets.add(m)
+                        try:
+                            with open(html_path, "r", encoding="utf-8", errors="ignore") as f:
+                                # Optimization: only read if file is reasonably sized
+                                if os.path.getsize(html_path) < 5 * 1024 * 1024: # 5MB limit for regex scan
+                                    matches = asset_pattern.findall(f.read())
+                                    for m in matches: used_assets.add(m)
+                        except: pass
                 
                 # Cleanup uploads
                 if os.path.exists(UPLOAD_FOLDER):
@@ -644,7 +666,12 @@ def extract_image_text(image, fast=True, skip_ocr=False):
         if not pytesseract or not cv2 or not np:
             return ""
 
-        pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+        # Robust Tesseract Path Detection (Supports C: and D: drives)
+        if not os.path.exists(getattr(pytesseract.pytesseract, 'tesseract_cmd', '')):
+            for p in [r"C:\Program Files\Tesseract-OCR\tesseract.exe", r"D:\Program Files\Tesseract-OCR\tesseract.exe", "tesseract"]:
+                if os.path.exists(p) or p == "tesseract":
+                    pytesseract.pytesseract.tesseract_cmd = p
+                    break
         h, w = image.shape[:2]
         # Rescale for better Tesseract recognition on dense text
         scale = 1.0
@@ -652,36 +679,52 @@ def extract_image_text(image, fast=True, skip_ocr=False):
         if scale != 1.0:
             image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
 
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        # --- MULTI-PASS OCR STRATEGY ---
+        # Ensure we have an absolute path for tessdata (D:\ai_book_reader\tessdata)
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        tessdata_path = os.path.join(base_dir, 'tessdata')
         
-        # PRE-PROCESSING: Standardize for OCR
-        # Bilateral filter removes noise while keeping edges sharp (good for books)
-        processed = cv2.bilateralFilter(gray, 9, 75, 75)
-        # Adaptive thresholding works best for uneven lighting on book scans
-        processed = cv2.adaptiveThreshold(processed, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-
-        # OCR: Use PSM 3 (Automatic Page Segmentation) to find lines in order without OSD overhead
-        # Using OEM 3 (Default, combines LSTM and Legacy if needed)
-        config = r'--tessdata-dir c:\ai_book_reader\tessdata --oem 3 --psm 3 -l tam+eng'
+        # Set environment variable for the OCR process
+        os.environ["TESSDATA_PREFIX"] = tessdata_path
         
-        ocr_text = pytesseract.image_to_string(processed, config=config).strip()
+        # Pass 1: Original + Multi-Language (tam+eng)
+        config_base = '--oem 3 --psm 3'
+        try:
+            ocr_text = pytesseract.image_to_string(image, lang='tam+eng', config=config_base).strip()
+        except:
+            ocr_text = ""
+        
+        # Pass 2: Fallback to English Only if Multi-Language fails or is empty
+        if len(ocr_text) < 5:
+            try:
+                ocr_text = pytesseract.image_to_string(image, lang='eng', config=config_base).strip()
+            except:
+                pass
+            
+        # Pass 3: Fallback to Pre-processed + English (Scanned/Low Contrast)
+        if len(ocr_text) < 5:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            processed = cv2.bilateralFilter(gray, 9, 75, 75)
+            processed = cv2.adaptiveThreshold(processed, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+            try:
+                ocr_text = pytesseract.image_to_string(processed, lang='eng', config=config_base).strip()
+            except:
+                pass
         
         if not ocr_text: return ""
 
         # SANITIZE & ORDER PRESERVATION
-        # Filter out obvious OCR noise (single chars, non-alphanumeric junk)
         final_lines = []
         for line in ocr_text.split('\n'):
             line = line.strip()
-            # Ignore lines that are just symbols or too short to be meaningful book text
-            if len(re.sub(r'[^a-zA-Z0-9]', '', line)) < 2: continue
-            # Basic sanity filter for garbage
+            if not line or len(line) < 2: continue
+            # Basic sanity check for random symbols
             if re.match(r'^[.|_|\-|\s|?|!|:|;]+$', line): continue
             final_lines.append(line)
 
         return "\n".join(final_lines)
     except Exception as e:
-        print("OCR failed:", e)
+        print(f"OCR Error: {e}")
         return ""
 
 
@@ -858,7 +901,10 @@ def extract_pdf_html(file_path, fast_mode=True, page_limit=None):
             if text_html_parts:
                 # Use a very subtle divider instead of a bulky header
                 header = '<div style="width: 50px; height: 2px; background: var(--primary); margin: 40px auto 30px auto; opacity: 0.3; border-radius: 2px;"></div>' if is_scanned else ''
-                page_html += '<div class="pdf-text-stack" style="width: 100%;">' + header + "".join(text_html_parts) + '</div>'
+                combined_text = "".join(text_html_parts)
+                char_count = len(re.sub('<[^>]*>', '', combined_text))
+                page_html = page_html.replace('class="lazy-page-container', f'data-char-count="{char_count}" class="lazy-page-container')
+                page_html += '<div class="pdf-text-stack" style="width: 100%;">' + header + combined_text + '</div>'
             
             page_html += "</div>"
             local_pdf.close()
@@ -870,8 +916,8 @@ def extract_pdf_html(file_path, fast_mode=True, page_limit=None):
     # Process pages according to limit
     results = []
     try:
-        # Use high-performance parallel processing
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(12, process_limit)) as executor:
+        # Use high-performance parallel processing (Optimized for D: drive / HDD contention)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, process_limit)) as executor:
             results = list(executor.map(process_pdf_page, range(process_limit)))
     except Exception as e:
         print(f"Parallel PDF extraction failed for {file_path}, falling back to sync: {e}")
@@ -955,7 +1001,9 @@ def extract_epub_html(file_path):
             if body:
                 # Wrap each EPUB document (usually a chapter) in its own lazy container
                 # This fixes the 'one giant page' issue that stalls translation for massive epubs.
-                page_html = f"<div id='epub-page-{page_count}' class='lazy-page-container' style='padding: 60px; max-width: 900px; margin: 0 auto 40px auto; background: var(--bg-paper); border-radius: 4px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); min-height: 800px; color: #333; font-family: \"Georgia\", serif; font-size: 1.15rem; perspective: 1000px;'>"
+                text_content = body.get_text()
+                char_count = len(text_content)
+                page_html = f"<div id='epub-page-{page_count}' class='lazy-page-container' data-char-count='{char_count}' style='padding: 60px; max-width: 900px; margin: 0 auto 40px auto; background: var(--bg-paper); border-radius: 4px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); min-height: 800px; color: #333; font-family: \"Georgia\", serif; font-size: 1.15rem; perspective: 1000px;'>"
                 for child in body.children:
                     page_html += str(child)
                 page_html += "</div>"
@@ -983,8 +1031,15 @@ def extract_pptx_html(file_path):
     
     html = f'<div class="book-content-container" style="background:transparent; padding: 20px;">'
     for i, slide in enumerate(prs.slides):
+        # Extract text for char count
+        slide_text = ""
+        for shape in slide.shapes:
+            if hasattr(shape, "text_frame"):
+                slide_text += shape.text_frame.text + " "
+        char_count = len(slide_text.strip())
+
         # Create a positioned slide canvas matching the PowerPoint aspect ratio
-        html += f'<div id="slide-page-{i}" class="lazy-page-container" data-original-width="{base_w}" data-original-height="{base_h}" style="width: {base_w}px; height: {base_h}px; position: relative; background: #fff; margin: 0 auto 40px auto; box-shadow: 0 4px 15px rgba(0,0,0,0.1); border-radius: 4px; overflow: hidden; container-type: size;">'
+        html += f'<div id="slide-page-{i}" class="lazy-page-container" data-char-count="{char_count}" data-original-width="{base_w}" data-original-height="{base_h}" style="width: {base_w}px; height: {base_h}px; position: relative; background: #fff; margin: 0 auto 40px auto; box-shadow: 0 4px 15px rgba(0,0,0,0.1); border-radius: 4px; overflow: hidden; container-type: size;">'
         html += f'<div style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; overflow: hidden;">'
         
         # Add a light background number
@@ -1079,7 +1134,8 @@ def extract_txt_html(file_path):
                 # Close Page
                 page_id = len(pages)
                 html = "<br><br>".join(current_page_text)
-                pages.append(f"<div id='txt-page-{page_id}' class='lazy-page-container' style='padding: 60px; max-width: 900px; margin: 40px auto; background: var(--bg-paper); border-radius: 8px; box-shadow: 0 4px 30px rgba(0,0,0,0.1); min-height: 700px; color: #222; font-family: \"Georgia\", serif; font-size: 1.2rem; line-height: 1.8; position: relative;'>{html}</div>")
+                char_count = len(re.sub('<[^>]*>', '', html))
+                pages.append(f"<div id='txt-page-{page_id}' class='lazy-page-container' data-char-count='{char_count}' style='padding: 60px; max-width: 900px; margin: 40px auto; background: var(--bg-paper); border-radius: 8px; box-shadow: 0 4px 30px rgba(0,0,0,0.1); min-height: 700px; color: #222; font-family: \"Georgia\", serif; font-size: 1.2rem; line-height: 1.8; position: relative;'>{html}</div>")
                 current_page_text = []
                 current_len = 0
         
@@ -1141,17 +1197,6 @@ def extract_book_html(file_path, fast_mode=True, bid=None, page_limit=None):
             return extract_txt_html(file_path)
     elif ext in [".txt", ".prn", ".text", ".md", ".log"]:
         return extract_txt_html(file_path)
-    elif ext in [".png", ".jpg", ".jpeg", ".webp"]:
-        # --- Image Support ---
-        # Wrap image in the standard lazy-page-container so the reader can display it instantly.
-        # Use relative path since the server serves /uploads/
-        rel_path = f"/uploads/{os.path.basename(file_path)}"
-        html = f"""<div id='img-page-1' class='lazy-page-container' 
-                    style='display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px; min-height: 100vh; background: var(--bg-paper);'>
-                    <img src='{rel_path}' style='max-width: 100%; height: auto; border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,0.25);'>
-                    <p style='margin-top: 20px; color: var(--text-light); font-style: italic; font-size: 0.85rem;'>Visual Document Page</p>
-                  </div>"""
-        return {"html": html, "total_pages": 1}
     elif ext in [".html", ".htm", ".xhtml"]:
         # Direct HTML reading (preserving original layout)
         try:
@@ -1515,7 +1560,7 @@ def generate_thumbnail(bid, fpath):
             return thumb_name
         
         # Image books
-        if ext in [".png", ".jpg", ".jpeg", ".webp"]:
+        if ext in [".png", ".jpg", ".jpeg", ".webp", ".gif", ".tiff", ".svg", ".ico", ".jfif", ".bmp"]:
             img = cv2.imread(fpath)
             if img is not None:
                 h, w = img.shape[:2]
@@ -1686,29 +1731,38 @@ def books():
     # Fetch owned books (with share check) AND shared books
     cur.execute("""
         SELECT b.id, b.name, b.uploaded_at, b.status, b.thumbnail_path, b.summary, b.reading_time, b.is_favorite,
-               (SELECT COUNT(*) FROM bookmarks WHERE book_id = b.id) as bookmark_count,
-               (SELECT COUNT(*) FROM notes WHERE book_id = b.id) as notes_count,
+               COUNT(DISTINCT bm.id) as bookmark_count,
+               COUNT(DISTINCT n.id) as notes_count,
                CASE 
-                 WHEN (SELECT COUNT(*) FROM shared_books WHERE book_id = b.id AND sharer_id = ?) > 0 THEN 'shared_by_me'
+                 WHEN sb_own.book_id IS NOT NULL THEN 'shared_by_me'
                  ELSE 'owned'
                END as relation, 
                b.page_count,
-               (SELECT u.username FROM users u JOIN shared_books sb ON u.id = sb.user_id WHERE sb.book_id = b.id AND sb.sharer_id = ? LIMIT 1) as collaborator_name
+               u_sb.username as collaborator_name
         FROM books b
+        LEFT JOIN bookmarks bm ON b.id = bm.book_id
+        LEFT JOIN notes n ON b.id = n.book_id
+        LEFT JOIN shared_books sb_own ON b.id = sb_own.book_id AND sb_own.sharer_id = ?
+        LEFT JOIN shared_books sb_any ON b.id = sb_any.book_id AND sb_any.sharer_id = ?
+        LEFT JOIN users u_sb ON sb_any.user_id = u_sb.id
         WHERE b.user_id = ?
-        
+        GROUP BY b.id
+
         UNION ALL
         
         SELECT b.id, b.name, b.uploaded_at, b.status, b.thumbnail_path, b.summary, b.reading_time, b.is_favorite,
-               (SELECT COUNT(*) FROM bookmarks WHERE book_id = b.id) as bookmark_count,
-               (SELECT COUNT(*) FROM notes WHERE book_id = b.id) as notes_count,
+               COUNT(DISTINCT bm.id) as bookmark_count,
+               COUNT(DISTINCT n.id) as notes_count,
                'shared_with_me' as relation, b.page_count, u.username as collaborator_name
         FROM books b
         JOIN shared_books sb ON b.id = sb.book_id
         JOIN users u ON sb.sharer_id = u.id
+        LEFT JOIN bookmarks bm ON b.id = bm.book_id
+        LEFT JOIN notes n ON b.id = n.book_id
         WHERE sb.user_id = ?
+        GROUP BY b.id
         
-        ORDER BY id DESC
+        ORDER BY 1 DESC
     """, (current_user.id, current_user.id, current_user.id, current_user.id))
     data = cur.fetchall()
     conn.close()
@@ -2117,6 +2171,12 @@ def get_thumbnail(book_id):
     
     # Placeholder if no thumb
     return "", 404
+
+
+@app.route("/uploads/<path:filename>")
+@login_required
+def serve_uploads(filename):
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
 
 
 @app.route("/tts")
@@ -2669,20 +2729,7 @@ def delete_book(book_id):
         conn.close()
         return jsonify({"success": True, "message": "Collaboration ended"})
 
-    # Logic: If I'm the owner, check if others are using it
-    cur.execute("SELECT user_id FROM shared_books WHERE book_id = ?", (book_id,))
-    others = cur.fetchall()
-
-    if others:
-        # TRANSFER OWNERSHIP to the first collaborator instead of deleting files
-        new_owner_id = others[0][0]
-        cur.execute("UPDATE books SET user_id = ? WHERE id = ?", (new_owner_id, book_id))
-        cur.execute("DELETE FROM shared_books WHERE book_id = ? AND user_id = ?", (book_id, new_owner_id))
-        conn.commit()
-        conn.close()
-        return jsonify({"success": True, "message": "Ownership transferred, book preserved for collaborators"})
-
-    # If we reached here, NO ONE else is using the book. SAFE TO DELETE.
+    # Logic: If I'm the owner, perform a full purge
     cur.execute("DELETE FROM highlights WHERE book_id = ?", (book_id,))
     cur.execute("DELETE FROM bookmarks WHERE book_id = ?", (book_id,))
     cur.execute("DELETE FROM notes WHERE book_id = ?", (book_id,))
@@ -3921,6 +3968,47 @@ def ask_assistant():
         print(f"AI Assistant Error: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.route("/ocr_image", methods=["POST"])
+def ocr_image():
+    try:
+        data = request.get_json()
+        src = data.get("image", "")
+        if not src:
+            return jsonify({"text": ""})
+
+        img_np = None
+        if src.startswith("data:image"):
+            if "," in src:
+                encoded_data = src.split(",", 1)[1].replace(' ', '+')
+                encoded_data += "=" * ((4 - len(encoded_data) % 4) % 4)
+                try:
+                    raw = base64.b64decode(encoded_data)
+                    nparr = np.frombuffer(raw, np.uint8)
+                    img_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                    if img_np is None:
+                        pil_img = Image.open(io.BytesIO(raw)).convert("RGB")
+                        img_np = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+                except Exception as e:
+                    print("OCR Decode Error:", e)
+
+        if img_np is None:
+            return jsonify({"text": ""})
+
+        # Multi-stage OCR (Simplified version of the explain_image logic)
+        try:
+            gray = cv2.cvtColor(img_np, cv2.COLOR_BGR2GRAY)
+            # Thresholding for better OCR
+            thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+            text = pytesseract.image_to_string(thresh).strip()
+            return jsonify({"text": text})
+        except Exception as e:
+            print("OCR Tesseract Error:", e)
+            return jsonify({"text": ""})
+
+    except Exception as e:
+        print("OCR General Error:", e)
+        return jsonify({"text": ""})
+
 @app.route("/explain_image", methods=["POST"])
 def explain_image():
     try:
@@ -4533,117 +4621,190 @@ def ai_chat():
         user_message = data.get("message", "")
         context_title = data.get("context", "")
         book_id = data.get("book_id")
+        previous_response = data.get("previous_response", "")
+        prev_user_msg = data.get("previous_user_message", "").lower().strip()
+        chat_lang = data.get("chat_lang", "en")
         
         if not user_message:
             return jsonify({"status": "error", "message": "No message provided"}), 400
 
-        Logger.info("Chat AI", f"Processing query from user: {current_user.username}")
+        # 1. Typo Correction & Normalization
+        user_message_orig = user_message
+        user_message = user_message.lower().strip()
+        # Fix common typos instantly
+        typo_map = {
+            "waht": "what", "whaat": "what", "wat": "what", "wht": "what",
+            "jock": "joke", "joks": "joke", "joke": "joke",
+            "undrstnd": "understand", "understnd": "understand",
+            "meachin": "machine", "learing": "learning", "learng": "learning",
+            "defin": "define", "mening": "meaning"
+        }
+        for typo, fix in typo_map.items():
+            user_message = re.sub(rf'\b{typo}\b', fix, user_message)
 
-        # 1. Quick Responses for Common Small Talk & FAQs (Imported from ai_responses.py)
-        msg_clean = user_message.lower().strip("?.! ")
+        msg_clean = user_message.strip("?.! ")
+
+        # --- 1.1 LANGUAGE SWITCHING LOGIC ---
+        supported_langs = {
+            "tamil": "ta", "hindi": "hi", "bengali": "bn", "telugu": "te", "marathi": "mr",
+            "gujarati": "gu", "kannada": "kn", "malayalam": "ml", "punjabi": "pa", "english": "en",
+            "french": "fr", "spanish": "es", "german": "de"
+        }
+        
+        # Check if user wants to switch language
+        is_explaining = any(word in msg_clean for word in ["what is", "explain", "about", "meaning of", "define"])
+        new_lang = None
+        lang_name = None
+        for name, code in supported_langs.items():
+            if name in msg_clean:
+                # If they say "Tamil" and NOT "What is Tamil"
+                if not is_explaining:
+                    new_lang = code
+                    lang_name = name.capitalize()
+                    chat_lang = code
+                    break
+        
+        # If we switched, give a confirmation in that language
+        if new_lang:
+            conf_msgs = {
+                "ta": "நிச்சயமாக, இனி நான் தமிழில் பேசுவேன். நான் உங்களுக்கு எப்படி உதவ முடியும்?",
+                "hi": "ज़रूर, अब से मैं हिंदी में बात करूँगा। मैं आपकी कैसे मदद कर सकता हूँ?",
+                "en": "Sure, I will speak in English from now on. How can I help you?",
+                "te": "తప్పకుండా, ఇకపై నేను తెలుగులో మాట్లాడుతాను. నేను మీకు ఎలా సహాయపడగలను?",
+                "ml": "തീർച്ചയായും, ഇനി മുതൽ ഞാൻ മലയാളത്തിൽ സംസാരിക്കും. എനിക്ക് എങ്ങനെ സഹായിക്കാനാകും?"
+            }
+            res_text = conf_msgs.get(new_lang, f"Sure, I will now speak in {lang_name}.")
+            return jsonify({"status": "success", "response": res_text, "new_chat_lang": new_lang, "lang_name": lang_name})
+
+        # --- 1.2 FOLLOW-UP LOGIC ("ANOTHER ONE") ---
+        another_triggers = ["another one", "one more", "more", "give me one more", "tell me more", "another", "next"]
+        if msg_clean in another_triggers and prev_user_msg:
+            # If previous was a joke
+            joke_triggers = ["tell me a joke", "joke", "make me laugh", "funny", "laugh", "jokes"]
+            if any(jt in prev_user_msg for jt in joke_triggers):
+                from ai_responses import get_random_joke
+                return jsonify({"status": "success", "response": get_random_joke()})
+            
+            # If previous was a capital city
+            if "capital of" in prev_user_msg:
+                # Find another capital
+                capitals = [k for k in common_responses.keys() if k.startswith("capital of")]
+                if capitals: return jsonify({"status": "success", "response": f"How about this? The {random.choice(capitals)}: {common_responses[random.choice(capitals)]}"})
+            
+            # If previous was an element
+            if "what is" in prev_user_msg:
+                elements = ["hydrogen", "helium", "lithium", "beryllium", "boron", "carbon", "nitrogen", "oxygen"]
+                if any(e in prev_user_msg for e in elements):
+                    next_e = random.choice(elements)
+                    return jsonify({"status": "success", "response": f"Here is another element: {common_responses['what is ' + next_e]}"})
+
+            # Default: Repeat previous intent with variation
+            user_message = prev_user_msg 
+            msg_clean = user_message.strip("?.! ")
+        
+        # 1.5 Contextual Redirection: "I can't understand"
+        if any(phrase in msg_clean for phrase in ["cant understand", "dont understand", "not understand", "explain this", "explain that", "what does this mean"]):
+            if previous_response:
+                # If they mention a specific word from the previous response or just want an explanation
+                prompt = f"<|im_start|>system\nYou are a helpful Reading Assistant. The user did not understand your previous answer. Explain it more simply and clearly.\n"
+                prompt += f"Previous Answer: {previous_response}\n"
+                prompt += f"<|im_end|>\n<|im_start|>user\n{user_message}<|im_end|>\n<|im_start|>assistant\n"
+                
+                chat_model = get_chat_pipeline()
+                if chat_model:
+                    result = chat_model(prompt, max_new_tokens=150, do_sample=True, temperature=0.7)
+                    response = result[0]['generated_text'].split("assistant")[-1].strip()
+                    response = response.replace("<|im_end|>", "").strip()
+                    return jsonify({"status": "success", "response": response})
+
+        msg_clean = user_message.strip("?.! ")
+        
+        # 1b. Fast Lookup (Added ML to fast list)
+        if msg_clean in ["ml", "what is ml", "define ml"]:
+            return jsonify({"status": "success", "response": "ML stands for Machine Learning. It is a branch of Artificial Intelligence (AI) focused on building systems that learn from data and improve their accuracy over time without being explicitly programmed."})
+
         if msg_clean in common_responses:
-            return jsonify({"status": "success", "response": common_responses[msg_clean]})
+            response_text = common_responses[msg_clean]
+            if response_text == "RANDOM_JOKE_TOKEN":
+                from ai_responses import get_random_joke
+                response_text = get_random_joke()
+            return jsonify({"status": "success", "response": response_text})
+
+        # 1c. Check Dynamic Learned Knowledge (Self-Trained Data)
+        learned_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'learned_responses.json')
+        learned_data = {}
+        if os.path.exists(learned_path):
+            try:
+                with open(learned_path, 'r', encoding='utf-8') as f:
+                    learned_data = json.load(f)
+                if msg_clean in learned_data:
+                    return jsonify({"status": "success", "response": learned_data[msg_clean]})
+            except: pass
 
         # 2. Fast Definition for Single Words
         words = user_message.strip().split()
         if len(words) == 1 and words[0].isalpha():
             word = words[0]
-            return jsonify({
-                "status": "success", 
-                "response": f"'{word}' is a word that means different things depending on context. Generally, it refers to its common dictionary definition. For example, 'love' is a deep feeling of affection. Would you like a more detailed explanation?"
-            })
+            definition = f"'{word}' is a word that means different things depending on context. Generally, it refers to its common dictionary definition. For example, 'love' is a deep feeling of affection."
+            return jsonify({"status": "success", "response": definition})
 
-        # 3. Fetch Library & Book Context
+        # 3. Fetch Context (Optimized)
         library_context = "no books yet"
         relevant_context = ""
-        
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute("SELECT name FROM books")
+        cur.execute("SELECT name FROM books LIMIT 20")
         rows = cur.fetchall()
         book_list = [row[0].replace("_", " ").split(".")[0] for row in rows]
-        if book_list:
-            library_context = ", ".join(book_list)
+        if book_list: library_context = ", ".join(book_list)
 
-        # 4. Fetch RAG Context if book_id is provided
         if book_id:
             try:
                 sentences = get_book_sentences(book_id)
                 if sentences:
                     keywords = [w.lower() for w in user_message.split() if len(w) > 3]
-                    found = []
-                    for s in sentences:
-                        s_low = s.lower()
-                        if any(k in s_low for k in keywords):
-                            found.append(s)
-                        if len(found) >= 5: break
-                    if not found:
-                        found = sentences[:5]
-                    relevant_context = " ".join(found)
-            except Exception as e:
-                print(f"Context fetch error: {e}")
+                    found = [s for s in sentences if any(k in s.lower() for k in keywords)]
+                    relevant_context = " ".join(found[:5]) if found else " ".join(sentences[:5])
+            except: pass
         
-        conn.close()
+        if conn: conn.close()
         conn = None
 
-        # 5. Use the Local AI for Generation
+        # 4. Generate AI Answer
         chat_model = get_chat_pipeline()
         if chat_model:
-            # Detect if user is asking for a word meaning or more detail
-            user_msg_low = user_message.lower()
-            is_definition_request = any(k in user_msg_low for k in ["meaning of", "definition of", "what is", "define "])
-            wants_more_detail = any(k in user_msg_low for k in ["more detail", "explain more", "tell me more", "elaborate", "detailed"])
-            
-            # SmolLM2 Prompt Template - Optimized for extreme brevity
-            prompt = f"<|im_start|>system\nYou are an ultra-concise AI Assistant with broad general world knowledge. You MUST keep answers under 2 sentences.\n"
-            if wants_more_detail:
-                prompt = f"<|im_start|>system\nYou are a helpful Reading Assistant. Use your general knowledge and the provided context to explain in detail.\n"
-            elif is_definition_request:
-                prompt += "Provide a general dictionary definition based on world knowledge. Only mention books if explicitly asked.\n"
-            
+            # 🚀 OPTIMIZATION: Keep answers concise and direct to avoid over-explaining
+            prompt = f"<|im_start|>system\nYou are a helpful Reading Assistant. Keep your answers concise, direct, and conversational. Avoid long monologues.\n"
             prompt += f"Library: {library_context}\n"
-            if context_title:
-                prompt += f"Active Book: {context_title}\n"
-            if relevant_context and not is_definition_request:
-                prompt += f"Context: {relevant_context}\n"
+            if context_title: prompt += f"Active Book: {context_title}\n"
+            if relevant_context: prompt += f"Context: {relevant_context}\n"
+            prompt += f"<|im_end|>\n<|im_start|>user\n{user_message}<|im_end|>\n<|im_start|>assistant\n"
             
-            prompt += "<|im_end|>\n"
-            prompt += f"<|im_start|>user\n{user_message}<|im_end|>\n"
-            prompt += "<|im_start|>assistant\n"
-            
-            # Use a very tight token limit for standard queries
-            limit = 50 if not wants_more_detail else 200
-            result = chat_model(prompt, max_new_tokens=limit, do_sample=True, temperature=0.4, top_p=0.9, repetition_penalty=1.2, pad_token_id=50256)
+            result = chat_model(prompt, max_new_tokens=120, do_sample=True, temperature=0.7, top_p=0.9, pad_token_id=50256)
             full_text = result[0]['generated_text']
             
-            if "assistant" in full_text.lower():
-                response = full_text.split("assistant")[-1].strip()
-                response = response.replace("<|im_end|>", "").replace("<|im_start|>", "").strip()
-                if response.startswith(":"): response = response[1:].strip()
-            else:
-                response = full_text.replace(prompt, "").strip()
-
+            response = full_text.split("assistant")[-1].strip() if "assistant" in full_text.lower() else full_text.replace(prompt, "").strip()
+            response = response.replace("<|im_end|>", "").replace("<|im_start|>", "").strip().strip(":")
+            
             for stop in ["User:", "System:", "Instruction:", "Human:", "Context:", "<|im_start|>", "<|im_end|>", "\nUser", "\nSystem"]:
                 if stop in response: response = response.split(stop)[0].strip()
-            
-            # FORCE TRUNCATION: If the user didn't ask for detail, only keep the first 2 sentences.
-            if not wants_more_detail and len(response) > 5:
-                # Split by sentence markers but keep the marker
-                sentences = re.split(r'(?<=[.!?])\s+', response)
-                if len(sentences) > 2:
-                    response = " ".join(sentences[:2])
-                    if not any(response.endswith(m) for m in ['.', '!', '?']):
-                         response += "."
 
-            if not response or len(response) < 2:
-                response = f"I can help with your books! Your library has: {library_context}."
+            if not any(response.endswith(m) for m in ['.', '!', '?']): response += "."
+
+            # 5. DYNAMIC LEARNING
+            if len(response) > 10:
+                learned_data[msg_clean] = response
+                try:
+                    with open(learned_path, 'w', encoding='utf-8') as f:
+                        json.dump(learned_data, f, ensure_ascii=False, indent=2)
+                except: pass
 
             return jsonify({"status": "success", "response": response})
-        else:
-            return jsonify({"status": "success", "response": "I'm still initializing. Try again in a moment!"})
+        
+        return jsonify({"status": "error", "message": "AI Engine initializing..."}), 503
 
     except Exception as e:
-        print(f"Chat Error: {e}")
+        Logger.error("Chat AI", f"Chat failed: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
     finally:
         if conn:

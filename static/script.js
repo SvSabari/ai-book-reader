@@ -146,9 +146,11 @@ window.addEventListener('click', function (e) {
 // --- Study Notebook Logic (Plain & Clean) ---
 function toggleDashboard() {
     const overlay = document.getElementById("dashboardOverlay");
-    const isVisible = overlay.style.display === "flex";
+    // Use getComputedStyle for accurate visibility check regardless of CSS !important
+    const isVisible = window.getComputedStyle(overlay).display !== 'none';
+    
     if (!isVisible) {
-        overlay.style.display = "flex";
+        overlay.style.setProperty('display', 'block', 'important'); // Match mobile-first block layout
         const voiceBtn = document.getElementById("voiceBtn");
         if (voiceBtn) voiceBtn.style.display = "none";
         const drawFab = document.getElementById("floatingDrawFab");
@@ -167,7 +169,7 @@ function toggleDashboard() {
         fetchUserStreak();
         checkForInvites();
     } else {
-        overlay.style.display = "none";
+        overlay.style.setProperty('display', 'none', 'important');
         const voiceBtn = document.getElementById("voiceBtn");
         if (voiceBtn && currentBookId) voiceBtn.style.display = "flex";
         const drawFab = document.getElementById("floatingDrawFab");
@@ -180,14 +182,13 @@ function toggleDashboard() {
         
         document.body.style.overflow = ""; // Restore scrolling
         if (typeof stopDashboardPolling === 'function') stopDashboardPolling();
-        // CRITICAL: Close any open sub-modals to prevent UI ghosting over the reader
+        
         const subModals = ['collabsModal', 'invitationsModal', 'roomModal', 'profileModal'];
         subModals.forEach(id => {
             const el = document.getElementById(id);
             if (el) el.style.display = 'none';
         });
 
-        // If we are currently in a book, resume counting
         if (currentBookId) startReadingPulse();
     }
 }
@@ -245,6 +246,20 @@ function renderDashboard(data) {
         }
         bookmarkTotal.innerHTML = listHtml;
     }
+
+    // Optimization: Only clear and rebuild if data is different or if we were empty
+    // To prevent the "empty page" scroll flicker, we can compare stringified data
+    let dataHash = "";
+    try {
+        dataHash = JSON.stringify(data);
+    } catch (e) {
+        console.error("JSON stringify failed in renderDashboard", e);
+    }
+
+    if (window._lastDashboardDataHash === dataHash && !onlyBookmarksFilter && !onlyFavoritesFilter && grid.innerHTML.trim() !== "") {
+        return; // No changes, skip heavy DOM rebuild
+    }
+    window._lastDashboardDataHash = dataHash;
 
     grid.innerHTML = "";
 
@@ -337,13 +352,13 @@ function renderDashboard(data) {
             <!-- Floating Smart Symbols (Top Left of Image) -->
             <div class="card-smart-indicators" style="position: absolute; top: 12px; left: 12px; display: flex; flex-direction: column; gap: 6px; z-index: 30;">
                 ${relation === 'shared_by_me' ? 
-                    `<div style="background: rgba(245, 158, 11, 0.95); color: white; padding: 5px 10px; border-radius: 8px; font-size: 0.65rem; font-weight: 900; box-shadow: 0 4px 12px rgba(0,0,0,0.3); display: flex; align-items: center; gap: 6px; backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.2); text-transform: uppercase;"><i class="fas fa-share-alt" style="font-size: 0.7rem;"></i> TO: @${(collabName || 'USER').toUpperCase()}</div>` : ''
+                    `<div class="smart-indicator share-to-indicator"><i class="fas fa-share-alt"></i> TO: @${(collabName || 'USER').toUpperCase()}</div>` : ''
                 }
                 ${relation === 'shared_with_me' ? 
-                    `<div style="background: rgba(99, 102, 241, 0.95); color: white; padding: 5px 10px; border-radius: 8px; font-size: 0.65rem; font-weight: 900; box-shadow: 0 4px 12px rgba(0,0,0,0.3); display: flex; align-items: center; gap: 6px; backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.2); text-transform: uppercase;"><i class="fas fa-user-friends" style="font-size: 0.7rem;"></i> BY: @${(collabName || 'OWNER').toUpperCase()}</div>` : ''
+                    `<div class="smart-indicator share-by-indicator"><i class="fas fa-user-friends"></i> BY: @${(collabName || 'OWNER').toUpperCase()}</div>` : ''
                 }
-                ${bCount > 0 ? `<div style="background: rgba(255, 159, 67, 0.9); color: white; padding: 4px 8px; border-radius: 8px; font-size: 0.7rem; font-weight: 800; box-shadow: 0 4px 10px rgba(0,0,0,0.2); display: flex; align-items: center; gap: 6px; backdrop-filter: blur(4px);"><i class="fas fa-bookmark" style="font-size: 0.65rem;"></i> ${bCount}</div>` : ''}
-                ${nCount > 0 ? `<div style="background: rgba(99, 102, 241, 0.9); color: white; padding: 4px 8px; border-radius: 8px; font-size: 0.7rem; font-weight: 800; box-shadow: 0 4px 10px rgba(0,0,0,0.2); display: flex; align-items: center; gap: 6px; backdrop-filter: blur(4px);"><i class="fas fa-sticky-note" style="font-size: 0.65rem;"></i> ${nCount}</div>` : ''}
+                ${bCount > 0 ? `<div class="smart-indicator bookmark-count-indicator"><i class="fas fa-bookmark"></i> ${bCount}</div>` : ''}
+                ${nCount > 0 ? `<div class="smart-indicator note-count-indicator"><i class="fas fa-sticky-note"></i> ${nCount}</div>` : ''}
             </div>
 
             <!-- The Cover (Swings away) -->
@@ -379,7 +394,7 @@ function renderDashboard(data) {
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
                     </button>
                     
-                    <div style="display: flex; gap: 4px; flex-shrink: 0;">
+                    <div class="card-actions-row-inner" style="display: flex; gap: 4px; flex-shrink: 0;">
                          <button onclick="deleteBook(${id})" title="Delete" style="width: 34px; height: 34px; border-radius: 8px; border: 1px solid rgba(239, 68, 68, 0.15); background: rgba(239, 68, 68, 0.05); color: #ef4444; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: 0.2s;"><i class="fas fa-trash-alt" style="font-size: 0.75rem;"></i></button>
                          <button onclick="downloadBook(${id}, '${name.replace(/'/g, "\\'")}')" title="Download" style="width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--border); background: var(--glass); color: var(--text-light); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: 0.2s;"><i class="fas fa-download" style="font-size: 0.75rem;"></i></button>
                          <button onclick="shareBook(${id}, '${name.replace(/'/g, "\\'")}')" title="Share" style="width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--border); background: var(--glass); color: var(--text-light); cursor: pointer; display: flex; align-items: center; justify-content: center; transition: 0.2s;"><i class="fas fa-share-alt" style="font-size: 0.75rem;"></i></button>
@@ -389,6 +404,9 @@ function renderDashboard(data) {
         `;
         grid.appendChild(card);
     });
+
+    // CRITICAL: Re-apply active filters after re-rendering to prevent UI reset
+    filterDashboard();
 
     // Also fetch and show reading stats
     fetchReadingStats();
@@ -3328,15 +3346,21 @@ async function normalizeBookDOM(root) {
     }
 }
 
-function getNodesAndText(root, targetPages = null) {
+function getNodesAndText(root, targetPages = null, startOffset = 0) {
     let nodes = [];
     let offsets = [];
     let parts = [];
-    let currentLen = 0;
+    let currentLen = startOffset; // Start from global offset
 
     const itemsToScan = (targetPages && targetPages.length > 0) ? targetPages : [root];
 
-    itemsToScan.forEach(scope => {
+    itemsToScan.forEach((scope, scopeIdx) => {
+        // CRITICAL: Add newline bridge between pages to match rebuildReadingNodeMap's +1 logic
+        if (scopeIdx > 0) {
+            parts.push("\n");
+            currentLen++;
+        }
+
         let walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT, null, false);
         let lastParent = null;
         let lastNode = null;
@@ -3359,7 +3383,6 @@ function getNodesAndText(root, targetPages = null) {
                     }
                     if (curr.classList && (
                         curr.classList.contains('reading-mark') ||
-                        curr.classList.contains('ocr-hidden') ||
                         curr.classList.contains('junk-metadata-layer') ||
                         curr.classList.contains('scanned-junk-hidden')
                     )) {
@@ -3388,11 +3411,30 @@ function getNodesAndText(root, targetPages = null) {
             }
 
             // 3. CAPTURE CONTENT
-            let val = node.nodeValue
+            let rawVal = node.nodeValue;
+            let val = rawVal
                 .replace(/\u00AD/g, '')  // REMOVE soft-hyphens
                 .replace(/\u00A0/g, ' ') // MAP non-breaking spaces to standard spaces
                 .replace(/\u200B/g, '')  // REMOVE zero-width spaces
                 .replace(/\r/g, '');     // REMOVE carriage returns
+
+            // CRITICAL SYNC: Update DOM node to match the cleaned map text exactly.
+            // This prevents highlight drift caused by hidden characters like &shy;
+            if (val !== rawVal) {
+                node.nodeValue = val;
+            }
+
+            // 3b. METADATA FILTER (Skip technical filenames/IDs often found in image-based books)
+            const lowerVal = val.toLowerCase().trim();
+            const isTechnical = (
+                lowerVal.includes(".png") || lowerVal.includes(".jpg") || lowerVal.includes(".jpeg") ||
+                lowerVal.startsWith("img_") || lowerVal.startsWith("image_") ||
+                (lowerVal.length > 30 && !lowerVal.includes(" ")) // Likely a long ID/hash
+            );
+            
+            if (isTechnical) {
+                continue; 
+            }
 
             nodes.push(node);
             offsets.push(currentLen);
@@ -3551,10 +3593,13 @@ async function resumeReadingFromIndex(index, startPaused = false, forceExactPosi
     highlightReadingWord(index, 5);
 
     let text = globalReadingText;
+    const windowOffset = window._mapWindowOffset || 0;
+    
     // PERFORMANCE FIX: Only chunk the next 10,000 characters at a time.
-    // This makes the 'start' time instant regardless of book length.
-    let processingLimit = 10000;
-    let remainingText = text.substring(index, index + processingLimit);
+    // We must adjust the 'index' by the 'windowOffset' because globalReadingText
+    // only contains the text of the currently mapped windowed pages.
+    let localIndex = Math.max(0, index - windowOffset);
+    let remainingText = text.substring(localIndex, localIndex + 10000);
     let chunks = [];
     let lastSplit = 0;
 
@@ -3688,11 +3733,14 @@ async function resumeReadingFromIndex(index, startPaused = false, forceExactPosi
 
         utterance.onboundary = function (event) {
             if (jobId !== currentNarrationJobId || event.name !== 'word') return;
+            
+            let absolutePos = actualStartOffset + event.charIndex;
+            // Relaxed monotonic check: Only ignore if jump-back is very large (likely wrong chunk)
+            if (absolutePos < currentAbsoluteCharIndex - 200) return;
+            
             boundaryReceived = true;
-            let charLength = event.charLength || 5;
-            let absoluteWordPosition = actualStartOffset + event.charIndex;
-            currentAbsoluteCharIndex = absoluteWordPosition;
-            highlightReadingWord(absoluteWordPosition, charLength);
+            currentAbsoluteCharIndex = absolutePos;
+            highlightReadingWord(absolutePos, event.charLength || 5);
         };
 
         utterance.onstart = function () {
@@ -3700,7 +3748,8 @@ async function resumeReadingFromIndex(index, startPaused = false, forceExactPosi
             updateStorytellerState(speakerGenderForThisTask);
             removeReadingMarks();
             let words = [];
-            let regex = /\S+/g;
+            // Use robust regex for word detection
+            let regex = /[\p{L}\p{N}\p{M}]+/gu;
             let match;
             while ((match = regex.exec(trimmed)) !== null) {
                 words.push({ startOffset: actualStartOffset + match.index, length: match[0].length });
@@ -3712,16 +3761,28 @@ async function resumeReadingFromIndex(index, startPaused = false, forceExactPosi
                     clearInterval(interval);
                     return;
                 }
-                // DURATION ESTIMATION: Based on characters at natural speed (approx 14 chars/sec)
-                // This must remain stable even if utterance.rate changes to avoid highlight skips.
-                let duration = trimmed.length / 14;
-                let progress = (Date.now() - startTime) / (duration * 1000 / (utterance.rate || 1.0));
-                if (progress >= 1.0) { clearInterval(interval); return; }
+                
+                // PRECISION ESTIMATION: Based on language-aware character density
+                const lang = getSelectedLanguage() || 'en';
+                const isIndic = lang.startsWith('ta') || lang.startsWith('hi') || lang.startsWith('ml') || lang.startsWith('kn');
+                const baseCharsPerSec = isIndic ? 12 : 16;
+                
+                let elapsed = Date.now() - startTime;
+                let estimatedChars = (elapsed / 1000) * (baseCharsPerSec * (utterance.rate || 1.0));
+                
+                // Find the word that contains this estimated character position
+                let bestWord = null;
+                for (let w of words) {
+                    if (w.startOffset - actualStartOffset <= estimatedChars) {
+                        bestWord = w;
+                    } else {
+                        break;
+                    }
+                }
 
-                let wordIdx = Math.floor(progress * words.length);
-                if (wordIdx < words.length && wordIdx >= 0) {
-                    currentAbsoluteCharIndex = words[wordIdx].startOffset;
-                    highlightReadingWord(words[wordIdx].startOffset, words[wordIdx].length);
+                if (bestWord) {
+                    currentAbsoluteCharIndex = bestWord.startOffset;
+                    highlightReadingWord(bestWord.startOffset, bestWord.length);
                 }
             }, 100);
         };
@@ -4677,6 +4738,22 @@ async function translateNodeList(nodes, lang, job) {
             // If narrator is running, we MUST rebuild the map to avoid offset drift
             // Rebuilding ensures the globalReadingText is updated to the new language.
             if (isReadingAloud) debouncedRebuildMap();
+
+            // UPDATE DATA-CHAR-COUNT: Ensures subsequent pages stay aligned even if windowing is used
+            const pageParent = nodes[0].parentElement;
+            if (pageParent) {
+                let pageContainer = pageParent;
+                while(pageContainer && !pageContainer.classList.contains('lazy-page-container')) {
+                    pageContainer = pageContainer.parentElement;
+                }
+                if (pageContainer) {
+                    // Quick recount of the current page content
+                    let newCount = 0;
+                    let w = document.createTreeWalker(pageContainer, NodeFilter.SHOW_TEXT, null, false);
+                    while(w.nextNode()) newCount += w.currentNode.nodeValue.length;
+                    pageContainer.setAttribute('data-char-count', newCount);
+                }
+            }
             return true;
         } else {
             console.warn(`Translation mismatch: Expected ${nodes.length}, got ${translated ? translated.length : 'null'}`);
@@ -5125,9 +5202,8 @@ function rebuildReadingNodeMap() {
     let snapshotOffset = window.currentReadingOffsetInNode;
 
     // 🚀 VIRTUAL MAPPING FOR MASSIVE DOCUMENTS:
-    // If the book is huge (>200 pages), we only map the current page + 100 pages forward.
-    // This prevents the browser from freezing and keeps the narrator snappy.
-    const allPages = Array.from(reader.querySelectorAll('.lazy-page-container, .reader-page'));
+    // We STRICTLY only scan page containers to avoid picking up dashboard cards or hidden metadata.
+    const allPages = Array.from(reader.querySelectorAll('.lazy-page-container, .reader-page, .pdf-page'));
     const isMassive = allPages.length > 200;
 
     let targetPages = allPages;
@@ -5169,24 +5245,49 @@ function rebuildReadingNodeMap() {
         const end = Math.min(allPages.length, currentIndex + 100);
         targetPages = allPages.slice(start, end);
 
-        // Note: We don't need an exact global offset for the whole book 
-        // because narrator works relative to globalReadingText.
-        // But for bookmarks, we'll keep the absolute index logic stable.
+        // 🧮 CALCULATE OFFSET PREFIX
+        // We use the 'data-char-count' attribute provided by the server for 100% accuracy.
+        // This works even for unrendered/lazy pages.
+        for(let i=0; i<start; i++) {
+            let page = allPages[i];
+            
+            // CRITICAL: If the page is rendered (has children), we should trust its LIVE length
+            // because it might have been translated, changing its character count.
+            let count = NaN;
+            if (page.children.length > 0) {
+                // Quickly scan live nodes for accuracy using the SHARED mapping logic
+                // This ensures that injected spaces and filtered nodes are accounted for perfectly.
+                const { text: pageText } = getNodesAndText(page, [page], 0);
+                count = pageText.length;
+                
+                // Keep attribute in sync for windowed jumps
+                page.setAttribute('data-char-count', count);
+            } else {
+                count = parseInt(page.getAttribute('data-char-count'));
+            }
+
+            if (isNaN(count)) {
+                count = (page.innerText || "").length;
+            }
+            offsetPrefix += count + 1; // +1 for the newline bridge between pages
+        }
     }
 
-    let { nodes, offsets, text } = getNodesAndText(reader, targetPages);
-
-    if (nodes.length > 0) {
-        globalTextNodes = nodes;
-        globalNodeOffsets = offsets;
-        globalReadingText = text;
-
-        // POSITION RESCUE: Re-anchor the narrator to the correct text node
-        if (isReadingAloud && snapshotNode && snapshotNode.isConnected) {
-            let nodeIdx = nodes.indexOf(snapshotNode);
-            if (nodeIdx !== -1) {
-                currentAbsoluteCharIndex = offsets[nodeIdx] + snapshotOffset;
-            }
+    let { nodes, offsets, text } = getNodesAndText(reader, targetPages, offsetPrefix);
+    
+    globalTextNodes = nodes;
+    globalNodeOffsets = offsets;
+    globalReadingText = text;
+    window._mapWindowOffset = offsetPrefix;
+    window._lastMapRebuildTime = Date.now();
+    
+    window._rebuildingMap = false;
+    
+    // POSITION RESCUE: Re-anchor the narrator to the correct text node if we are reading
+    if (isReadingAloud && snapshotNode && snapshotNode.isConnected) {
+        let nodeIdx = nodes.indexOf(snapshotNode);
+        if (nodeIdx !== -1) {
+            currentAbsoluteCharIndex = offsets[nodeIdx] + snapshotOffset;
         }
     }
 }
@@ -5194,12 +5295,18 @@ function rebuildReadingNodeMap() {
 function highlightReadingWord(absoluteWordPosition, charLength, sentenceStart = -1, sentenceLength = -1) {
     if (!globalTextNodes || globalTextNodes.length === 0) rebuildReadingNodeMap();
 
+    // PERFORMANCE: Avoid redundant work if we are still on the same word
+    if (window._lastHighlightPos === absoluteWordPosition && window._lastHighlightLen === charLength) return;
+    window._lastHighlightPos = absoluteWordPosition;
+    window._lastHighlightLen = charLength;
+
     // 1. Clear current marks
     if (readingHighlight) readingHighlight.clear();
     if (sentenceHighlight) sentenceHighlight.clear();
 
-    // 2. Fallback Glows
-    document.querySelectorAll('.reading-active-container').forEach(el => el.classList.remove('reading-active-container'));
+    // 2. Fallback Glows (Selective removal for performance)
+    const activeNodes = document.querySelectorAll('.reading-active-container');
+    activeNodes.forEach(el => el.classList.remove('reading-active-container'));
 
     let startChar = absoluteWordPosition;
     let endChar = absoluteWordPosition + charLength;
@@ -5210,100 +5317,123 @@ function highlightReadingWord(absoluteWordPosition, charLength, sentenceStart = 
     let foundAny = false;
 
     if (globalTextNodes && globalTextNodes.length > 0) {
-        let startAt = (typeof lastMarkedNodeIndex !== 'undefined' && lastMarkedNodeIndex < globalTextNodes.length && globalNodeOffsets[lastMarkedNodeIndex] <= startChar) ? lastMarkedNodeIndex : 0;
+        // 🚀 HIGH-PERFORMANCE BINARY SEARCH: Find the correct node in O(log N)
+        // This is critical for massive books where linear search causes UI lag and highlight delays.
+        let low = 0;
+        let high = globalTextNodes.length - 1;
+        let nodeIdx = -1;
 
-        for (let i = startAt; i < globalTextNodes.length; i++) {
-            let nodeStart = globalNodeOffsets[i];
-            let node = globalTextNodes[i];
-            if (!node || !node.nodeValue) continue;
-            let nodeLen = node.nodeValue.length;
-            let nodeEnd = nodeStart + nodeLen;
+        while (low <= high) {
+            let mid = Math.floor((low + high) / 2);
+            let nodeStart = globalNodeOffsets[mid];
+            let nodeEnd = nodeStart + (globalTextNodes[mid].nodeValue || "").length;
 
-            if (nodeEnd > sStart && nodeStart < sEnd && sentenceHighlight && sStart !== -1) {
-                try {
-                    let sRange = new Range();
-                    sRange.setStart(node, Math.max(0, sStart - nodeStart));
-                    sRange.setEnd(node, Math.min(nodeLen, sEnd - nodeStart));
-                    sentenceHighlight.add(sRange);
-                } catch (e) { }
+            if (startChar >= nodeStart && startChar < nodeEnd) {
+                nodeIdx = mid;
+                break;
+            } else if (startChar < nodeStart) {
+                high = mid - 1;
+            } else {
+                low = mid + 1;
             }
+        }
 
-            if (nodeEnd > startChar && nodeStart < endChar) {
-                foundAny = true;
-                lastMarkedNodeIndex = i;
+        // If not found exactly, find the closest previous node
+        if (nodeIdx === -1) nodeIdx = Math.max(0, high);
 
-                // TRACK CURRENT NODE for translation-resync (Anchors narrator to semantic position)
-                window.currentReadingNode = node;
-                window.currentReadingOffsetInNode = Math.max(0, startChar - nodeStart);
+        // Highlight Sentence (Optional but helps context)
+        if (sStart !== -1 && sentenceHighlight) {
+            for (let i = nodeIdx; i < globalTextNodes.length; i++) {
+                let ns = globalNodeOffsets[i];
+                let n = globalTextNodes[i];
+                let ne = ns + (n.nodeValue || "").length;
+                if (ne > sStart && ns < sEnd) {
+                    try {
+                        let sr = new Range();
+                        sr.setStart(n, Math.max(0, sStart - ns));
+                        sr.setEnd(n, Math.min(n.nodeValue.length, sEnd - ns));
+                        sentenceHighlight.add(sr);
+                    } catch(e) {}
+                } else if (ns >= sEnd) break;
+            }
+        }
 
-                try {
-                    let range = new Range();
+        // Highlight Word
+        let node = globalTextNodes[nodeIdx];
+        let nodeStart = globalNodeOffsets[nodeIdx];
+        if (node && node.nodeValue) {
+            foundAny = true;
+            lastMarkedNodeIndex = nodeIdx;
+            window.currentReadingNode = node;
+            window.currentReadingOffsetInNode = Math.max(0, startChar - nodeStart);
 
-                    // SMART BOUNDARY CORRECTION:
-                    // Browser TTS often reports offsets slightly off or truncates suffixes (e.g. 'Secret' instead of 'Secrets').
-                    // We reach forward in the DOM text to find the logical end of the current word.
-                    let localStart = Math.max(0, startChar - nodeStart);
-                    let text = node.nodeValue || "";
-                    let localEnd = Math.min(nodeLen, endChar - nodeStart);
+            try {
+                let range = new Range();
+                const letterRegex = /[\p{L}\p{M}\p{N}]/u;
+                let text = node.nodeValue || "";
+                let nodeLen = text.length;
+                
+                let localStart = Math.max(0, startChar - nodeStart);
+                let localEnd = Math.min(nodeLen, endChar - nodeStart);
 
-                    // Expand localEnd to next non-word character if it looks like we clipped a word (Unicode-aware)
-                    const letterRegex = /[\p{L}\p{M}]/u;
-                    if (localEnd < nodeLen && letterRegex.test(text[localEnd - 1]) && letterRegex.test(text[localEnd])) {
-                        while (localEnd < nodeLen && letterRegex.test(text[localEnd])) {
-                            localEnd++;
-                        }
+                // 1. SNAP BACKWARD to word start
+                if (localStart > 0 && letterRegex.test(text[localStart]) && letterRegex.test(text[localStart - 1])) {
+                    while (localStart > 0 && letterRegex.test(text[localStart - 1])) {
+                        localStart--;
                     }
-
-                    range.setStart(node, localStart);
-                    range.setEnd(node, localEnd);
-
-                    if (readingHighlight) readingHighlight.add(range);
-
-                    // HIGH VISIBILITY GLOW: Apply to the parent container for extra clarity
-                    if (node.parentNode) {
-                        node.parentNode.classList.add('reading-active-container');
-                        node.parentNode.style.setProperty('--current-reading-color', 'var(--reading-mark)');
+                } else if (localStart < nodeLen && !letterRegex.test(text[localStart])) {
+                    while (localStart < nodeLen && !letterRegex.test(text[localStart])) {
+                        localStart++;
                     }
+                }
 
-                    // SMOOTH SCROLLING: Keep the active word centered in view
-                    let timeSinceLastScroll = Date.now() - (window.lastAutoScrollTime || 0);
-                    if (timeSinceLastScroll > 1500 || window.forceResumeScroll) {
-                        let rect = range.getBoundingClientRect();
-                        let reader = document.getElementById("reader");
-                        if (!reader) return;
+                // 2. SNAP FORWARD to word end
+                if (localEnd < nodeLen && letterRegex.test(text[localEnd - 1]) && letterRegex.test(text[localEnd])) {
+                    while (localEnd < nodeLen && letterRegex.test(text[localEnd])) {
+                        localEnd++;
+                    }
+                }
+
+                range.setStart(node, localStart);
+                range.setEnd(node, localEnd);
+
+                if (readingHighlight) readingHighlight.add(range);
+
+                if (node.parentNode) {
+                    node.parentNode.classList.add('reading-active-container');
+                    node.parentNode.style.setProperty('--current-reading-color', 'var(--reading-mark)');
+                }
+
+                // SMOOTH SCROLLING: Keep the active word centered in view
+                let isMobile = window.innerWidth < 992;
+                let scrollInterval = isMobile ? 2500 : 1500;
+                
+                let timeSinceLastScroll = Date.now() - (window.lastAutoScrollTime || 0);
+                if (timeSinceLastScroll > scrollInterval || window.forceResumeScroll) {
+                    let rect = range.getBoundingClientRect();
+                    let reader = document.getElementById("reader");
+                    if (reader) {
                         let readerRect = reader.getBoundingClientRect();
+                        const threshold = reader.clientHeight * (isMobile ? 0.45 : 0.35);
 
-                        // Centered scrolling logic
-                        const threshold = reader.clientHeight * 0.35;
-
-                        // DRIFT PROTECTION: If we are reading forward, only auto-scroll if the word 
-                        // is actually FURTHER DOWN than where we already are. 
-                        // This prevents 'previous page jumps' if a background task briefly renders something elsewhere.
-                        const isPhysicallyBehind = rect.bottom < readerRect.top;
                         const isPhysicallyBeyond = rect.top > readerRect.bottom - threshold;
                         const isAboveMiddle = rect.top < readerRect.top + threshold;
 
-                        if (isPhysicallyBeyond || (isAboveMiddle && !isPhysicallyBehind) || window.forceResumeScroll) {
+                        if (isPhysicallyBeyond || (isAboveMiddle && rect.bottom > readerRect.top) || window.forceResumeScroll) {
                             const zoom = (typeof currentZoom !== 'undefined') ? currentZoom : 1;
-
-                            // IMPROVED SCROLL LOGIC: Target the top 15% of the reader for better reading flow (don't blindly center)
-                            let targetY = reader.scrollTop + (rect.top - readerRect.top) / zoom - (reader.clientHeight / zoom * 0.15);
+                            let targetY = reader.scrollTop + (rect.top - readerRect.top) / zoom - (reader.clientHeight / zoom * (isMobile ? 0.2 : 0.15));
                             targetY = Math.max(0, targetY);
 
-                            // FORWARD-MOTION ENFORCEMENT: Generally prevent reverse-jumps to avoid 'Scroll Drift',
-                            // but ALWAYS allow the jump if the user just clicked 'Resume' (forceResumeScroll).
                             if (targetY >= reader.scrollTop - 50 || window.forceResumeScroll) {
-                                // USE 'auto' if forced to ensure instant jump without interference
-                                reader.scrollTo({ top: targetY, behavior: window.forceResumeScroll ? 'auto' : 'smooth' });
+                                let behavior = (window.forceResumeScroll || isMobile) ? 'auto' : 'smooth';
+                                reader.scrollTo({ top: targetY, behavior: behavior });
                                 window.lastAutoScrollTime = Date.now();
-                                window.forceResumeScroll = false; // Reset after one successful sync
+                                window.forceResumeScroll = false;
                             }
                         }
                     }
-                } catch (e) { }
-            }
-
-            if (nodeStart >= endChar) break;
+                }
+            } catch (e) { }
         }
     }
 
@@ -5470,11 +5600,16 @@ function playNextFallback(startPaused = false, isRetry = false) {
         let boundaryReceived = false;
         utterance.onboundary = (event) => {
             if (jobId !== currentNarrationJobId) return;
+            
+            let absolutePos = item.offset + event.charIndex;
+            if (absolutePos < currentAbsoluteCharIndex - 200) return;
+            
             boundaryReceived = true;
-            currentAbsoluteCharIndex = item.offset + event.charIndex;
-            highlightReadingWord(item.offset + event.charIndex, event.charLength || 5);
+            currentAbsoluteCharIndex = absolutePos;
+            highlightReadingWord(absolutePos, event.charLength || 5);
+            
             if (progEl) {
-                const prog = Math.round((currentAbsoluteCharIndex / globalReadingText.length) * 100);
+                const prog = Math.round((currentAbsoluteCharIndex / (globalReadingText.length || 1)) * 100);
                 progEl.innerText = `| ${prog}% Read`;
             }
         };
@@ -5491,25 +5626,35 @@ function playNextFallback(startPaused = false, isRetry = false) {
             if (words.length === 0 && item.text.length > 0) {
                 words.push({ startOffset: item.offset, length: item.text.length });
             }
+            
             const totalChars = item.text.length;
-            const speedEstimate = (15 * (utterance.rate || 1.0)) / 1000;
+            const lang = getSelectedLanguage() || 'en';
+            const isIndic = lang.startsWith('ta') || lang.startsWith('hi') || lang.startsWith('ml') || lang.startsWith('kn');
+            const baseCharsPerSec = isIndic ? 12 : 16;
+            const speedEstimate = (baseCharsPerSec * (utterance.rate || 1.0)) / 1000;
+
             let hIn = setInterval(() => {
                 if (jobId !== currentNarrationJobId || boundaryReceived || !isReadingAloud || isPaused) {
                     clearInterval(hIn);
                     return;
                 }
                 let elapsed = Date.now() - utteranceStartTime;
-                const estimatedPos = Math.min(totalChars, elapsed * speedEstimate);
+                const estimatedPosInChunk = Math.min(totalChars, elapsed * speedEstimate);
+                const absoluteEstimatedPos = item.offset + estimatedPosInChunk;
+                
+                // Find best word match
                 let bestWord = words[0];
                 for (let w of words) {
-                    if (w.startOffset - item.offset <= estimatedPos) bestWord = w;
+                    if (w.startOffset <= absoluteEstimatedPos) bestWord = w;
                     else break;
                 }
-                if (bestWord) {
+
+                if (bestWord && bestWord.startOffset > currentAbsoluteCharIndex) {
                     currentAbsoluteCharIndex = bestWord.startOffset;
                     highlightReadingWord(bestWord.startOffset, bestWord.length);
                 }
-                if (estimatedPos >= totalChars) clearInterval(hIn);
+                
+                if (estimatedPosInChunk >= totalChars) clearInterval(hIn);
             }, 100);
         };
 
@@ -5768,8 +5913,9 @@ function scrollToIndex(index, behavior = 'smooth') {
     let reader = document.getElementById("reader");
     if (!reader) return;
 
-    // Use established extraction logic to ensure exact offset mapping (accounting for virtual spaces)
-    let { nodes, offsets } = getNodesAndText(reader);
+    // Use established extraction logic to ensure exact offset mapping (accounting for virtual spaces and page boundaries)
+    const pages = Array.from(reader.querySelectorAll('.lazy-page-container, .reader-page, .pdf-page'));
+    let { nodes, offsets } = getNodesAndText(reader, pages);
 
     let targetNode = null;
     let nodeOffset = 0;
@@ -5811,7 +5957,6 @@ function scrollToIndex(index, behavior = 'smooth') {
 }
 
 async function applyImageOcrOverlays() {
-    return; // Feature disabled: User requested reading from explicitly extracted bottom text exclusively
     if (!reader) return;
 
     let imgs = Array.from(reader.querySelectorAll("img:not(.ocr-processed)"));
@@ -7100,7 +7245,9 @@ function rebuildRemainingFallbackQueue() {
     const testShort = testLang ? testLang.split('-')[0].toLowerCase() : 'en';
 
     // 2. Fragment the remaining 10k characters (same logic as resumeReadingFromIndex)
-    let textChunkRaw = globalReadingText.substring(index, index + 10000);
+    const windowOffset = window._mapWindowOffset || 0;
+    let localIndex = Math.max(0, index - windowOffset);
+    let textChunkRaw = globalReadingText.substring(localIndex, localIndex + 10000);
     let chunks = [];
     let lastSplit = 0;
     const bridgeRegex = /[.!?\n।。\?]/;
@@ -7175,6 +7322,20 @@ function toggleSidebar(forceClose = false) {
         sidebar.classList.remove('active');
     } else {
         sidebar.classList.toggle('active');
+    }
+
+    // NEW: Manage Floating Action Buttons visibility
+    const isNowActive = sidebar.classList.contains('active');
+    const drawFab = document.getElementById('floatingDrawFab');
+    const voiceBtn = document.getElementById('voiceBtn');
+    
+    if (isNowActive) {
+        if (drawFab) drawFab.style.display = 'none';
+        if (voiceBtn) voiceBtn.style.display = 'none';
+    } else {
+        // Only restore if we are actually in a book (currentBookId exists)
+        if (drawFab && window.currentBookId) drawFab.style.display = 'flex';
+        if (voiceBtn && window.currentBookId) voiceBtn.style.display = 'flex';
     }
 }
 
@@ -7501,10 +7662,16 @@ async function confirmDashboardUpload() {
     showUploadToast(`🚀 Adding ${customName || file.name} to library...`, "info");
 
     try {
+        // Implement a timeout to prevent infinite "Adding..." state
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 60000); // 60s timeout
+
         const res = await fetch("/upload", {
             method: "POST",
-            body: formData
+            body: formData,
+            signal: controller.signal
         });
+        clearTimeout(timeoutId);
         const data = await res.json();
         
         if (data.status === "error" || data.status === "duplicate" || res.status >= 400) {
@@ -7610,17 +7777,17 @@ function loadCollaborations() {
                 return;
             }
             container.innerHTML = data.map(c => `
-            <div class="glass-panel" style="padding: 20px; border-radius: 20px; border: 1px solid var(--glass-border); background: rgba(255,255,255,0.03); display: flex; align-items: center; justify-content: space-between;">
-                <div style="text-align: left;">
-                    <p style="margin: 0; color: var(--text-white); font-weight: 700; font-size: 1rem;">${c.book_name}</p>
-                    <p style="margin: 4px 0 0 0; color: var(--text-light); font-size: 0.85rem;">
-                        Reading with <strong style="color: var(--primary);">@${c.partner}</strong> 
-                        <span style="margin-left: 10px; font-size: 0.75rem; background: rgba(99,102,241,0.1); padding: 2px 8px; border-radius: 6px; color: var(--primary); font-weight: 800; border: 1px solid rgba(99,102,241,0.2);">
+            <div class="glass-panel" style="padding: 20px; border-radius: 20px; border: 1px solid var(--glass-border); background: rgba(255,255,255,0.03); display: flex; align-items: center; justify-content: space-between; gap: 15px;">
+                <div style="text-align: left; flex: 1; min-width: 0;">
+                    <p style="margin: 0; color: var(--text-white); font-weight: 700; font-size: 1rem; overflow-wrap: break-word; word-break: break-word; line-height: 1.4;">${c.book_name}</p>
+                    <div style="margin: 8px 0 0 0; color: var(--text-light); font-size: 0.85rem; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
+                        <span>Reading with <strong style="color: var(--primary);">@${c.partner}</strong></span>
+                        <span style="display: inline-block; white-space: nowrap; font-size: 0.75rem; background: rgba(99,102,241,0.1); padding: 3px 8px; border-radius: 6px; color: var(--primary); font-weight: 800; border: 1px solid rgba(99,102,241,0.2);">
                             ${c.role === 'Owner' ? 'You Shared' : 'Shared with You'}
                         </span>
-                    </p>
+                    </div>
                 </div>
-                <button onclick="disconnectCollaboration(${c.id})" style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.2); color: #ef4444; cursor: pointer; padding: 8px 15px; border-radius: 10px; font-size: 0.85rem; font-weight: 600; transition: all 0.2s;">
+                <button onclick="disconnectCollaboration(${c.id})" style="flex-shrink: 0; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.2); color: #ef4444; cursor: pointer; padding: 8px 15px; border-radius: 10px; font-size: 0.85rem; font-weight: 600; transition: all 0.2s;">
                     Stop
                 </button>
             </div>
@@ -7895,10 +8062,13 @@ function endDraw() {
     isDrawingNow = false;
 }
 
+let allVoiceNotes = [];
+
 function fetchVoiceNotes() {
     return fetch("/voice_notes")
         .then(res => res.json())
         .then(data => {
+            allVoiceNotes = data;
             const section = document.getElementById("standaloneVoiceNotesSection");
             const grid = document.getElementById("voiceNotesGrid");
             if (!section || !grid) return;
@@ -7911,7 +8081,7 @@ function fetchVoiceNotes() {
 
             section.style.display = "block";
             grid.innerHTML = data.map(note => `
-                <div class="glass-panel voice-note-scratchpad-card" style="padding: 12px 14px; border-radius: 14px; display: flex; flex-direction: column; border: 1px solid var(--border); background: rgba(255, 255, 255, 0.02); box-shadow: var(--shadow-sm); transition: all 0.2s; cursor: pointer;" onclick="openVoiceNoteViewer(${note.id}, \`${note.content.replace(/`/g, '\\`').replace(/'/g, "\\'")}\`)">
+                <div class="glass-panel voice-note-scratchpad-card" style="padding: 12px 14px; border-radius: 14px; display: flex; flex-direction: column; border: 1px solid var(--border); background: rgba(255, 255, 255, 0.02); box-shadow: var(--shadow-sm); transition: all 0.2s; cursor: pointer;" onclick="openVoiceNoteViewer(${note.id})">
                     <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px;">
                         <span style="font-weight: 700; color: var(--text-white); font-size: 0.92rem; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; max-width: 170px;">
                             <i class="fas fa-thumbtack" style="color: #ef4444; margin-right: 4px; font-size: 0.85rem;"></i> ${note.title || "Untitled Note"}
@@ -7924,14 +8094,17 @@ function fetchVoiceNotes() {
         .catch(err => console.error("Error loading voice notes:", err));
 }
 
-function openVoiceNoteViewer(noteId, content) {
+function openVoiceNoteViewer(noteId) {
+    const note = allVoiceNotes.find(n => n.id === noteId);
+    if (!note) return;
+
     const modal = document.getElementById("voiceNoteViewerModal");
     const idInput = document.getElementById("currentViewVoiceNoteId");
     const textarea = document.getElementById("viewVoiceNoteContentArea");
     if (!modal || !idInput || !textarea) return;
 
     idInput.value = noteId;
-    textarea.value = content;
+    textarea.value = note.content;
     modal.style.display = "flex";
 }
 
@@ -8009,39 +8182,73 @@ function editCurrentVoiceNote() {
 // --- AI CHAT LOGIC ---
 let isChatVoiceActive = false;
 let chatRecognition = null;
+let chatAbortController = null;
 
 function toggleAIChat() {
     const modal = document.getElementById('aiChatModal');
-    const content = modal.querySelector('.modal-content');
+    const chatMessages = document.getElementById('chatMessages');
+
     if (modal.style.display === 'none' || !modal.style.display) {
         modal.style.display = 'flex';
-        modal.classList.remove('chat-minimized-overlay');
-        content.classList.remove('chat-minimized-content');
+        // If chat is empty, add welcome message
+        if (chatMessages && chatMessages.innerHTML.trim() === '') {
+            appendChatMessage('ai', "Hello! I'm your AI Reading Assistant. How can I help you today?");
+        }
         document.getElementById('chatInput').focus();
+
+        // HIDE Floating Buttons when chat opens
+        const drawFab = document.getElementById('floatingDrawFab');
+        const voiceBtn = document.getElementById('voiceBtn');
+        if (drawFab) drawFab.style.display = 'none';
+        if (voiceBtn) voiceBtn.style.display = 'none';
     } else {
+        // CLOSE via 'X' button - Hide and Reset
         modal.style.display = 'none';
-        modal.classList.remove('chat-minimized-overlay');
-        content.classList.remove('chat-minimized-content');
+        
+        // 🔇 Stop AI from talking immediately
+        if (window.speechSynthesis) window.speechSynthesis.cancel();
+        
         if (isChatVoiceActive) stopChatVoice();
+        if (chatAbortController) {
+            chatAbortController.abort();
+            chatAbortController = null;
+        }
+        // Clear history for a fresh start
+        if (chatMessages) chatMessages.innerHTML = '';
+        showUploadToast("Chat session reset.", "info");
+
+        // RESTORE Floating Buttons when chat closes
+        const drawFab = document.getElementById('floatingDrawFab');
+        const voiceBtn = document.getElementById('voiceBtn');
+        if (drawFab && window.currentBookId) drawFab.style.display = 'flex';
+        if (voiceBtn && window.currentBookId) voiceBtn.style.display = 'flex';
     }
 }
 
 function minimizeAIChat() {
     const modal = document.getElementById('aiChatModal');
-    const content = modal.querySelector('.modal-content');
-    modal.classList.add('chat-minimized-overlay');
-    content.classList.add('chat-minimized-content');
-    if (isChatVoiceActive) stopChatVoice();
+    // Minimize simply hides the window but DOES NOT clear history
+    if (modal) {
+        modal.style.display = 'none';
+        
+        // 🔇 Stop AI from talking immediately
+        if (window.speechSynthesis) window.speechSynthesis.cancel();
+        
+        if (isChatVoiceActive) stopChatVoice();
+        // We do NOT clear chatMessages here, so it's "saved" for next time
+        showUploadToast("Chat minimized (history saved).", "info");
+
+        // RESTORE Floating Buttons when chat minimizes
+        const drawFab = document.getElementById('floatingDrawFab');
+        const voiceBtn = document.getElementById('voiceBtn');
+        if (drawFab && window.currentBookId) drawFab.style.display = 'flex';
+        if (voiceBtn && window.currentBookId) voiceBtn.style.display = 'flex';
+    }
 }
 
 function restoreAIChat() {
-    const modal = document.getElementById('aiChatModal');
-    const content = modal.querySelector('.modal-content');
-    if (content.classList.contains('chat-minimized-content')) {
-        modal.classList.remove('chat-minimized-overlay');
-        content.classList.remove('chat-minimized-content');
-        document.getElementById('chatInput').focus();
-    }
+    // This function is now redundant as toggleAIChat handles showing
+    toggleAIChat();
 }
 
 async function sendChatMessage(overrideText = null) {
@@ -8051,6 +8258,10 @@ async function sendChatMessage(overrideText = null) {
 
     if (!overrideText) input.value = '';
     appendChatMessage('user', msg);
+
+    // Cancel any previous pending request
+    if (chatAbortController) chatAbortController.abort();
+    chatAbortController = new AbortController();
 
     // Show loading
     const loadingId = 'ai-loading-' + Date.now();
@@ -8066,29 +8277,57 @@ async function sendChatMessage(overrideText = null) {
         const response = await fetch('/api/ai_chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            signal: chatAbortController.signal,
             body: JSON.stringify({ 
                 message: msg,
                 book_id: selectedBookId || window.currentBookId || null,
-                context: selectedBookName || window.currentBookTitle || ""
+                context: selectedBookName || window.currentBookTitle || "",
+                previous_response: window._lastAIResponse || "",
+                previous_user_message: window._lastUserMessage || "",
+                chat_lang: window._chatLanguage || "en"
             })
         });
+        window._lastUserMessage = msg; // Store current for next time
         const data = await response.json();
+        chatAbortController = null;
         
         // Remove loading
         const loadingEl = document.getElementById(loadingId);
         if (loadingEl) loadingEl.parentElement.remove();
 
         if (data.status === 'success') {
+            if (data.new_chat_lang) {
+                window._chatLanguage = data.new_chat_lang;
+                showUploadToast(`🌐 Chat language changed to: ${data.lang_name || data.new_chat_lang}`, "success");
+            }
+            window._lastAIResponse = data.response;
             appendChatMessage('ai', data.response);
             speakAIResponse(data.response);
         } else {
             appendChatMessage('ai', 'Sorry, I encountered an error: ' + (data.message || 'Unknown error'));
         }
     } catch (e) {
-        console.error("Chat error:", e);
-        const loadingEl = document.getElementById(loadingId);
-        if (loadingEl) loadingEl.parentElement.remove();
-        appendChatMessage('ai', 'Sorry, I could not connect to the AI service.');
+        if (e.name === 'AbortError') {
+            console.log("Chat request aborted.");
+            // Loading bubble is already handled in stopAIChatThinking if needed, 
+            // but here we just ensure it's gone.
+            const loadingEl = document.getElementById(loadingId);
+            if (loadingEl) loadingEl.parentElement.remove();
+        } else {
+            console.error("Chat error:", e);
+            const loadingEl = document.getElementById(loadingId);
+            if (loadingEl) loadingEl.parentElement.remove();
+            appendChatMessage('ai', 'Sorry, I could not connect to the AI service.');
+        }
+        chatAbortController = null;
+    }
+}
+
+function stopAIChatThinking() {
+    if (chatAbortController) {
+        chatAbortController.abort();
+        chatAbortController = null;
+        showUploadToast("AI thinking cancelled.", "info");
     }
 }
 
@@ -8132,10 +8371,7 @@ function appendChatMessage(sender, text, id = null) {
         actions.style.marginTop = '6px';
         actions.style.marginLeft = '4px';
         
-        // Escape backticks and other characters for the onclick handler
-        const safeText = text.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$/g, '\\$');
-        
-        // Professional SVG Icons (Larger and cleaner)
+        // Professional SVG Icons
         const volumeIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4V5z"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>`;
         const stopIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>`;
 
@@ -8146,20 +8382,16 @@ function appendChatMessage(sender, text, id = null) {
                 ${volumeIcon}
             </button>
             <button onclick="window.speechSynthesis.cancel()" 
-                    title="Stop"
+                    title="Stop Voice"
                     style="background:rgba(239, 68, 68, 0.05); border:none; border-radius:8px; cursor:pointer; color:#ef4444; padding: 8px; display:inline-flex; align-items:center; justify-content:center; transition:0.2s; opacity:0.8;"
                     onmouseover="this.style.background='rgba(239, 68, 68, 0.12)'; this.style.opacity='1'" onmouseout="this.style.background='rgba(239, 68, 68, 0.05)'; this.style.opacity='0.8'">
                 ${stopIcon}
             </button>
         `;
 
-        // Safe Event Listener to avoid quote-breaking errors
         const hearBtn = actions.querySelector('.chat-hear-btn');
         hearBtn.onclick = () => speakAIResponse(text);
-        hearBtn.onmouseover = () => { hearBtn.style.background='rgba(181, 130, 101, 0.15)'; hearBtn.style.opacity='1'; };
-        hearBtn.onmouseout = () => { hearBtn.style.background='rgba(181, 130, 101, 0.08)'; hearBtn.style.opacity='0.8'; };
         
-        msgDiv.appendChild(actions);
         msgDiv.appendChild(actions);
     }
 
@@ -8186,41 +8418,80 @@ function startChatVoice() {
         chatRecognition = new SpeechRecognition();
         chatRecognition.continuous = true;
         chatRecognition.interimResults = true;
-        chatRecognition.lang = 'en-US';
-
-        chatRecognition.onresult = (event) => {
-            let final_transcript = '';
-            let interim_transcript = '';
-
-            // Iterate from 0 to get the entire current session's transcript
-            for (let i = 0; i < event.results.length; ++i) {
-                if (event.results[i].isFinal) {
-                    final_transcript += event.results[i][0].transcript;
-                } else {
-                    interim_transcript += event.results[i][0].transcript;
-                }
-            }
-
-            const currentInput = document.getElementById('chatInput');
-            if (currentInput) {
-                currentInput.value = final_transcript + interim_transcript;
-            }
-        };
-
-        chatRecognition.onend = () => {
-            stopChatVoice();
-        };
-
-        chatRecognition.onerror = (event) => {
-            console.error("Speech recognition error", event.error);
-            stopChatVoice();
-        };
     }
 
-    isChatVoiceActive = true;
-    document.getElementById('chatMicBtn').classList.add('active');
-    document.getElementById('chatInput').placeholder = "Listening...";
-    chatRecognition.start();
+    // DYNAMIC LANGUAGE SYNC: Update recognition language to match current chat setting
+    const currentLang = window._chatLanguage || 'en';
+    const langCodes = {
+        'en': 'en-US', 'ta': 'ta-IN', 'hi': 'hi-IN', 'te': 'te-IN', 
+        'ml': 'ml-IN', 'bn': 'bn-IN', 'mr': 'mr-IN'
+    };
+    chatRecognition.lang = langCodes[currentLang] || 'en-US';
+
+    chatRecognition.onresult = (event) => {
+        let final_transcript = '';
+        let interim_transcript = '';
+
+        // REBUILD TRANSCRIPT FROM ZERO: This prevents "double-typing" by getting the clean state of the whole message
+        // We use the entire results array to ensure we don't miss anything or repeat segments
+        for (let i = 0; i < event.results.length; ++i) {
+            const transcriptSegment = event.results[i][0].transcript;
+            if (event.results[i].isFinal) {
+                final_transcript += transcriptSegment;
+            } else {
+                interim_transcript += transcriptSegment;
+            }
+        }
+
+        const currentInput = document.getElementById('chatInput');
+        if (currentInput) {
+            const combined = (final_transcript + interim_transcript).trim();
+            // Only update if there's actually a change to avoid cursor jumping/flickering
+            if (combined && currentInput.value !== combined) {
+                currentInput.value = combined;
+                currentInput.dispatchEvent(new Event('input'));
+            }
+        }
+    };
+
+    chatRecognition.onstart = () => {
+        isChatVoiceActive = true;
+        const micBtn = document.getElementById('chatMicBtn');
+        if (micBtn) {
+            micBtn.classList.add('mic-active');
+        }
+        const input = document.getElementById('chatInput');
+        if (input) {
+            input.placeholder = "Listening...";
+            input.focus(); // Ensure focus for better feedback
+        }
+        console.log(`Speech Recognition Started: ${chatRecognition.lang}`);
+    };
+
+    chatRecognition.onend = () => {
+        isChatVoiceActive = false;
+        const micBtn = document.getElementById('chatMicBtn');
+        if (micBtn) {
+            micBtn.classList.remove('mic-active');
+        }
+        const input = document.getElementById('chatInput');
+        if (input) {
+            input.placeholder = "Type a message...";
+        }
+    };
+
+    chatRecognition.onerror = (event) => {
+        console.error("Speech recognition error:", event.error);
+        if (event.error !== 'no-speech') {
+            stopChatVoice();
+        }
+    };
+
+    try {
+        chatRecognition.start();
+    } catch (e) {
+        console.warn("Recognition already started or error:", e);
+    }
 }
 
 function stopChatVoice() {

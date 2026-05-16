@@ -687,6 +687,41 @@ tr.active-book-row .book-name {
     padding: 10px;
 }
 
+/* AI Chat Book Selector Refinement */
+.chat-book-selector {
+    flex: 1;
+    min-width: 0;
+    max-width: 200px;
+    background: rgba(255, 255, 255, 0.06);
+    border: none;
+    color: var(--text-white);
+    padding: 8px 10px;
+    border-radius: 12px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    outline: none;
+    cursor: pointer;
+    text-overflow: ellipsis;
+    box-sizing: border-box;
+    color-scheme: dark;
+}
+
+.chat-book-selector option {
+    background-color: #3e2723;
+    color: #ffffff;
+}
+
+[data-theme="light"] .chat-book-selector {
+    background: rgba(0, 0, 0, 0.05);
+    color: var(--text-main);
+    color-scheme: light;
+}
+
+[data-theme="light"] .chat-book-selector option {
+    background-color: #ffffff;
+    color: var(--text-main);
+}
+
 /* --- Study Hub Component Styles --- */
 .study-hub-container {
     position: relative;
@@ -1280,8 +1315,8 @@ div[id^="page"] p:not(.highlight):not(.reading-mark):not(.find-highlight) {
     text-decoration-thickness: 3px !important;
     text-underline-offset: 4px !important;
     text-decoration-color: #f59e0b !important;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.3);
     box-shadow: 0 0 15px rgba(245, 158, 11, 0.8), 5px 0 0 #f59e0b, -5px 0 0 #f59e0b;
-    /* Extra Width */
     border-radius: 4px;
 }
 
@@ -3717,6 +3752,46 @@ body {
     gap: 4px;
 }
 
+/* Smart Floating Indicators (Dashboard Cards) */
+.smart-indicator {
+    padding: 3px 10px;
+    border-radius: 20px; /* Pill shape */
+    font-size: 0.65rem;
+    font-weight: 800;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.25);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    text-transform: uppercase;
+    color: white;
+    width: fit-content;
+    white-space: nowrap;
+}
+
+.share-to-indicator {
+    background: rgba(245, 158, 11, 0.9);
+}
+
+.share-by-indicator {
+    background: rgba(99, 102, 241, 0.9);
+}
+
+.bookmark-count-indicator {
+    background: rgba(255, 159, 67, 0.85);
+    font-size: 0.7rem;
+}
+
+.note-count-indicator {
+    background: rgba(99, 102, 241, 0.85);
+    font-size: 0.7rem;
+}
+
+.smart-indicator i {
+    font-size: 0.65rem;
+}
+
 .card-description::-webkit-scrollbar {
     width: 4px;
 }
@@ -4090,8 +4165,8 @@ body {
         left: 0;
         top: 0;
         bottom: 0;
-        width: 340px;
-        max-width: 90vw;
+        width: 380px;
+        max-width: 92vw;
         transform: translateX(-100%);
         transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         box-shadow: 20px 0 50px rgba(0, 0, 0, 0.4);
@@ -4310,13 +4385,51 @@ body {
     }
 
     .find-box {
-        top: 60px !important;
-        right: 10px !important;
-        left: 10px !important;
-        width: calc(100% - 20px) !important;
-        padding: 12px !important;
-        gap: 10px !important;
-        z-index: 10005 !important;
+        top: 65px !important;
+        right: 15px !important;
+        left: 15px !important;
+        width: auto !important;
+        max-width: calc(100% - 30px) !important;
+        padding: 5px 8px !important;
+        gap: 6px !important;
+        border-radius: 10px !important;
+        z-index: 2147483647 !important;
+        display: flex; /* REMOVED !important so it can be hidden */
+        align-items: center !important;
+        box-sizing: border-box !important;
+        overflow: hidden !important;
+    }
+
+    .find-box input {
+        padding: 4px 8px !important;
+        font-size: 0.8rem !important;
+        flex: 1 !important;
+        height: 30px !important;
+        min-width: 0 !important; /* Allow shrinking */
+    }
+
+    .search-count {
+        margin: 0 4px !important;
+        font-size: 0.7rem !important;
+        min-width: auto !important;
+        white-space: nowrap !important;
+        flex-shrink: 0 !important;
+    }
+
+    .find-box button {
+        width: 30px !important;
+        height: 30px !important;
+        padding: 0 !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        border-radius: 6px !important;
+        flex-shrink: 0 !important;
+        background: rgba(239, 68, 68, 0.15) !important;
+        color: #ef4444 !important;
+        border: 1px solid rgba(239, 68, 68, 0.3) !important;
+        cursor: pointer !important;
+        pointer-events: auto !important;
     }
 
     /* Study Hub: Dropdown Style (Matching Laptop View) */
@@ -4409,7 +4522,9 @@ body {
         .dashboard-overlay {
             z-index: 999999 !important;
             padding: 0 !important;
-            overflow-y: auto !important; /* Allow scrolling the whole overlay on mobile */
+            display: block !important; /* Block layout for stable scrolling & centering */
+            overflow-y: auto !important;
+            overflow-x: hidden !important;
             -webkit-overflow-scrolling: touch;
         }
 
@@ -4420,25 +4535,28 @@ body {
 
         .dashboard-container {
             width: 100% !important;
+            max-width: 100vw !important;
             min-height: 100vh !important;
-            height: auto !important; /* Let it grow with content on mobile */
+            height: auto !important;
             border-radius: 0 !important;
-            padding: 0 15px 0 15px !important;
+            padding: 0 18px !important; /* Increased for better visual balance */
             gap: 15px !important;
             background: var(--bg-app) !important;
             display: flex !important;
             flex-direction: column !important;
-            overflow: visible !important; /* Container should not lock scroll */
+            overflow: visible !important;
+            box-sizing: border-box !important;
+            margin: 0 !important;
         }
 
         .dashboard-scroll-area {
             flex: 1 !important;
             overflow-y: auto !important;
             overflow-x: hidden !important;
-            padding: 15px !important;
+            padding: 8px !important; /* RECOVERED SPACE */
             margin-top: 5px !important;
-            background: rgba(0, 0, 0, 0.05); /* Inset 'room' feel */
-            border-radius: 32px;
+            background: rgba(0, 0, 0, 0.05);
+            border-radius: 24px;
             box-shadow: inset 0 2px 15px rgba(0, 0, 0, 0.1);
             position: relative;
         }
@@ -4457,10 +4575,12 @@ body {
             flex-direction: column !important;
             align-items: center !important;
             gap: 15px !important;
-            padding: 45px 10px 20px 10px !important;
+            padding: 45px 0 20px 0 !important; /* Parent padding handles sides */
             text-align: center !important;
             position: relative !important;
             border-bottom: 1px solid var(--glass-border) !important;
+            width: 100% !important;
+            box-sizing: border-box !important;
         }
 
         .btn-close-dashboard-action {
@@ -4501,19 +4621,23 @@ body {
         .dashboard-sidebar {
             width: 100% !important;
             max-height: none !important;
-            padding-right: 0 !important;
+            padding: 0 !important; /* Remove all internal padding, rely on container */
             margin-bottom: 10px !important;
             display: flex !important;
             flex-direction: column !important;
             gap: 12px !important;
         }
 
+        .card_box {
+            overflow: hidden !important; /* Prevent ribbon from pushing layout width */
+        }
+
         .dashboard-grid {
-            padding: 0 0 120px 0 !important;
-            grid-template-columns: 1fr !important; /* Single column on mobile for full visibility */
-            gap: 20px !important;
-            max-width: 500px !important; /* Keep it centered and tidy */
-            margin: 0 auto !important;
+            padding: 0 10px 120px 10px !important;
+            grid-template-columns: 1fr !important;
+            gap: 15px !important;
+            margin: 0 !important;
+            max-width: none !important;
         }
 
         /* Chart adjustments for mobile */
@@ -4545,25 +4669,118 @@ body {
         }
 
         .book-card {
-            padding: 15px !important;
+            padding: 12px !important;
             min-height: auto !important;
-            border-radius: 28px !important;
+            border-radius: 20px !important;
             display: flex !important;
             flex-direction: column !important;
-            gap: 15px !important;
+            gap: 10px !important;
+            width: 100% !important;
+            box-sizing: border-box !important;
         }
 
-        .card-thumbnail {
-            height: 160px !important;
+        .card-meta-row {
+            flex-direction: column !important; /* Stack Date and Pages vertically on mobile */
+            align-items: flex-start !important;
+            gap: 4px !important;
+        }
+
+        .card-footer-unified {
+            display: flex !important;
+            align-items: center !important;
+            justify-content: space-between !important;
+            gap: 8px !important;
+            margin-top: 15px !important;
+            width: 100% !important;
         }
 
         /* Compact Card Buttons for Mobile */
         .btn-read-more {
-            padding: 5px 8px !important;
-            gap: 3px !important;
-            font-size: 0.65rem !important;
-            min-height: 34px !important;
-            letter-spacing: 0 !important;
+            flex: 1 !important;
+            height: 36px !important;
+            padding: 0 10px !important;
+            font-size: 0.7rem !important;
+            border-radius: 10px !important;
+        }
+
+        .card-actions-row-inner {
+            display: flex !important;
+            gap: 6px !important;
+            flex-shrink: 0 !important;
+        }
+
+        .card-actions-row-inner button {
+            width: 36px !important;
+            height: 36px !important;
+            border-radius: 10px !important;
+            flex-shrink: 0 !important;
+        }
+
+        /* READER SIDEBAR SPECIFIC FIXES */
+        .book-metadata {
+            flex-direction: column !important;
+            gap: 4px !important;
+            align-items: flex-start !important;
+        }
+
+        .book-footer-actions {
+            flex-wrap: nowrap !important;
+            gap: 5px !important;
+            justify-content: space-between !important;
+            width: 100% !important;
+        }
+
+        .book-footer-actions .btn-open {
+            flex: 1 !important;
+            min-width: 80px !important;
+            height: 34px !important;
+            font-size: 0.75rem !important;
+            padding: 0 5px !important;
+        }
+
+        .book-footer-actions .btn-download,
+        .book-footer-actions .btn-delete {
+            width: 34px !important;
+            height: 34px !important;
+            flex-shrink: 0 !important;
+        }
+
+        .book-name {
+            font-size: 0.85rem !important;
+            white-space: normal !important;
+            line-height: 1.3 !important;
+        }
+
+        .sidebar td {
+            padding: 10px 5px !important; /* RECOVERED SPACE */
+        }
+
+        .book-entry {
+            padding: 12px 8px !important;
+            width: 100% !important;
+            box-sizing: border-box !important;
+        }
+
+        /* AI CHAT MOBILE FIXES */
+        #aiChatModal .modal-content {
+            width: 96% !important;
+            height: 94vh !important;
+            max-height: 94vh !important;
+            border-radius: 20px !important;
+        }
+
+        #chatInputRow {
+            padding: 10px !important;
+        }
+
+        #chatInput {
+            padding: 10px 15px !important;
+            font-size: 0.9rem !important;
+        }
+
+        #chatMicBtn, #chatInputRow button:last-child {
+            width: 40px !important;
+            height: 40px !important;
         }
 
         .btn-read-more svg {
@@ -5124,7 +5341,6 @@ body {
 }
 
 :root:not([data-theme="light"]) img[src*="books.gif"],
-:root:not([data-theme="light"]) img[src*="microphone.gif"],
 :root:not([data-theme="light"]) img[src*="fire.gif"] {
     mix-blend-mode: normal !important;
     background-color: rgba(255, 255, 255, 0.92) !important;
@@ -5133,7 +5349,6 @@ body {
     box-shadow: 0 4px 12px rgba(0,0,0,0.25);
 }
 
-:root:not([data-theme="light"]) img[src*="pencil.png"],
 :root:not([data-theme="light"]) img[src*="voice-note.png"] {
     mix-blend-mode: normal !important;
     background-color: rgba(255, 255, 255, 0.92) !important;
@@ -5287,44 +5502,74 @@ body {
     box-shadow: inset 0 2px 10px rgba(176, 125, 98, 0.1);
 }
 
-/* AI Chat Minimization */
-.modal-overlay.chat-minimized-overlay {
-    background: transparent !important;
-    backdrop-filter: none !important;
-    pointer-events: none;
+/* Permanent AI Toggle in Reader - Relocated to Bottom Left */
+.reader-ai-toggle {
+    position: absolute;
+    bottom: 25px;
+    left: 25px;
+    width: 52px;
+    height: 52px;
+    border-radius: 50%;
+    background: var(--bg-panel);
+    border: 1px solid var(--glass-border);
+    color: var(--primary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 60;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+    transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
 }
 
+.reader-ai-toggle:hover {
+    transform: scale(1.15) rotate(-5deg);
+    background: var(--primary);
+    color: white;
+    border-color: var(--primary);
+    box-shadow: 0 15px 30px rgba(99, 102, 241, 0.4);
+}
+
+/* AI Chat Minimization - Simplified to hide-only */
+.modal-overlay.chat-minimized-overlay,
 .modal-content.chat-minimized-content {
-    pointer-events: auto;
-    position: fixed !important;
-    bottom: 25px !important;
-    right: 25px !important;
-    width: 200px !important;
-    height: 54px !important;
-    max-width: 90vw !important;
-    border-radius: 27px !important;
-    box-shadow: 0 10px 40px rgba(0,0,0,0.3) !important;
-    transition: all 0.4s cubic-bezier(0.19, 1, 0.22, 1) !important;
-    overflow: hidden !important;
-    border: 2px solid var(--primary) !important;
-}
-
-.modal-content.chat-minimized-content #chatMessages,
-.modal-content.chat-minimized-content #chatInputRow,
-.modal-content.chat-minimized-content #chatBookFocus,
-.modal-content.chat-minimized-content [title="Minimize"] {
     display: none !important;
 }
 
-.modal-content.chat-minimized-content #chatHeader {
-    border-bottom: none !important;
-    height: 100% !important;
-    padding: 0 18px !important;
-    justify-content: center !important;
-    background: var(--bg-header) !important;
+
+/* --- Microphone Active State (Neon Shimmer) --- */
+.mic-active {
+    background: rgba(245, 158, 11, 0.1) !important;
+    color: var(--primary) !important;
+    position: relative;
+    box-shadow: 0 0 20px rgba(245, 158, 11, 0.3), inset 0 0 10px rgba(245, 158, 11, 0.1);
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    border-color: var(--primary) !important;
 }
 
-.modal-content.chat-minimized-content #chatHeader h2 span {
-    font-size: 0.95rem !important;
+.mic-active::after {
+    content: '';
+    position: absolute;
+    top: -3px;
+    left: -3px;
+    right: -3px;
+    bottom: -3px;
+    border-radius: inherit;
+    background: linear-gradient(90deg, 
+        transparent, 
+        rgba(245, 158, 11, 0.4), 
+        rgba(245, 158, 11, 0.8), 
+        rgba(245, 158, 11, 0.4), 
+        transparent
+    );
+    background-size: 200% 100%;
+    z-index: -1;
+    animation: mic-shimmer-new 2s linear infinite;
+    opacity: 1;
+}
+
+@keyframes mic-shimmer-new {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
 }
 
