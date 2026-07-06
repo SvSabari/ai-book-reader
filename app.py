@@ -211,6 +211,12 @@ def get_chat_pipeline():
     if _CHAT_PIPELINE is None:
         try:
             Logger.info("Chat AI", "Initializing 'Free Forever' engine (SmolLM2)...")
+            try:
+                import torch # type: ignore
+                # Set thread count dynamically: 4 threads is optimal on CPU (avoids Efficient-core bottlenecks)
+                torch.set_num_threads(4)
+            except Exception:
+                pass
             # SmolLM2-135M-Instruct is much better at answering questions than distilgpt2
             _CHAT_PIPELINE = pipeline("text-generation", model="HuggingFaceTB/SmolLM2-135M-Instruct", device=-1)
             Logger.success("Chat AI", "Engine Ready.")
@@ -218,6 +224,64 @@ def get_chat_pipeline():
             Logger.error("Chat AI", f"Engine failed: {e}")
             _CHAT_PIPELINE = "FAILED"
     return _CHAT_PIPELINE if _CHAT_PIPELINE != "FAILED" else None
+
+def clean_words(text):
+    words = re.findall(r'\b\w+\b', text.lower())
+    stopwords = {'a', 'an', 'the', 'is', 'are', 'was', 'were', 'do', 'does', 'did', 'in', 'on', 'at', 'to', 'for', 'of', 'and', 'or', 'it', 'this', 'that', 'my', 'your'}
+    return [w for w in words if w not in stopwords]
+
+def find_related_learned_response(query_text, learned_data):
+    query_clean = query_text.lower().strip("?.! ")
+    if query_clean in learned_data:
+        return learned_data[query_clean]
+        
+    query_words = clean_words(query_text)
+    if not query_words:
+        return None
+        
+    best_match = None
+    best_score = 0.0
+    
+    for saved_query, response in learned_data.items():
+        saved_words = clean_words(saved_query)
+        if not saved_words:
+            continue
+        q_set = set(query_words)
+        s_set = set(saved_words)
+        intersection = q_set.intersection(s_set)
+        union = q_set.union(s_set)
+        score = len(intersection) / len(union) if union else 0
+        
+        if q_set.issubset(s_set) or s_set.issubset(q_set):
+            subset_score = len(intersection) / max(len(q_set), len(s_set))
+            score = max(score, subset_score * 0.95)
+            
+        if score > best_score:
+            best_score = score
+            best_match = response
+            
+    if best_score >= 0.70:
+        return best_match
+    return None
+
+def save_learned_response(query_text, response_text):
+    try:
+        # Save learned responses to the correct file path
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        learned_path = os.path.join(base_dir, 'learned_responses.json')
+        learned_data = {}
+        if os.path.exists(learned_path):
+            with open(learned_path, 'r', encoding='utf-8') as f:
+                learned_data = json.load(f)
+        
+        query_clean = query_text.lower().strip("?.! ")
+        # Do not save if it's an error message or empty
+        if len(query_clean) > 2 and len(response_text) > 5 and "error" not in response_text.lower():
+            learned_data[query_clean] = response_text.strip()
+            with open(learned_path, 'w', encoding='utf-8') as f:
+                json.dump(learned_data, f, ensure_ascii=False, indent=2)
+    except Exception as se:
+        print(f"Failed to save learned response: {se}")
 
 def get_book_sentences(book_id):
     """Retrieve or generate tokenized sentences for a book to avoid repeated parsing."""
@@ -4624,13 +4688,86 @@ def ai_chat():
         previous_response = data.get("previous_response", "")
         prev_user_msg = data.get("previous_user_message", "").lower().strip()
         chat_lang = data.get("chat_lang", "en")
+        original_chat_lang = chat_lang
+
+        supported_langs = {
+            "tamil": "ta", "hindi": "hi", "bengali": "bn", "telugu": "te", "marathi": "mr",
+            "gujarati": "gu", "kannada": "kn", "malayalam": "ml", "punjabi": "pa", "english": "en",
+            "french": "fr", "spanish": "es", "german": "de"
+        }
         
+        # 0. DYNAMIC INPUT LANGUAGE DETECTION (Detect if user types/speaks in another language script)
+        detected_input_lang = None
+        if re.search(r'[\u0B80-\u0BFF]', user_message):
+            detected_input_lang = 'ta'
+        elif re.search(r'[\u0900-\u097F]', user_message):
+            detected_input_lang = 'hi'
+        elif re.search(r'[\u0C00-\u0C7F]', user_message):
+            detected_input_lang = 'te'
+        elif re.search(r'[\u0C80-\u0CFF]', user_message):
+            detected_input_lang = 'kn'
+        elif re.search(r'[\u0D00-\u0D7F]', user_message):
+            detected_input_lang = 'ml'
+        elif re.search(r'[\u0980-\u09FF]', user_message):
+            detected_input_lang = 'bn'
+        elif re.search(r'[\u0A00-\u0A7F]', user_message):
+            detected_input_lang = 'pa'
+        elif re.search(r'[\u0A80-\u0AFF]', user_message):
+            detected_input_lang = 'gu'
+            
+        if detected_input_lang and detected_input_lang != chat_lang:
+            chat_lang = detected_input_lang
+
+        # 0b. CENTRALIZED RESPONSE HELPER (Ensures dynamic translation & language state syncing)
+        def return_response(resp_text):
+            nonlocal chat_lang
+            if chat_lang and chat_lang != "en":
+                # Only translate if target characters aren't already present in response text
+                target_ranges = {
+                    'ta': r'[\u0B80-\u0BFF]',
+                    'hi': r'[\u0900-\u097F]',
+                    'te': r'[\u0C00-\u0C7F]',
+                    'kn': r'[\u0C80-\u0CFF]',
+                    'ml': r'[\u0D00-\u0D7F]',
+                    'bn': r'[\u0980-\u09FF]',
+                    'pa': r'[\u0A00-\u0A7F]',
+                    'gu': r'[\u0A80-\u0AFF]'
+                }
+                has_chars = False
+                if chat_lang in target_ranges:
+                    has_chars = bool(re.search(target_ranges[chat_lang], resp_text))
+                if not has_chars:
+                    try:
+                        translated = GoogleTranslator(source='auto', target=chat_lang).translate(resp_text)
+                        if translated:
+                            resp_text = translated
+                    except:
+                        pass
+            
+            payload = {"status": "success", "response": resp_text, "chat_lang": chat_lang}
+            if chat_lang != original_chat_lang:
+                payload["new_chat_lang"] = chat_lang
+                lang_names = {v: k.capitalize() for k, v in supported_langs.items()}
+                payload["lang_name"] = lang_names.get(chat_lang, chat_lang)
+            return jsonify(payload)
+
         if not user_message:
             return jsonify({"status": "error", "message": "No message provided"}), 400
 
         # 1. Typo Correction & Normalization
         user_message_orig = user_message
-        user_message = user_message.lower().strip()
+        
+        # Translate input message to English for processing if it is in another language
+        user_message_processed = user_message
+        if detected_input_lang and detected_input_lang != 'en':
+            try:
+                eng_trans = GoogleTranslator(source=detected_input_lang, target='en').translate(user_message)
+                if eng_trans:
+                    user_message_processed = eng_trans
+            except:
+                pass
+
+        user_message = user_message_processed.lower().strip()
         # Fix common typos instantly
         typo_map = {
             "waht": "what", "whaat": "what", "wat": "what", "wht": "what",
@@ -4645,24 +4782,40 @@ def ai_chat():
         msg_clean = user_message.strip("?.! ")
 
         # --- 1.1 LANGUAGE SWITCHING LOGIC ---
-        supported_langs = {
-            "tamil": "ta", "hindi": "hi", "bengali": "bn", "telugu": "te", "marathi": "mr",
-            "gujarati": "gu", "kannada": "kn", "malayalam": "ml", "punjabi": "pa", "english": "en",
-            "french": "fr", "spanish": "es", "german": "de"
-        }
         
+        # 1.1a RESET / STOP LOGIC
+        if msg_clean in ["stop", "exit", "stop talking", "reset language", "speak in english", "english please"]:
+            if chat_lang != "en":
+                return jsonify({
+                    "status": "success", 
+                    "response": "Sure, I will speak in English now. How can I help you?", 
+                    "new_chat_lang": "en", 
+                    "lang_name": "English"
+                })
+
         # Check if user wants to switch language
         is_explaining = any(word in msg_clean for word in ["what is", "explain", "about", "meaning of", "define"])
         new_lang = None
         lang_name = None
-        for name, code in supported_langs.items():
-            if name in msg_clean:
-                # If they say "Tamil" and NOT "What is Tamil"
-                if not is_explaining:
+        
+        # Priority check for explicit phrases
+        if "talk in" in user_message or "reply in" in user_message or "answer in" in user_message or "speak in" in user_message:
+            for name, code in supported_langs.items():
+                if name in user_message:
                     new_lang = code
                     lang_name = name.capitalize()
                     chat_lang = code
                     break
+        
+        if not new_lang:
+            for name, code in supported_langs.items():
+                if name in msg_clean:
+                    # If they say "Tamil" and NOT "What is Tamil"
+                    if not is_explaining:
+                        new_lang = code
+                        lang_name = name.capitalize()
+                        chat_lang = code
+                        break
         
         # If we switched, give a confirmation in that language
         if new_lang:
@@ -4701,34 +4854,151 @@ def ai_chat():
             # Default: Repeat previous intent with variation
             user_message = prev_user_msg 
             msg_clean = user_message.strip("?.! ")
+
+        # --- FAST-PATH DICTIONARY & TRANSLATION LOGIC ---
+        try:
+            msg_lower = user_message.lower().strip("?.! ")
+            target_lang = None
+            target_code = None
+            for lang, code in supported_langs.items():
+                if re.search(r'\b' + lang + r'\b', msg_lower):
+                    target_lang = lang
+                    target_code = code
+                    break
+            
+            if target_lang:
+                extracted_word = None
+                
+                # Pattern A: "meaning of <word> in <lang>" / "meaning for <word> in <lang>"
+                m = re.search(r'meaning (?:of|for)\s+(.+?)\s+in\s+' + target_lang, msg_lower)
+                if m:
+                    extracted_word = m.group(1).strip()
+                    
+                # Pattern B: "<lang> meaning of <word>" / "<lang> meaning for <word>"
+                if not extracted_word:
+                    m = re.search(r'\b' + target_lang + r'\s+meaning\s+(?:of|for)\s+(.+)', msg_lower)
+                    if m:
+                        extracted_word = m.group(1).strip()
+
+                # Pattern C: "<word> meaning in <lang>"
+                if not extracted_word:
+                    m = re.search(r'(.+?)\s+meaning\s+in\s+' + target_lang, msg_lower)
+                    if m:
+                        extracted_word = m.group(1).strip()
+
+                # Pattern D: "translate <word> to/into <lang>"
+                if not extracted_word:
+                    m = re.search(r'translate\s+(.+?)\s+to\s+' + target_lang, msg_lower)
+                    if not m:
+                        m = re.search(r'translate\s+(.+?)\s+into\s+' + target_lang, msg_lower)
+                    if m:
+                        extracted_word = m.group(1).strip()
+
+                # Pattern E: "how to say <word> in <lang>"
+                if not extracted_word:
+                    m = re.search(r'how\s+to\s+say\s+(.+?)\s+in\s+' + target_lang, msg_lower)
+                    if m:
+                        extracted_word = m.group(1).strip()
+
+                # Clean up prefixes
+                if extracted_word:
+                    extracted_word = re.sub(r'^(what is the|what is|define|tell me the|give me the|meaning of|meaning for)\s+', '', extracted_word).strip()
+                    extracted_word = re.sub(r'^(a|an|the)\s+', '', extracted_word).strip()
+
+                if extracted_word and len(extracted_word.split()) <= 4:  # dictionary lookup is for short phrases/words
+                    # 1. Translate the word itself
+                    translated_word = GoogleTranslator(source='auto', target=target_code).translate(extracted_word)
+                    
+                    # 2. Get definition from public API
+                    definition = None
+                    try:
+                        dict_url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{extracted_word}"
+                        api_res = requests.get(dict_url, timeout=2.0)
+                        if api_res.status_code == 200:
+                            dict_data = api_res.json()
+                            definition = dict_data[0]['meanings'][0]['definitions'][0]['definition']
+                    except: pass
+                    
+                    # 3. Format definition response
+                    if definition:
+                        try:
+                            translated_definition = GoogleTranslator(source='en', target=target_code).translate(definition)
+                            response_text = f"In {target_lang.capitalize()}, **'{extracted_word}'** is **'{translated_word}'**.\n\n**Definition:** {definition}\n**Explanation in {target_lang.capitalize()}:** {translated_definition}"
+                        except:
+                            response_text = f"In {target_lang.capitalize()}, **'{extracted_word}'** is **'{translated_word}'**.\n\n**Definition:** {definition}"
+                    else:
+                        response_text = f"In {target_lang.capitalize()}, **'{extracted_word}'** is **'{translated_word}'**."
+                        
+                    return return_response(response_text)
+        except Exception as fe:
+            Logger.error("Chat AI", f"Fast-path meaning failed, falling back: {fe}")
         
         # 1.5 Contextual Redirection: "I can't understand"
         if any(phrase in msg_clean for phrase in ["cant understand", "dont understand", "not understand", "explain this", "explain that", "what does this mean"]):
             if previous_response:
                 # If they mention a specific word from the previous response or just want an explanation
-                prompt = f"<|im_start|>system\nYou are a helpful Reading Assistant. The user did not understand your previous answer. Explain it more simply and clearly.\n"
-                prompt += f"Previous Answer: {previous_response}\n"
-                prompt += f"<|im_end|>\n<|im_start|>user\n{user_message}<|im_end|>\n<|im_start|>assistant\n"
+                system_instruction = "You are a helpful Reading Assistant. The user did not understand your previous answer. Explain it more simply and clearly. Respond in one or two short sentences."
+                
+                gemini_api_key = data.get("gemini_api_key", "").strip()
+                if not gemini_api_key:
+                    gemini_api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+                    if not gemini_api_key and os.path.exists(".env"):
+                        try:
+                            with open(".env", "r") as f:
+                                for line in f:
+                                    if "GEMINI_API_KEY" in line:
+                                        gemini_api_key = line.split("=")[-1].strip().strip('"').strip("'")
+                                        break
+                        except: pass
+                
+                if gemini_api_key:
+                    try:
+                        import google.generativeai as genai # type: ignore
+                        genai.configure(api_key=gemini_api_key)
+                        model = genai.GenerativeModel(
+                            model_name="gemini-1.5-flash",
+                            system_instruction=system_instruction
+                        )
+                        context_str = f"Previous Answer: {previous_response}\nUser message: {user_message}"
+                        response_text = model.generate_content(context_str).text
+                        if response_text:
+                            return return_response(response_text.strip())
+                    except Exception as ge:
+                        Logger.error("Chat AI", f"Gemini redirect failed: {ge}")
+
+                prompt = f"<|im_start|>system\n{system_instruction}\nPrevious Answer: {previous_response}\n<|im_end|>\n"
+                
+                # Few-shot logical training history for the small parameters model
+                prompt += "<|im_start|>user\nIf I forget my umbrella and it starts raining, what should I do?<|im_end|>\n"
+                prompt += "<|im_start|>assistant\nSince you forgot your umbrella, you should find shelter under a roof or cover yourself with a bag instead.<|im_end|>\n"
+                prompt += "<|im_start|>user\nIf I lost my keys and I am locked out of my house, should I look for my keys inside the living room?<|im_end|>\n"
+                prompt += "<|im_start|>assistant\nNo, since you are locked out of the house, you cannot search inside the living room.<|im_end|>\n"
+                prompt += "<|im_start|>user\nIf my phone is dead, how can I call my mom using it?<|im_end|>\n"
+                prompt += "<|im_start|>assistant\nSince your phone is dead, you cannot use it; you must charge it first or use another phone.<|im_end|>\n"
+                
+                prompt += f"<|im_start|>user\n{user_message}<|im_end|>\n<|im_start|>assistant\n"
                 
                 chat_model = get_chat_pipeline()
                 if chat_model:
-                    result = chat_model(prompt, max_new_tokens=150, do_sample=True, temperature=0.7)
+                    import torch # type: ignore
+                    with torch.inference_mode():
+                        result = chat_model(prompt, max_new_tokens=80, do_sample=False)
                     response = result[0]['generated_text'].split("assistant")[-1].strip()
                     response = response.replace("<|im_end|>", "").strip()
-                    return jsonify({"status": "success", "response": response})
+                    return return_response(response)
 
         msg_clean = user_message.strip("?.! ")
         
         # 1b. Fast Lookup (Added ML to fast list)
         if msg_clean in ["ml", "what is ml", "define ml"]:
-            return jsonify({"status": "success", "response": "ML stands for Machine Learning. It is a branch of Artificial Intelligence (AI) focused on building systems that learn from data and improve their accuracy over time without being explicitly programmed."})
+            return return_response("ML stands for Machine Learning. It is a branch of Artificial Intelligence (AI) focused on building systems that learn from data and improve their accuracy over time without being explicitly programmed.")
 
         if msg_clean in common_responses:
             response_text = common_responses[msg_clean]
             if response_text == "RANDOM_JOKE_TOKEN":
                 from ai_responses import get_random_joke
                 response_text = get_random_joke()
-            return jsonify({"status": "success", "response": response_text})
+            return return_response(response_text)
 
         # 1c. Check Dynamic Learned Knowledge (Self-Trained Data)
         learned_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'learned_responses.json')
@@ -4737,16 +5007,70 @@ def ai_chat():
             try:
                 with open(learned_path, 'r', encoding='utf-8') as f:
                     learned_data = json.load(f)
-                if msg_clean in learned_data:
-                    return jsonify({"status": "success", "response": learned_data[msg_clean]})
+                matched_res = find_related_learned_response(user_message_orig, learned_data)
+                if matched_res:
+                    return return_response(matched_res)
             except: pass
 
-        # 2. Fast Definition for Single Words
+        # 2. Fast Definition lookup for words/phrases (using Dictionary API if online)
+        extracted_word = None
+        msg_clean_lower = msg_clean.lower().strip()
+        
+        # Match patterns like:
+        # "meaning of X", "meaning for X", "definition of X", "definition for X"
+        m = re.search(r'\b(?:meaning|definition)\s+(?:of|for)\s+([a-zA-Z\s-]+)$', msg_clean_lower)
+        if m:
+            extracted_word = m.group(1).strip()
+            
+        # "define X"
+        if not extracted_word:
+            m = re.search(r'^define\s+([a-zA-Z\s-]+)$', msg_clean_lower)
+            if m:
+                extracted_word = m.group(1).strip()
+                
+        # "what does X mean"
+        if not extracted_word:
+            m = re.search(r'^what\s+does\s+([a-zA-Z\s-]+)\s+mean$', msg_clean_lower)
+            if m:
+                extracted_word = m.group(1).strip()
+                
+        # "what is X" / "what is a X" / "what is an X" (only if X is not a common question word/phrase)
+        if not extracted_word:
+            m = re.search(r'^what\s+is\s+(?:an?|the)?\s*([a-zA-Z\s-]+)$', msg_clean_lower)
+            if m:
+                candidate = m.group(1).strip()
+                # Exclude common complex query patterns
+                if candidate not in ["it", "this", "that", "there", "here", "doing", "happening", "going on"] and len(candidate.split()) <= 2:
+                    extracted_word = candidate
+
+        # If it was a single alphabetic word, that also counts!
         words = user_message.strip().split()
-        if len(words) == 1 and words[0].isalpha():
-            word = words[0]
-            definition = f"'{word}' is a word that means different things depending on context. Generally, it refers to its common dictionary definition. For example, 'love' is a deep feeling of affection."
-            return jsonify({"status": "success", "response": definition})
+        if not extracted_word and len(words) == 1 and words[0].isalpha():
+            extracted_word = words[0]
+
+        if extracted_word and len(extracted_word.split()) <= 3:
+            word = extracted_word.strip()
+            definition = None
+            try:
+                dict_url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{word}"
+                api_res = requests.get(dict_url, timeout=2.0)
+                if api_res.status_code == 200:
+                    dict_data = api_res.json()
+                    definition = dict_data[0]['meanings'][0]['definitions'][0]['definition']
+            except: pass
+            
+            if definition:
+                if chat_lang and chat_lang != "en":
+                    try:
+                        translated_def = GoogleTranslator(source='en', target=chat_lang).translate(definition)
+                        translated_word = GoogleTranslator(source='en', target=chat_lang).translate(word)
+                        response_text = f"**'{word}'** ({translated_word}): {definition}\n\n**Translation:** {translated_def}"
+                        return return_response(response_text)
+                    except: pass
+                return return_response(f"**'{word}'**: {definition}")
+            elif len(words) == 1:
+                definition = f"'{word}' is a word that means different things depending on context. Generally, it refers to its common dictionary definition. For example, 'love' is a deep feeling of affection."
+                return return_response(definition)
 
         # 3. Fetch Context (Optimized)
         library_context = "no books yet"
@@ -4764,23 +5088,110 @@ def ai_chat():
                 if sentences:
                     keywords = [w.lower() for w in user_message.split() if len(w) > 3]
                     found = [s for s in sentences if any(k in s.lower() for k in keywords)]
-                    relevant_context = " ".join(found[:5]) if found else " ".join(sentences[:5])
+                    # 🎯 FIX: Only provide context if we found ACTUAL matches. 
+                    # Defaulting to the first 2 sentences of a book for a greeting like "Hi" causes irrelevant answers.
+                    relevant_context = " ".join(found[:2]) if found else ""
             except: pass
         
         if conn: conn.close()
         conn = None
 
         # 4. Generate AI Answer
+        gemini_api_key = data.get("gemini_api_key", "").strip()
+        if not gemini_api_key:
+            gemini_api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+            if not gemini_api_key and os.path.exists(".env"):
+                try:
+                    with open(".env", "r") as f:
+                        for line in f:
+                            if "GEMINI_API_KEY" in line:
+                                gemini_api_key = line.split("=")[-1].strip().strip('"').strip("'")
+                                break
+                except: pass
+
+        sys_msg = "You are a helpful Reading Assistant. Keep your answers EXTREMELY concise and direct. Respond in ONE SENTENCE MAXIMUM. Avoid monologues."
+        
+        # STICKY LANGUAGE ENFORCEMENT
+        lang_instruction = ""
+        if chat_lang and chat_lang != "en":
+            curr_lang_name = next((name for name, code in supported_langs.items() if code == chat_lang), "the requested language").capitalize()
+            lang_instruction = f" Respond ONLY in {curr_lang_name}."
+
+        if gemini_api_key:
+            try:
+                import google.generativeai as genai # type: ignore
+                genai.configure(api_key=gemini_api_key)
+                system_instruction = f"{sys_msg}{lang_instruction}"
+                
+                context_str = f"Library: {library_context}\n"
+                if context_title: context_str += f"Active Book: {context_title}\n"
+                if relevant_context: context_str += f"Context: {relevant_context}\n"
+                context_str += f"User message: {user_message}"
+                
+                model = genai.GenerativeModel(
+                    model_name="gemini-1.5-flash",
+                    system_instruction=system_instruction
+                )
+                response_text = model.generate_content(
+                    context_str,
+                    generation_config={"temperature": 0.1}
+                ).text
+                if response_text:
+                    resp_clean = response_text.strip()
+                    save_learned_response(user_message_orig, resp_clean)
+                    return return_response(resp_clean)
+            except Exception as ge:
+                Logger.error("Chat AI", f"Gemini API generation failed, falling back to local: {ge}")
+
         chat_model = get_chat_pipeline()
         if chat_model:
-            # 🚀 OPTIMIZATION: Keep answers concise and direct to avoid over-explaining
-            prompt = f"<|im_start|>system\nYou are a helpful Reading Assistant. Keep your answers concise, direct, and conversational. Avoid long monologues.\n"
-            prompt += f"Library: {library_context}\n"
+            prompt = f"<|im_start|>system\n{sys_msg}{lang_instruction}\n"
+            
+            # --- DYNAMIC PROMPT OPTIMIZATION ---
+            # 1. Exclude Library book list unless user explicitly asks about books/library
+            include_library = any(word in user_message for word in ["book", "library", "read", "author", "pdf", "epub", "what do i have", "my books"])
+            if include_library:
+                prompt += f"Library: {library_context}\n"
+                
             if context_title: prompt += f"Active Book: {context_title}\n"
             if relevant_context: prompt += f"Context: {relevant_context}\n"
-            prompt += f"<|im_end|>\n<|im_start|>user\n{user_message}<|im_end|>\n<|im_start|>assistant\n"
+            prompt += "<|im_end|>\n"
             
-            result = chat_model(prompt, max_new_tokens=120, do_sample=True, temperature=0.7, top_p=0.9, pad_token_id=50256)
+            # 2. Add few-shots based on query type to keep prefill latency low and guide output format
+            logical_keywords = ["if", "should", "can i", "how can i", "how do i", "what if", "what should", "forget", "forgot", "lost", "lose", "lock", "locked", "dead", "broken", "empty", "no", "not", "without", "cant", "cannot", "unable"]
+            include_fewshot = any(word in user_message for word in logical_keywords)
+            
+            informative_keywords = ["why", "how", "explain", "describe", "what is", "what are", "what does"]
+            include_informative = any(word in user_message for word in informative_keywords)
+            
+            max_tokens = 20
+            
+            if include_fewshot:
+                # Compressed Short Few-Shots for faster logical processing and higher reasoning accuracy
+                prompt += "<|im_start|>user\nForgot umbrella in rain?<|im_end|>\n"
+                prompt += "<|im_start|>assistant\nFind shelter or cover yourself; you cannot use a missing umbrella.<|im_end|>\n"
+                prompt += "<|im_start|>user\nLocked out, look inside?<|im_end|>\n"
+                prompt += "<|im_start|>assistant\nNo, you cannot search inside if you are locked out.<|im_end|>\n"
+                prompt += "<|im_start|>user\nPhone dead, call mom?<|im_end|>\n"
+                prompt += "<|im_start|>assistant\nYou cannot use a dead phone; charge it first or borrow another phone.<|im_end|>\n"
+                prompt += "<|im_start|>user\nPhone battery 1%, urgent call needed?<|im_end|>\n"
+                prompt += "<|im_start|>assistant\nMake the call immediately before it dies, then charge your phone or borrow another.<|im_end|>\n"
+                max_tokens = 35 # Enough tokens for a complete logical sentence
+            elif include_informative:
+                # Informative few-shots to prevent empty introductory sentences ("for several reasons")
+                prompt += "<|im_start|>user\nWhy do we sleep?<|im_end|>\n"
+                prompt += "<|im_start|>assistant\nWe sleep to restore energy, support brain function, and repair cells.<|im_end|>\n"
+                prompt += "<|im_start|>user\nHow does rain form?<|im_end|>\n"
+                prompt += "<|im_start|>assistant\nRain forms when water vapor condenses in clouds and falls as liquid droplets.<|im_end|>\n"
+                prompt += "<|im_start|>user\nWhy do leaves turn yellow?<|im_end|>\n"
+                prompt += "<|im_start|>assistant\nLeaves turn yellow because chlorophyll breaks down when sunlight decreases.<|im_end|>\n"
+                max_tokens = 25 # Give enough tokens for a complete informative sentence
+            
+            prompt += f"<|im_start|>user\n{user_message}<|im_end|>\n<|im_start|>assistant\n"
+            
+            import torch # type: ignore
+            with torch.inference_mode():
+                result = chat_model(prompt, max_new_tokens=max_tokens, do_sample=False, pad_token_id=50256)
             full_text = result[0]['generated_text']
             
             response = full_text.split("assistant")[-1].strip() if "assistant" in full_text.lower() else full_text.replace(prompt, "").strip()
@@ -4789,17 +5200,29 @@ def ai_chat():
             for stop in ["User:", "System:", "Instruction:", "Human:", "Context:", "<|im_start|>", "<|im_end|>", "\nUser", "\nSystem"]:
                 if stop in response: response = response.split(stop)[0].strip()
 
-            if not any(response.endswith(m) for m in ['.', '!', '?']): response += "."
+            # Clean trailing incomplete sentences / clauses for better quality
+            if not any(response.endswith(m) for m in ['.', '!', '?']):
+                last_punc_idx = max(response.rfind('.'), response.rfind('!'), response.rfind('?'))
+                if last_punc_idx != -1:
+                    response = response[:last_punc_idx + 1]
+                else:
+                    response += "."
+            
+            # Strip semantically empty trailing connectors like "and.", "but.", "or.", "so.", "then."
+            # These appear when the model runs out of tokens mid-conjunction
+            _trailing_conjunctions = ['and.', 'but.', 'or.', 'so.', 'then.', 'also.', 'yet.', 'nor.']
+            for _conj in _trailing_conjunctions:
+                if response.lower().endswith(' ' + _conj):
+                    # Trim the conjunction and close the previous sentence properly
+                    response = response[: -(len(_conj) + 1)].rstrip(', ') + '.'
+                    break
 
             # 5. DYNAMIC LEARNING
-            if len(response) > 10:
-                learned_data[msg_clean] = response
-                try:
-                    with open(learned_path, 'w', encoding='utf-8') as f:
-                        json.dump(learned_data, f, ensure_ascii=False, indent=2)
-                except: pass
+            save_learned_response(user_message_orig, response)
 
-            return jsonify({"status": "success", "response": response})
+            # 6. QUALITY CONTROL: If the response is in English but the user requested another language,
+            # we perform a neural translation pass to ensure the "Sticky Language" experience is perfect.
+            return return_response(response)
         
         return jsonify({"status": "error", "message": "AI Engine initializing..."}), 503
 

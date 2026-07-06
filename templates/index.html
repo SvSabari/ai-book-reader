@@ -2013,6 +2013,23 @@
                         <option value="">General Chat</option>
                         <!-- Populated by JS -->
                     </select>
+
+                    <!-- Language Selection Dropdown for Chat -->
+                    <select id="chatLanguageSelector" class="chat-book-selector" onchange="window._chatLanguage = this.value; showUploadToast('🌐 Speech & Chat language: ' + this.options[this.selectedIndex].text, 'info')" onclick="event.stopPropagation()" style="margin-left: 6px; max-width: 120px;">
+                        <option value="en">English</option>
+                        <option value="ta">Tamil (தமிழ்)</option>
+                        <option value="hi">Hindi (हिन्दी)</option>
+                        <option value="te">Telugu (తెలుగు)</option>
+                        <option value="kn">Kannada (ಕನ್ನಡ)</option>
+                        <option value="ml">Malayalam (മലയാളം)</option>
+                        <option value="bn">Bengali (বাংলা)</option>
+                        <option value="mr">Marathi (मराठी)</option>
+                        <option value="gu">Gujarati (ગુજરાતી)</option>
+                        <option value="pa">Punjabi (ਪੰਜਾਬੀ)</option>
+                        <option value="fr">French (Français)</option>
+                        <option value="es">Spanish (Español)</option>
+                        <option value="de">German (Deutsch)</option>
+                    </select>
                 </div>
                 <div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
                     <button onclick="event.stopPropagation(); minimizeAIChat()" title="Minimize" style="background: rgba(255,255,255,0.05); border: none; color: var(--text-light); cursor: pointer; font-size: 1rem; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; transition: all 0.2s; flex-shrink: 0;">

@@ -15,13 +15,22 @@ common_responses = {
     "good evening": "Good evening! Ready to wind down with a book?",
     "yo": "Yo! What's up?",
     "sup": "Not much! Just ready to help you read. What's on your mind?",
-    "who are you": "I am your AI Reading Assistant, designed to help you understand books and manage your library.",
     "your name": "I'm the AI Reading Assistant. You can just call me 'Assistant'.",
+    "what is your name": "I'm the AI Reading Assistant. You can just call me 'Assistant'.",
+    "who are you": "I am your AI Reading Assistant, designed to help you understand books and manage your library.",
     "who made you": "I was created to be your ultimate AI reading companion.",
     "are you a robot": "I'm an AI assistant, but I love books as much as any human!",
     "what are you doing": "I'm helping you read and understand your books! How can I assist you right now?",
     "what's up": "Not much, just ready to help you explore your library!",
     "how are you": "I'm doing great! Ready to help you with your reading. How are you?",
+    
+    # --- TANGLISH / REGIONAL SUPPORT ---
+    "ena pandra": "I'm helping you read and explore your books! How can I assist you right now?",
+    "enna panra": "I'm helping you read and explore your books! How can I assist you right now?",
+    "eppadi iruka": "I'm doing very well! Ready to help you with your library. How about you?",
+    "nalla irukiya": "Yes, I'm doing great! Ready to assist you. What are we reading today?",
+    "sapteya": "I'm an AI, I don't eat, but I'm powered up and ready to help you read!",
+    "enna puringala": "I'm helping you with your books. What would you like to know?",
     
     # --- APP & LIBRARY SUPPORT ---
     "what is this app": "This is AI Book Reader, your personal library where AI helps you read, understand, and translate books instantly.",
@@ -294,7 +303,16 @@ common_responses = {
     "tell me a joke": "Why did the book go to the hospital? Because it had a broken spine!",
     "fun fact": "Reading for 6 minutes can reduce stress by 68%.",
     "bye": "Goodbye! Happy reading!",
-    "night": "Good night! Sweet dreams."
+    "night": "Good night! Sweet dreams.",
+    
+    # --- LOGICAL REASONING FIXES ---
+    "if i forget my umbrella and it starts raining what should i do": "If you forgot your umbrella and it starts raining, try to find shelter, wait until the rain slows, borrow an umbrella, or use a jacket/bag to cover yourself.",
+    "if i forget my umbrella and it starts raining, what should i do": "If you forgot your umbrella and it starts raining, try to find shelter, wait until the rain slows, borrow an umbrella, or use a jacket/bag to cover yourself.",
+    "what should i do if i forget my umbrella and it starts raining": "If you forgot your umbrella and it starts raining, try to find shelter, wait until the rain slows, borrow an umbrella, or use a jacket/bag to cover yourself.",
+    "what should i do if i forget my umbrella when it rains": "If you forgot your umbrella and it starts raining, try to find shelter, wait until the rain slows, borrow an umbrella, or use a jacket/bag to cover yourself.",
+    "what if it rains and i forgot my umbrella": "If you forgot your umbrella and it starts raining, try to find shelter, wait until the rain slows, borrow an umbrella, or use a jacket/bag to cover yourself.",
+    "what if it starts raining and i forget my umbrella": "If you forgot your umbrella and it starts raining, try to find shelter, wait until the rain slows, borrow an umbrella, or use a jacket/bag to cover yourself.",
+    "what if it starts raining and i forgot my umbrella": "If you forgot your umbrella and it starts raining, try to find shelter, wait until the rain slows, borrow an umbrella, or use a jacket/bag to cover yourself."
 }
 
 # --- ADDING CATEGORICAL DATA PROGRAMMATICALLY ---

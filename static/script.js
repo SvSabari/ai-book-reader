@@ -115,6 +115,7 @@ window.activeTranslationJob = 0;
 window.currentTargetLang = 'orig';
 window.currentReadingNode = null;
 window.currentReadingOffsetInNode = 0;
+window.currentReadingStopIndex = -1;
 window.speechSyncNext = false;
 
 // Preload Storyteller Assets
@@ -3541,7 +3542,8 @@ function stopSpeechKeepAlive() {
     }
 }
 
-async function resumeReadingFromIndex(index, startPaused = false, forceExactPosition = false) {
+async function resumeReadingFromIndex(index, startPaused = false, forceExactPosition = false, stopIndex = -1) {
+    window.currentReadingStopIndex = stopIndex;
     const playPauseBtn = document.getElementById("playPauseBtn");
     if (playPauseBtn && !startPaused) {
         playPauseBtn.innerHTML = `<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> <span>Preparing...</span>`;
@@ -3599,7 +3601,14 @@ async function resumeReadingFromIndex(index, startPaused = false, forceExactPosi
     // We must adjust the 'index' by the 'windowOffset' because globalReadingText
     // only contains the text of the currently mapped windowed pages.
     let localIndex = Math.max(0, index - windowOffset);
-    let remainingText = text.substring(localIndex, localIndex + 10000);
+    
+    // 🛑 SELECTION LIMIT: If reading a specific selection, limit the chunking window to that range.
+    let windowLimit = 10000;
+    if (stopIndex !== -1) {
+        windowLimit = Math.min(windowLimit, Math.max(0, stopIndex - windowOffset - localIndex));
+    }
+    
+    let remainingText = text.substring(localIndex, localIndex + windowLimit);
     let chunks = [];
     let lastSplit = 0;
 
@@ -3794,9 +3803,15 @@ async function resumeReadingFromIndex(index, startPaused = false, forceExactPosi
             if (jobId !== currentNarrationJobId) return;
             completedTasks++;
             if (completedTasks === totalTasks) {
+                // 🛑 SELECTION STOP: If we were reading a selection and reached the end of the chunks, stop now.
+                if (window.currentReadingStopIndex !== -1 && currentAbsoluteCharIndex >= window.currentReadingStopIndex - 10) {
+                    stopReading(true);
+                    return;
+                }
+
                 // CRITICAL COMPLETION LOGIC: Check if more text remains before stopping
                 if (currentAbsoluteCharIndex < globalReadingText.length - 100) {
-                    resumeReadingFromIndex(currentAbsoluteCharIndex, false, true);
+                    resumeReadingFromIndex(currentAbsoluteCharIndex, false, true, window.currentReadingStopIndex);
                 } else {
                     stopReading(true);
                 }
@@ -3825,6 +3840,7 @@ async function resumeReadingFromIndex(index, startPaused = false, forceExactPosi
 let currentNarrationJobId = 0;
 
 function stopReading(isComplete = false) {
+    window.currentReadingStopIndex = -1;
     currentNarrationJobId++; // Lethal: Instantly invalidates all pending async callbacks
     window.speechSynthesis.resume();
     window.speechSynthesis.cancel();
@@ -4251,15 +4267,19 @@ function readSelectedText() {
         rebuildReadingNodeMap();
 
         const nodeIdx = globalTextNodes.indexOf(range.startContainer);
-        if (nodeIdx !== -1) {
+        const endNodeIdx = globalTextNodes.indexOf(range.endContainer);
+
+        if (nodeIdx !== -1 && endNodeIdx !== -1) {
             const absIndex = globalNodeOffsets[nodeIdx] + range.startOffset;
+            const absEndIndex = globalNodeOffsets[endNodeIdx] + range.endOffset;
 
             // Clean up UI and start engine
             let toolbar = document.getElementById("selectionToolbar");
             if (toolbar) toolbar.style.display = "none";
             selection.removeAllRanges();
 
-            resumeReadingFromIndex(absIndex, false, true);
+            // 🛑 STOP INDEX: Pass the exact end of selection to ensure we don't read beyond it.
+            resumeReadingFromIndex(absIndex, false, true, absEndIndex);
             return;
         }
     } catch (e) {
@@ -5501,6 +5521,13 @@ function playNextFallback(startPaused = false, isRetry = false) {
     currentFallbackAudio = audio;
 
     currentAbsoluteCharIndex = item.offset;
+
+    // 🛑 SELECTION STOP: If we reached or passed the requested stop point, kill narration immediately.
+    if (window.currentReadingStopIndex !== -1 && currentAbsoluteCharIndex >= window.currentReadingStopIndex - 5) {
+        stopReading(true);
+        return;
+    }
+
     removeReadingMarks();
 
     // Only cancel native speech on the FIRST attempt to avoid AbortError loops on retries
@@ -6784,23 +6811,57 @@ async function handleAIQuery(query, type) {
     }
 }
 
+window.stopAIChatVoice = function() {
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+    if (window._chatAudio) {
+        window._chatAudio.pause();
+        window._chatAudio = null;
+    }
+};
+
 function speakAIResponse(text) {
-    window.speechSynthesis.cancel();
-    let utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = 1.0;
-    utterance.pitch = 1.1; // Slightly higher AI voice
+    window.stopAIChatVoice();
+    
+    // Clean text: strip markdown characters
+    let cleanText = text
+        .replace(/\*\*/g, "")
+        .replace(/\*/g, "")
+        .replace(/`/g, "")
+        .replace(/<[^>]*>/g, "") // Strip any HTML tags
+        .trim();
 
-    // Find a clear natural voice
-    const voices = window.speechSynthesis.getVoices();
-    let aiVoice = voices.find(v => v.name.includes("Google") && v.lang.startsWith("en")) ||
-        voices.find(v => v.name.includes("Natural")) ||
-        voices.find(v => v.lang.startsWith("en-US"));
+    if (!cleanText) return;
 
-    if (aiVoice) utterance.voice = aiVoice;
+    // Detect script and language code
+    let lang = "en";
+    if (/[\u0B80-\u0BFF]/.test(cleanText)) {
+        lang = "ta";
+    } else if (/[\u0900-\u097F]/.test(cleanText)) {
+        lang = "hi";
+    } else if (/[\u0C00-\u0C7F]/.test(cleanText)) {
+        lang = "te";
+    } else if (/[\u0C80-\u0CFF]/.test(cleanText)) {
+        lang = "kn";
+    } else if (/[\u0D00-\u0D7F]/.test(cleanText)) {
+        lang = "ml";
+    } else if (/[\u0980-\u09FF]/.test(cleanText)) {
+        lang = "bn";
+    } else {
+        lang = window._chatLanguage || "en";
+    }
 
-    utterance.onend = () => {
-    };
-    window.speechSynthesis.speak(utterance);
+    const gender = window.currentNarratorGender || "female";
+    const url = `/tts?lang=${lang}&text=${encodeURIComponent(cleanText)}&gender=${gender}`;
+
+    const audio = new Audio(url);
+    window._chatAudio = audio;
+    audio.play().catch(err => {
+        console.error("Chat TTS play failed:", err);
+        // Fallback to local speechSynthesis if server-side TTS fails
+        let utterance = new SpeechSynthesisUtterance(cleanText);
+        utterance.lang = lang;
+        window.speechSynthesis.speak(utterance);
+    });
 }
 
 
@@ -8206,7 +8267,7 @@ function toggleAIChat() {
         modal.style.display = 'none';
         
         // 🔇 Stop AI from talking immediately
-        if (window.speechSynthesis) window.speechSynthesis.cancel();
+        if (window.stopAIChatVoice) window.stopAIChatVoice();
         
         if (isChatVoiceActive) stopChatVoice();
         if (chatAbortController) {
@@ -8298,6 +8359,10 @@ async function sendChatMessage(overrideText = null) {
         if (data.status === 'success') {
             if (data.new_chat_lang) {
                 window._chatLanguage = data.new_chat_lang;
+                const selector = document.getElementById('chatLanguageSelector');
+                if (selector) {
+                    selector.value = data.new_chat_lang;
+                }
                 showUploadToast(`🌐 Chat language changed to: ${data.lang_name || data.new_chat_lang}`, "success");
             }
             window._lastAIResponse = data.response;
@@ -8331,6 +8396,28 @@ function stopAIChatThinking() {
     }
 }
 
+function formatMarkdown(text) {
+    if (!text) return "";
+    let escaped = text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    
+    // Parse bold **text**
+    escaped = escaped.replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>");
+    
+    // Parse italic *text*
+    escaped = escaped.replace(/\*(.*?)\*/g, "<em>$1</em>");
+    
+    // Parse inline code `text`
+    escaped = escaped.replace(/`(.*?)`/g, "<code>$1</code>");
+    
+    // Parse newlines to <br/>
+    escaped = escaped.replace(/\n/g, "<br/>");
+    
+    return escaped;
+}
+
 function appendChatMessage(sender, text, id = null) {
     const container = document.getElementById('chatMessages');
     const msgDiv = document.createElement('div');
@@ -8350,6 +8437,7 @@ function appendChatMessage(sender, text, id = null) {
     bubble.style.wordBreak = 'break-word';
     bubble.style.fontSize = '0.95rem';
     bubble.style.lineHeight = '1.4';
+    bubble.style.textAlign = 'left';
     
     if (sender === 'user') {
         bubble.style.background = 'var(--primary)';
@@ -8360,7 +8448,7 @@ function appendChatMessage(sender, text, id = null) {
         bubble.style.border = '1px solid var(--glass-border)';
     }
 
-    bubble.innerText = text;
+    bubble.innerHTML = formatMarkdown(text);
     msgDiv.appendChild(bubble);
 
     // Add Voice Controls for AI messages
@@ -8381,7 +8469,7 @@ function appendChatMessage(sender, text, id = null) {
                     style="background:rgba(181, 130, 101, 0.08); border:none; border-radius:8px; cursor:pointer; color:var(--text-main); padding: 8px; display:inline-flex; align-items:center; justify-content:center; transition:0.2s; opacity:0.8;">
                 ${volumeIcon}
             </button>
-            <button onclick="window.speechSynthesis.cancel()" 
+            <button onclick="window.stopAIChatVoice()" 
                     title="Stop Voice"
                     style="background:rgba(239, 68, 68, 0.05); border:none; border-radius:8px; cursor:pointer; color:#ef4444; padding: 8px; display:inline-flex; align-items:center; justify-content:center; transition:0.2s; opacity:0.8;"
                     onmouseover="this.style.background='rgba(239, 68, 68, 0.12)'; this.style.opacity='1'" onmouseout="this.style.background='rgba(239, 68, 68, 0.05)'; this.style.opacity='0.8'">
@@ -8408,6 +8496,7 @@ function toggleChatVoice() {
 }
 
 function startChatVoice() {
+    if (window.stopAIChatVoice) window.stopAIChatVoice();
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
         alert("Voice recognition not supported in this browser.");
@@ -8420,13 +8509,29 @@ function startChatVoice() {
         chatRecognition.interimResults = true;
     }
 
-    // DYNAMIC LANGUAGE SYNC: Update recognition language to match current chat setting
-    const currentLang = window._chatLanguage || 'en';
+    // DYNAMIC LANGUAGE SYNC: Update recognition language to match current chat setting, fallback to reader language
+    let currentLang = window._chatLanguage;
+    if (!currentLang && typeof getSelectedLanguage === 'function') {
+        const appLang = getSelectedLanguage();
+        if (appLang) {
+            currentLang = appLang.split('-')[0].toLowerCase();
+        }
+    }
+    if (!currentLang) currentLang = 'en';
+
     const langCodes = {
         'en': 'en-US', 'ta': 'ta-IN', 'hi': 'hi-IN', 'te': 'te-IN', 
-        'ml': 'ml-IN', 'bn': 'bn-IN', 'mr': 'mr-IN'
+        'ml': 'ml-IN', 'bn': 'bn-IN', 'mr': 'mr-IN', 'kn': 'kn-IN',
+        'gu': 'gu-IN', 'pa': 'pa-IN', 'fr': 'fr-FR', 'es': 'es-ES',
+        'de': 'de-DE'
     };
     chatRecognition.lang = langCodes[currentLang] || 'en-US';
+    
+    // Sync UI Selector
+    const selector = document.getElementById('chatLanguageSelector');
+    if (selector) {
+        selector.value = currentLang;
+    }
 
     chatRecognition.onresult = (event) => {
         let final_transcript = '';
